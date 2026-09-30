@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<main>
+  <header class="topbar">
+    <a class="brand" href="/">MinePage</a>
+    <nav id="nav"></nav>
+  </header>
+
+  <h1>上传你的页面</h1>
+  <p class="sub">上传一个 HTML 文件，起个名字，就得到一个地址。</p>
+
+  <div id="needLogin" class="result" hidden>
+    需要先登录才能上传。 <a href="/login">去登录或注册</a>
+  </div>
+
+  <form id="form" novalidate hidden>
+    <label class="field">
+      <span class="label">名字</span>
+      <div class="slug">
+        <span class="prefix">/</span>
+        <input id="name" type="text" placeholder="mypage1" autocomplete="off"
+               spellcheck="false" maxlength="40">
+      </div>
+      <span class="hint">小写字母、数字、连字符，3–32 位</span>
+    </label>
+
+    <div class="field">
+      <span class="label">HTML 文件</span>
+      <div id="drop" class="drop">
+        <input id="file" type="file" accept=".html,.htm,text/html" hidden>
+        <span id="dropText">点击选择，或把 .html 文件拖到这里</span>
+      </div>
+      <span class="hint">CSS 和 JS 请内嵌在这一个文件里</span>
+    </div>
+
+    <button id="submit" type="submit" class="block">上传</button>
+  </form>
+
+  <div id="result" class="result" hidden></div>
+
+  <section id="mySites" hidden>
+    <h2>我的页面</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>名字</th>
+          <th>大小</th>
+          <th>状态</th>
+          <th>更新时间</th>
+        </tr>
+      </thead>
+      <tbody id="siteBody"></tbody>
+    </table>
+  </section>
+</main>
+
+<script>
+const nav = document.getElementById('nav');
+const needLogin = document.getElementById('needLogin');
+const form = document.getElementById('form');
+const nameInput = document.getElementById('name');
+const fileInput = document.getElementById('file');
+const drop = document.getElementById('drop');
+const dropText = document.getElementById('dropText');
+const submit = document.getElementById('submit');
+const result = document.getElementById('result');
+const mySites = document.getElementById('mySites');
+const siteBody = document.getElementById('siteBody');
+
+let picked = null;
+
+function setPicked(file) {
+  picked = file || null;
+  if (picked) {
+    drop.classList.add('ready');
+    drop.classList.remove('over');
+    dropText.textContent = picked.name;
+  } else {
+    drop.classList.remove('ready');
+    dropText.textContent = '点击选择，或把 .html 文件拖到这里';
+  }
+}
+
+function showResult(ok, html) {
+  result.hidden = false;
+  result.className = 'result ' + (ok ? 'ok' : 'err');
+  result.innerHTML = html;
+}
+
+const fmtSize = (n) => (n < 1024 ? n + ' B' : (n / 1024).toFixed(1) + ' KB');
+
+drop.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => setPicked(fileInput.files[0]));
+
+['dragenter', 'dragover'].forEach((type) => {
+  drop.addEventListener(type, (e) => {
+    e.preventDefault();
+    drop.classList.add('over');
+  });
+});
+
+['dragleave', 'dragend'].forEach((type) => {
+  drop.addEventListener(type, () => drop.classList.remove('over'));
+});
+
+drop.addEventListener('drop', (e) => {
+  e.preventDefault();
+  drop.classList.remove('over');
+  const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (file) setPicked(file);
+});
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  result.hidden = true;
+
+  if (!picked) {
+    showResult(false, '先选一个 HTML 文件');
+    return;
+  }
+
+  submit.disabled = true;
+  submit.textContent = '上传中…';
+
+  try {
+    const html = await picked.text();
+    const res = await fetch('/api/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: nameInput.value, html: html }),
+    });
+    const data = await res.json();
+
+    if (data.ok) {
+      const url = data.url;
+      showResult(true, '好了。地址是 <a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>');
+      form.reset();
+      setPicked(null);
+      loadSites();
+    } else {
+      showResult(false, data.message || '上传失败');
+    }
+  } catch (err) {
+    showResult(false, '网络出问题了：' + err.message);
+  } finally {
+    submit.disabled = false;
+    submit.textContent = '上传';
+  }
+});
+
+async function loadSites() {
+  try {
+    const res = await fetch('/api/sites');
+    const data = await res.json();
+    if (!data.ok) {
+      mySites.hidden = true;
+      return;
+    }
+
+    mySites.hidden = false;
+    siteBody.textContent = '';
+
+    if (data.sites.length === 0) {
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 4;
+      cell.className = 'empty';
+      cell.textContent = '还没有上传过页面';
+      row.appendChild(cell);
+      siteBody.appendChild(row);
+      return;
+    }
+
+    data.sites.forEach((site) => {
+      const row = document.createElement('tr');
+
+      const nameCell = document.createElement('td');
+      const link = document.createElement('a');
+      link.href = '/' + site.name;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.textContent = '/' + site.name;
+      nameCell.appendChild(link);
+      row.appendChild(nameCell);
+
+      const sizeCell = document.createElement('td');
+      sizeCell.textContent = fmtSize(site.size);
+      row.appendChild(sizeCell);
+
+      const statusCell = document.createElement('td');
+      const tag = document.createElement('span');
+      tag.className = 'badge' + (site.status === 'active' ? ' ok' : ' bad');
+      tag.textContent = site.status === 'active' ? '正常' : '已下线';
+      statusCell.appendChild(tag);
+      row.appendChild(statusCell);
+
+      const timeCell = document.createElement('td');
+      timeCell.textContent = new Date(site.updated_at).toLocaleString('zh-CN');
+      row.appendChild(timeCell);
+
+      siteBody.appendChild(row);
+    });
+  } catch {
+    mySites.hidden = true;
+  }
+}
+
+async function loadMe() {
+  let me = null;
+
+  try {
+    const res = await fetch('/api/me');
+    me = (await res.json()).user;
+  } catch {
+    me = null;
+  }
+
+  nav.textContent = '';
+
+  if (!me) {
+    const link = document.createElement('a');
+    link.href = '/login';
+    link.textContent = '登录 / 注册';
+    nav.appendChild(link);
+
+    form.hidden = true;
+    needLogin.hidden = false;
+    mySites.hidden = true;
+    return;
+  }
+
+  const label = document.createElement('span');
+  label.textContent = me.username || me.email;
+  nav.appendChild(label);
+
+  if (me.isAdmin) {
+    const adminLink = document.createElement('a');
+    adminLink.href = '/admin';
+    adminLink.textContent = '管理后台';
+    nav.appendChild(adminLink);
+  }
+
+  const logout = document.createElement('button');
+  logout.type = 'button';
+  logout.className = 'ghost tiny';
+  logout.textContent = '退出';
+  logout.addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    location.reload();
+  });
+  nav.appendChild(logout);
+
+  form.hidden = false;
+  needLogin.hidden = true;
+  loadSites();
+}
+
+loadMe();
+</script>
+</body>
+</html>

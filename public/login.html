@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<main class="narrow">
+  <h1 class="center">MinePage</h1>
+  <p class="sub center">登录，或者注册一个新账号。</p>
+
+  <div class="tabs">
+    <button type="button" class="tab active" id="tabLogin">登录</button>
+    <button type="button" class="tab" id="tabRegister">注册</button>
+  </div>
+
+  <form id="loginForm" novalidate>
+    <label class="field">
+      <span class="label">邮箱或用户名</span>
+      <input id="loginId" type="text" autocomplete="username" placeholder="you@example.com">
+    </label>
+    <label class="field">
+      <span class="label">密码</span>
+      <input id="loginPassword" type="password" autocomplete="current-password">
+    </label>
+    <button type="submit" class="block" id="loginSubmit">登录</button>
+  </form>
+
+  <form id="registerForm" novalidate hidden>
+    <label class="field">
+      <span class="label">邮箱</span>
+      <input id="registerEmail" type="email" autocomplete="email" placeholder="you@example.com">
+    </label>
+    <label class="field">
+      <span class="label">密码</span>
+      <input id="registerPassword" type="password" autocomplete="new-password">
+      <span class="hint">至少 6 位</span>
+    </label>
+    <button type="submit" class="block" id="registerSubmit">注册</button>
+  </form>
+
+  <div id="msg" class="result" hidden></div>
+</main>
+
+<script>
+const tabLogin = document.getElementById('tabLogin');
+const tabRegister = document.getElementById('tabRegister');
+const loginForm = document.getElementById('loginForm');
+const registerForm = document.getElementById('registerForm');
+const msg = document.getElementById('msg');
+
+function switchTab(which) {
+  const isLogin = which === 'login';
+  tabLogin.classList.toggle('active', isLogin);
+  tabRegister.classList.toggle('active', !isLogin);
+  loginForm.hidden = !isLogin;
+  registerForm.hidden = isLogin;
+  msg.hidden = true;
+}
+
+tabLogin.addEventListener('click', () => switchTab('login'));
+tabRegister.addEventListener('click', () => switchTab('register'));
+
+function showMsg(ok, text) {
+  msg.hidden = false;
+  msg.className = 'result ' + (ok ? 'ok' : 'err');
+  msg.textContent = text;
+}
+
+async function post(url, payload) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return res.json();
+}
+
+loginForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const button = document.getElementById('loginSubmit');
+  button.disabled = true;
+
+  try {
+    const data = await post('/api/auth/login', {
+      login: document.getElementById('loginId').value,
+      password: document.getElementById('loginPassword').value,
+    });
+
+    if (data.ok) {
+      showMsg(true, '登录成功，正在跳转…');
+      location.href = data.user && data.user.isAdmin ? '/admin' : '/';
+    } else {
+      showMsg(false, data.message || '登录失败');
+    }
+  } catch (err) {
+    showMsg(false, '网络出问题了：' + err.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+registerForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const button = document.getElementById('registerSubmit');
+  button.disabled = true;
+
+  try {
+    const data = await post('/api/auth/register', {
+      email: document.getElementById('registerEmail').value,
+      password: document.getElementById('registerPassword').value,
+    });
+
+    if (data.ok) {
+      showMsg(true, '注册成功，正在跳转…');
+      location.href = '/';
+    } else {
+      showMsg(false, data.message || '注册失败');
+    }
+  } catch (err) {
+    showMsg(false, '网络出问题了：' + err.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+if (location.search.includes('tab=register')) switchTab('register');
+</script>
+</body>
+</html>

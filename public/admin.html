@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>管理后台 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<main class="wide">
+  <header class="topbar">
+    <a class="brand" href="/">MinePage</a>
+    <nav>
+      <span id="who"></span>
+      <a href="/">上传页</a>
+      <button type="button" class="ghost tiny" id="logout">退出</button>
+    </nav>
+  </header>
+
+  <h1>管理后台</h1>
+  <p class="sub" id="summary"></p>
+
+  <section>
+    <h2>用户</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>账号</th>
+          <th>角色</th>
+          <th>状态</th>
+          <th>注册时间</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="usersBody"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>页面</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>名字</th>
+          <th>归属</th>
+          <th>大小</th>
+          <th>状态</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="sitesBody"></tbody>
+    </table>
+  </section>
+
+  <div id="msg" class="result" hidden></div>
+</main>
+
+<script>
+const usersBody = document.getElementById('usersBody');
+const sitesBody = document.getElementById('sitesBody');
+const summary = document.getElementById('summary');
+const who = document.getElementById('who');
+const msg = document.getElementById('msg');
+
+let hideTimer = null;
+
+function td(text, className) {
+  const cell = document.createElement('td');
+  if (className) cell.className = className;
+  cell.textContent = text;
+  return cell;
+}
+
+function badge(text, kind) {
+  const el = document.createElement('span');
+  el.className = 'badge' + (kind ? ' ' + kind : '');
+  el.textContent = text;
+  return el;
+}
+
+function tinyButton(label, className, handler) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'tiny ' + className;
+  button.textContent = label;
+  button.addEventListener('click', handler);
+  return button;
+}
+
+const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('zh-CN') : '—');
+const fmtSize = (n) => (n < 1024 ? n + ' B' : (n / 1024).toFixed(1) + ' KB');
+
+function showMsg(ok, text) {
+  msg.hidden = false;
+  msg.className = 'result ' + (ok ? 'ok' : 'err');
+  msg.textContent = text;
+
+  clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => { msg.hidden = true; }, 3000);
+}
+
+async function api(url, options) {
+  const res = await fetch(url, options);
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.message || '请求失败');
+  return data;
+}
+
+function renderUsers(users) {
+  usersBody.textContent = '';
+
+  if (users.length === 0) {
+    const row = document.createElement('tr');
+    const cell = td('还没有用户');
+    cell.colSpan = 6;
+    cell.className = 'empty';
+    row.appendChild(cell);
+    usersBody.appendChild(row);
+    return;
+  }
+
+  users.forEach((user) => {
+    const row = document.createElement('tr');
+    row.appendChild(td(String(user.id)));
+    row.appendChild(td(user.username || user.email, 'wrap'));
+
+    const roleCell = document.createElement('td');
+    roleCell.appendChild(badge(user.isAdmin ? '管理员' : '普通用户', user.isAdmin ? 'admin' : ''));
+    row.appendChild(roleCell);
+
+    const statusCell = document.createElement('td');
+    statusCell.appendChild(
+      badge(user.status === 'active' ? '正常' : '已封禁', user.status === 'active' ? 'ok' : 'bad'),
+    );
+    row.appendChild(statusCell);
+
+    row.appendChild(td(fmtTime(user.createdAt)));
+
+    const actions = document.createElement('td');
+    actions.className = 'actions';
+    actions.appendChild(
+      tinyButton(
+        user.status === 'active' ? '封禁' : '解封',
+        user.status === 'active' ? 'danger' : 'ghost',
+        () => setUserStatus(user.id, user.status === 'active' ? 'banned' : 'active'),
+      ),
+    );
+    row.appendChild(actions);
+
+    usersBody.appendChild(row);
+  });
+}
+
+function renderSites(sites) {
+  sitesBody.textContent = '';
+
+  if (sites.length === 0) {
+    const row = document.createElement('tr');
+    const cell = td('还没有页面');
+    cell.colSpan = 6;
+    cell.className = 'empty';
+    row.appendChild(cell);
+    sitesBody.appendChild(row);
+    return;
+  }
+
+  sites.forEach((site) => {
+    const row = document.createElement('tr');
+    row.appendChild(td(String(site.id)));
+
+    const nameCell = document.createElement('td');
+    const link = document.createElement('a');
+    link.href = '/' + site.name;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = '/' + site.name;
+    nameCell.appendChild(link);
+    row.appendChild(nameCell);
+
+    row.appendChild(td(site.owner_username || site.owner_email || '（无归属）', 'wrap'));
+    row.appendChild(td(fmtSize(site.size)));
+
+    const statusCell = document.createElement('td');
+    statusCell.appendChild(
+      badge(site.status === 'active' ? '正常' : '已下线', site.status === 'active' ? 'ok' : 'bad'),
+    );
+    row.appendChild(statusCell);
+
+    const actions = document.createElement('td');
+    actions.className = 'actions';
+    actions.appendChild(
+      tinyButton(
+        site.status === 'active' ? '下线' : '恢复',
+        'ghost',
+        () => setSiteStatus(site.id, site.status === 'active' ? 'offline' : 'active'),
+      ),
+    );
+    actions.appendChild(document.createTextNode(' '));
+    actions.appendChild(tinyButton('删除', 'danger', () => removeSite(site)));
+    row.appendChild(actions);
+
+    sitesBody.appendChild(row);
+  });
+}
+
+async function setUserStatus(id, status) {
+  try {
+    await api('/api/admin/users/' + id + '/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: status }),
+    });
+    showMsg(true, '已更新');
+    await loadAll();
+  } catch (err) {
+    showMsg(false, err.message);
+  }
+}
+
+async function setSiteStatus(id, status) {
+  try {
+    await api('/api/admin/sites/' + id + '/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: status }),
+    });
+    showMsg(true, '已更新');
+    await loadAll();
+  } catch (err) {
+    showMsg(false, err.message);
+  }
+}
+
+async function removeSite(site) {
+  if (!confirm('确定删除 /' + site.name + ' 吗？删了就找不回来了。')) return;
+
+  try {
+    await api('/api/admin/sites/' + site.id, { method: 'DELETE' });
+    showMsg(true, '已删除 /' + site.name);
+    await loadAll();
+  } catch (err) {
+    showMsg(false, err.message);
+  }
+}
+
+async function loadAll() {
+  try {
+    const results = await Promise.all([
+      api('/api/me'),
+      api('/api/admin/users'),
+      api('/api/admin/sites'),
+    ]);
+
+    const me = results[0];
+    const users = results[1];
+    const sites = results[2];
+
+    who.textContent = me.user.username || me.user.email;
+    summary.textContent = users.total + ' 个用户 · ' + sites.total + ' 个页面';
+
+    renderUsers(users.users);
+    renderSites(sites.sites);
+  } catch (err) {
+    showMsg(false, err.message);
+  }
+}
+
+document.getElementById('logout').addEventListener('click', async () => {
+  await fetch('/api/auth/logout', { method: 'POST' });
+  location.href = '/login';
+});
+
+loadAll();
+</script>
+</body>
+</html>
