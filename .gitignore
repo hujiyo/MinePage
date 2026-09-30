@@ -3,3 +3,6 @@ data/
 *.log
 .DS_Store
 .workbuddy/
+
+# 本地记忆文件，含项目内部决策，不进版本控制
+AGENTS.md
