@@ -240,6 +240,11 @@ async function loadMe() {
   label.textContent = me.username || me.email;
   nav.appendChild(label);
 
+  const settingsLink = document.createElement('a');
+  settingsLink.href = '/settings';
+  settingsLink.textContent = '设置';
+  nav.appendChild(settingsLink);
+
   if (me.isAdmin) {
     const adminLink = document.createElement('a');
     adminLink.href = '/admin';

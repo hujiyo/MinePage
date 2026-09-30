@@ -26,12 +26,22 @@
       <input id="loginPassword" type="password" autocomplete="current-password">
     </label>
     <button type="submit" class="block" id="loginSubmit">登录</button>
+    <p class="hint center"><a href="/forgot">忘记密码？</a></p>
   </form>
 
   <form id="registerForm" novalidate hidden>
     <label class="field">
       <span class="label">邮箱</span>
       <input id="registerEmail" type="email" autocomplete="email" placeholder="you@example.com">
+    </label>
+    <label class="field">
+      <span class="label">邮箱验证码</span>
+      <div class="code-row">
+        <input id="registerCode" inputmode="numeric" autocomplete="one-time-code"
+               maxlength="6" placeholder="6 位数字">
+        <button type="button" class="ghost" id="sendCode" disabled>发送验证码</button>
+      </div>
+      <span class="hint" id="codeHint">先填邮箱，再点「发送验证码」</span>
     </label>
     <label class="field">
       <span class="label">密码</span>
@@ -102,14 +112,80 @@ loginForm.addEventListener('submit', async (e) => {
   }
 });
 
+// ---------------- 注册：发送邮箱验证码 ----------------
+
+const sendCodeBtn = document.getElementById('sendCode');
+const codeHint = document.getElementById('codeHint');
+const registerEmail = document.getElementById('registerEmail');
+const registerCode = document.getElementById('registerCode');
+
+const emailOk = () => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(registerEmail.value.trim());
+
+let countdown = 0;
+let timer = null;
+
+function startCountdown(seconds) {
+  countdown = seconds;
+  sendCodeBtn.disabled = true;
+  timer = setInterval(() => {
+    countdown -= 1;
+    if (countdown <= 0) {
+      clearInterval(timer);
+      sendCodeBtn.disabled = !emailOk();
+      sendCodeBtn.textContent = '重新发送';
+    } else {
+      sendCodeBtn.textContent = countdown + ' 秒';
+    }
+  }, 1000);
+}
+
+registerEmail.addEventListener('input', () => {
+  if (countdown <= 0) sendCodeBtn.disabled = !emailOk();
+});
+
+sendCodeBtn.addEventListener('click', async () => {
+  if (!emailOk()) {
+    showMsg(false, '先填一个正确的邮箱');
+    return;
+  }
+
+  sendCodeBtn.disabled = true;
+  try {
+    const data = await post('/api/auth/send-code', {
+      purpose: 'register',
+      email: registerEmail.value.trim(),
+    });
+
+    if (data.ok) {
+      codeHint.textContent = data.dev
+        ? '验证码已生成（未配置 SMTP，请到服务器控制台查看）'
+        : '验证码已发送，10 分钟内有效';
+      startCountdown(60);
+    } else {
+      codeHint.textContent = data.message || '发送失败';
+      sendCodeBtn.disabled = false;
+    }
+  } catch (err) {
+    codeHint.textContent = '网络出问题了：' + err.message;
+    sendCodeBtn.disabled = false;
+  }
+});
+
 registerForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const button = document.getElementById('registerSubmit');
   button.disabled = true;
 
+  if (!/^\d{6}$/.test(registerCode.value.trim())) {
+    showMsg(false, '请输入 6 位邮箱验证码');
+    button.disabled = false;
+    return;
+  }
+
   try {
     const data = await post('/api/auth/register', {
-      email: document.getElementById('registerEmail').value,
+      email: registerEmail.value.trim(),
+      code: registerCode.value.trim(),
       password: document.getElementById('registerPassword').value,
     });
 

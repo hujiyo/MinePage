@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>账号设置 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<main class="narrow">
+  <header class="topbar">
+    <a class="brand" href="/">MinePage</a>
+    <nav>
+      <a href="/">上传页</a>
+      <button type="button" class="ghost tiny" id="logout">退出</button>
+    </nav>
+  </header>
+
+  <h1>账号设置</h1>
+  <p class="sub" id="who">加载中…</p>
+
+  <form id="form" novalidate hidden>
+    <label class="field">
+      <span class="label">当前密码</span>
+      <input id="currentPassword" type="password" autocomplete="current-password">
+    </label>
+
+    <label class="field">
+      <span class="label">邮箱验证码</span>
+      <div class="code-row">
+        <input id="code" inputmode="numeric" autocomplete="one-time-code"
+               maxlength="6" placeholder="6 位数字">
+        <button type="button" class="ghost" id="sendCode">发送验证码</button>
+      </div>
+      <span class="hint" id="codeHint">发送到上面的绑定邮箱，10 分钟内有效</span>
+    </label>
+
+    <label class="field">
+      <span class="label">新密码</span>
+      <input id="newPassword" type="password" autocomplete="new-password">
+      <span class="hint">至少 6 位，且不能和当前密码一样</span>
+    </label>
+
+    <button type="submit" class="block" id="submit">修改密码</button>
+  </form>
+
+  <div id="msg" class="result" hidden></div>
+</main>
+
+<script>
+const form = document.getElementById('form');
+const msg = document.getElementById('msg');
+const who = document.getElementById('who');
+const codeInput = document.getElementById('code');
+const sendCodeBtn = document.getElementById('sendCode');
+const codeHint = document.getElementById('codeHint');
+
+function showMsg(ok, text) {
+  msg.hidden = false;
+  msg.className = 'result ' + (ok ? 'ok' : 'err');
+  msg.textContent = text;
+}
+
+async function post(url, payload) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return res.json();
+}
+
+let countdown = 0;
+let timer = null;
+
+function startCountdown(seconds) {
+  countdown = seconds;
+  sendCodeBtn.disabled = true;
+  timer = setInterval(() => {
+    countdown -= 1;
+    if (countdown <= 0) {
+      clearInterval(timer);
+      sendCodeBtn.disabled = false;
+      sendCodeBtn.textContent = '重新发送';
+    } else {
+      sendCodeBtn.textContent = countdown + ' 秒';
+    }
+  }, 1000);
+}
+
+sendCodeBtn.addEventListener('click', async () => {
+  sendCodeBtn.disabled = true;
+  try {
+    const data = await post('/api/auth/send-code', { purpose: 'change' });
+
+    if (data.ok) {
+      codeHint.textContent = data.dev
+        ? '验证码已生成（未配置 SMTP，请到服务器控制台查看）'
+        : '验证码已发送，10 分钟内有效';
+      startCountdown(60);
+    } else {
+      codeHint.textContent = data.message || '发送失败';
+      sendCodeBtn.disabled = false;
+    }
+  } catch (err) {
+    codeHint.textContent = '网络出问题了：' + err.message;
+    sendCodeBtn.disabled = false;
+  }
+});
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+
+  if (!/^\d{6}$/.test(codeInput.value.trim())) {
+    showMsg(false, '请输入 6 位邮箱验证码');
+    return;
+  }
+
+  const button = document.getElementById('submit');
+  button.disabled = true;
+
+  try {
+    const data = await post('/api/auth/password', {
+      currentPassword: document.getElementById('currentPassword').value,
+      code: codeInput.value.trim(),
+      newPassword: document.getElementById('newPassword').value,
+    });
+
+    if (data.ok) {
+      showMsg(true, '密码已修改，其他设备已被退出登录');
+      form.reset();
+    } else {
+      showMsg(false, data.message || '修改失败');
+    }
+  } catch (err) {
+    showMsg(false, '网络出问题了：' + err.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById('logout').addEventListener('click', async () => {
+  await fetch('/api/auth/logout', { method: 'POST' });
+  location.href = '/';
+});
+
+(async () => {
+  try {
+    const res = await fetch('/api/me');
+    const data = await res.json();
+
+    if (!data.user) {
+      location.href = '/login';
+      return;
+    }
+
+    who.textContent = '登录账号：' + data.user.email;
+    form.hidden = false;
+  } catch {
+    who.textContent = '加载失败，刷新试试';
+  }
+})();
+</script>
+</body>
+</html>
