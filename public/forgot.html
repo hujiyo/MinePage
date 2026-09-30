@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>找回密码 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<main class="narrow">
+  <h1 class="center">找回密码</h1>
+  <p class="sub center">输入注册邮箱，用收到的验证码设置新密码。</p>
+
+  <form id="form" novalidate>
+    <label class="field">
+      <span class="label">注册邮箱</span>
+      <input id="email" type="email" autocomplete="email" placeholder="you@example.com">
+    </label>
+
+    <label class="field">
+      <span class="label">邮箱验证码</span>
+      <div class="code-row">
+        <input id="code" inputmode="numeric" autocomplete="one-time-code"
+               maxlength="6" placeholder="6 位数字">
+        <button type="button" class="ghost" id="sendCode">发送验证码</button>
+      </div>
+      <span class="hint" id="codeHint"></span>
+    </label>
+
+    <label class="field">
+      <span class="label">新密码</span>
+      <input id="password" type="password" autocomplete="new-password">
+      <span class="hint">至少 6 位</span>
+    </label>
+
+    <button type="submit" class="block" id="submit">重置密码</button>
+  </form>
+
+  <div id="done" class="result ok" hidden>
+    密码已经改好，其他登录过的设备都会被退出。 <a href="/login">去用新密码登录</a>
+  </div>
+
+  <div id="msg" class="result" hidden></div>
+
+  <p class="hint center" style="margin-top: 26px;"><a href="/login">返回登录</a></p>
+</main>
+
+<script>
+const form = document.getElementById('form');
+const done = document.getElementById('done');
+const msg = document.getElementById('msg');
+const emailInput = document.getElementById('email');
+const codeInput = document.getElementById('code');
+const passwordInput = document.getElementById('password');
+const sendCodeBtn = document.getElementById('sendCode');
+const codeHint = document.getElementById('codeHint');
+
+function showMsg(ok, text) {
+  msg.hidden = false;
+  msg.className = 'result ' + (ok ? 'ok' : 'err');
+  msg.textContent = text;
+}
+
+const emailOk = () => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailInput.value.trim());
+
+let countdown = 0;
+let timer = null;
+
+function startCountdown(seconds) {
+  countdown = seconds;
+  sendCodeBtn.disabled = true;
+  timer = setInterval(() => {
+    countdown -= 1;
+    if (countdown <= 0) {
+      clearInterval(timer);
+      sendCodeBtn.disabled = !emailOk();
+      sendCodeBtn.textContent = '重新发送';
+    } else {
+      sendCodeBtn.textContent = countdown + ' 秒';
+    }
+  }, 1000);
+}
+
+emailInput.addEventListener('input', () => {
+  if (countdown <= 0) sendCodeBtn.disabled = !emailOk();
+});
+
+async function post(url, payload) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return res.json();
+}
+
+sendCodeBtn.addEventListener('click', async () => {
+  if (!emailOk()) {
+    showMsg(false, '先填一个正确的邮箱');
+    return;
+  }
+
+  sendCodeBtn.disabled = true;
+  try {
+    // 服务端不区分邮箱存不存在，回复永远一样；没收到就去翻垃圾箱
+    const data = await post('/api/auth/forgot-password', { email: emailInput.value.trim() });
+
+    if (data.ok) {
+      codeHint.textContent = '如果这个邮箱注册过，验证码已发出，10 分钟内有效';
+      startCountdown(60);
+    } else {
+      codeHint.textContent = data.message || '发送失败';
+      sendCodeBtn.disabled = false;
+    }
+  } catch (err) {
+    codeHint.textContent = '网络出问题了：' + err.message;
+    sendCodeBtn.disabled = false;
+  }
+});
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+
+  if (!emailOk()) {
+    showMsg(false, '邮箱格式不对');
+    return;
+  }
+  if (!/^\d{6}$/.test(codeInput.value.trim())) {
+    showMsg(false, '请输入 6 位邮箱验证码');
+    return;
+  }
+  if (passwordInput.value.length < 6) {
+    showMsg(false, '新密码至少 6 位');
+    return;
+  }
+
+  const button = document.getElementById('submit');
+  button.disabled = true;
+
+  try {
+    const data = await post('/api/auth/reset-password', {
+      email: emailInput.value.trim(),
+      code: codeInput.value.trim(),
+      password: passwordInput.value,
+    });
+
+    if (data.ok) {
+      form.hidden = true;
+      done.hidden = false;
+    } else {
+      showMsg(false, data.message || '重置失败');
+    }
+  } catch (err) {
+    showMsg(false, '网络出问题了：' + err.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

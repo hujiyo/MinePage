@@ -141,6 +141,10 @@ button.tiny { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
 .drop:hover, .drop.over { border-color: var(--accent); background: var(--panel); }
 .drop.ready { border-style: solid; border-color: var(--ok); color: var(--text); }
 
+.code-row { display: flex; gap: 10px; }
+.code-row input { flex: 1; letter-spacing: 2px; }
+.code-row button { white-space: nowrap; flex-shrink: 0; }
+
 .tabs { display: flex; gap: 8px; margin-bottom: 24px; }
 .tab { flex: 1; background: transparent; color: var(--muted); border: 1px solid var(--border); }
 .tab.active { background: var(--panel); color: var(--text); border-color: var(--accent); }

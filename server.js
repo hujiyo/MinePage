@@ -16,21 +16,25 @@ import {
 import { checkName } from './lib/names.js';
 import { absoluteUrlForSite, siteNameFromRequest } from './lib/addressing.js';
 import { closeDb } from './lib/db.js';
-import { buildCookie, parseCookies, looksLikeEmail } from './lib/auth.js';
+import { buildCookie, parseCookies, looksLikeEmail, verifyPassword } from './lib/auth.js';
 import {
   authenticate,
   countUsers,
   createSession,
   createUser,
   deleteExpiredSessions,
+  deleteOtherSessions,
   deleteSession,
   ensureAdminAccount,
   findSessionUser,
+  findUserById,
   findUserByLogin,
   listUsers,
   publicUser,
   setUserStatus,
+  updateUserPassword,
 } from './lib/users.js';
+import { issueCode, consumeCode } from './lib/verification.js';
 import {
   countSites,
   createSite,
@@ -212,6 +216,22 @@ async function handleAdminPage(req, res) {
   await sendPage(res, 'admin.html');
 }
 
+async function handleSettingsPage(req, res) {
+  if (!currentUser(req)) {
+    sendRedirect(res, '/login');
+    return;
+  }
+  await sendPage(res, 'settings.html');
+}
+
+async function handleForgotPage(req, res) {
+  if (currentUser(req)) {
+    sendRedirect(res, '/');
+    return;
+  }
+  await sendPage(res, 'forgot.html');
+}
+
 async function handleAsset(req, res, [file]) {
   // 只放行单层文件名，杜绝 ../ 之类的穿越
   if (!/^[a-zA-Z0-9._-]+$/.test(file) || file.includes('..')) {
@@ -238,33 +258,6 @@ async function handleMe(req, res) {
   sendJson(res, 200, { ok: true, user: currentUser(req) });
 }
 
-async function handleRegister(req, res) {
-  const body = await readBody(req, res);
-  if (!body) return;
-
-  const email = String(body.email ?? '').trim().toLowerCase();
-  const password = String(body.password ?? '');
-
-  if (!looksLikeEmail(email)) {
-    sendJson(res, 400, { ok: false, message: '邮箱格式不对' });
-    return;
-  }
-  if (password.length < PASSWORD_MIN) {
-    sendJson(res, 400, { ok: false, message: `密码至少 ${PASSWORD_MIN} 位` });
-    return;
-  }
-  if (findUserByLogin(email)) {
-    sendJson(res, 409, { ok: false, message: '这个邮箱已经注册过了' });
-    return;
-  }
-
-  const user = createUser({ email, password });
-  const token = createSession(user.id);
-  setSessionCookie(res, token, SESSION_TTL_DAYS * 86400);
-
-  sendJson(res, 201, { ok: true, user: publicUser(user) });
-}
-
 async function handleLogin(req, res) {
   const body = await readBody(req, res);
   if (!body) return;
@@ -289,6 +282,206 @@ async function handleLogin(req, res) {
 async function handleLogout(req, res) {
   deleteSession(sessionToken(req));
   setSessionCookie(res, '', 0);
+  sendJson(res, 200, { ok: true });
+}
+
+// ---------------------------------------------------------------- 验证码与密码
+
+const CODE_PATTERN = /^\d{6}$/;
+
+/**
+ * 发验证码。purpose:
+ *   register — 注册新邮箱，邮箱不能已被注册
+ *   reset    — 找回密码，邮箱不存在时静默不发（回复统一，防探测）
+ *   change   — 已登录用户给自己绑定的邮箱发
+ */
+async function handleSendCode(req, res) {
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const purpose = String(body.purpose ?? '');
+
+  if (purpose === 'register' || purpose === 'reset') {
+    const email = String(body.email ?? '').trim().toLowerCase();
+    if (!looksLikeEmail(email)) {
+      sendJson(res, 400, { ok: false, message: '邮箱格式不对' });
+      return;
+    }
+
+    if (purpose === 'register') {
+      if (findUserByLogin(email)) {
+        sendJson(res, 409, { ok: false, message: '这个邮箱已经注册过了' });
+        return;
+      }
+      const result = await issueCode(email, purpose);
+      if (!result.ok) {
+        sendJson(res, 429, { ok: false, message: result.message });
+        return;
+      }
+      sendJson(res, 200, { ok: true, dev: result.dev });
+      return;
+    }
+
+    // reset：不管邮箱存不存在，回复都一样，避免被人拿来探测哪些邮箱注册过
+    const user = findUserByLogin(email);
+    if (user) await issueCode(email, purpose);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (purpose === 'change') {
+    const user = requireLogin(req, res);
+    if (!user) return;
+
+    const result = await issueCode(user.email, purpose);
+    if (!result.ok) {
+      sendJson(res, 429, { ok: false, message: result.message });
+      return;
+    }
+    sendJson(res, 200, { ok: true, dev: result.dev });
+    return;
+  }
+
+  sendJson(res, 400, { ok: false, message: '未知的验证码用途' });
+}
+
+/** 注册：现在必须带邮箱验证码。 */
+async function handleRegister(req, res) {
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const email = String(body.email ?? '').trim().toLowerCase();
+  const password = String(body.password ?? '');
+  const code = String(body.code ?? '').trim();
+
+  if (!looksLikeEmail(email)) {
+    sendJson(res, 400, { ok: false, message: '邮箱格式不对' });
+    return;
+  }
+  if (password.length < PASSWORD_MIN) {
+    sendJson(res, 400, { ok: false, message: `密码至少 ${PASSWORD_MIN} 位` });
+    return;
+  }
+  if (!CODE_PATTERN.test(code)) {
+    sendJson(res, 400, { ok: false, message: '请输入 6 位邮箱验证码' });
+    return;
+  }
+  if (findUserByLogin(email)) {
+    sendJson(res, 409, { ok: false, message: '这个邮箱已经注册过了' });
+    return;
+  }
+
+  const verified = consumeCode(email, 'register', code);
+  if (!verified.ok) {
+    sendJson(res, 400, { ok: false, message: verified.message });
+    return;
+  }
+
+  const user = createUser({ email, password });
+  const token = createSession(user.id);
+  setSessionCookie(res, token, SESSION_TTL_DAYS * 86400);
+
+  sendJson(res, 201, { ok: true, user: publicUser(user) });
+}
+
+/** 找回密码第一步：要验证码。邮箱不存在时不报错，防探测。 */
+async function handleForgotPassword(req, res) {
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const email = String(body.email ?? '').trim().toLowerCase();
+  if (!looksLikeEmail(email)) {
+    sendJson(res, 400, { ok: false, message: '邮箱格式不对' });
+    return;
+  }
+
+  if (findUserByLogin(email)) {
+    await issueCode(email, 'reset');
+  }
+
+  sendJson(res, 200, { ok: true });
+}
+
+/** 找回密码第二步：验证码 + 新密码。成功后该用户所有旧会话全部失效。 */
+async function handleResetPassword(req, res) {
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const email = String(body.email ?? '').trim().toLowerCase();
+  const code = String(body.code ?? '').trim();
+  const password = String(body.password ?? '');
+
+  if (!looksLikeEmail(email) || !CODE_PATTERN.test(code)) {
+    sendJson(res, 400, { ok: false, message: '邮箱或验证码不对' });
+    return;
+  }
+  if (password.length < PASSWORD_MIN) {
+    sendJson(res, 400, { ok: false, message: `密码至少 ${PASSWORD_MIN} 位` });
+    return;
+  }
+
+  const user = findUserByLogin(email);
+  if (!user) {
+    sendJson(res, 400, { ok: false, message: '验证码不对或已过期' });
+    return;
+  }
+
+  const verified = consumeCode(email, 'reset', code);
+  if (!verified.ok) {
+    sendJson(res, 400, { ok: false, message: verified.message });
+    return;
+  }
+
+  updateUserPassword(user.id, password);
+  deleteOtherSessions(user.id);
+  sendJson(res, 200, { ok: true });
+}
+
+/**
+ * 登录用户改密码（设置页）：当前密码 + 邮箱验证码 + 新密码。
+ * 成功后踢掉其他设备的会话，保留当前这一个。
+ */
+async function handleChangePassword(req, res) {
+  const session = currentUser(req);
+  if (!session) {
+    sendJson(res, 401, { ok: false, message: '请先登录' });
+    return;
+  }
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const currentPassword = String(body.currentPassword ?? '');
+  const code = String(body.code ?? '').trim();
+  const newPassword = String(body.newPassword ?? '');
+
+  if (newPassword.length < PASSWORD_MIN) {
+    sendJson(res, 400, { ok: false, message: `新密码至少 ${PASSWORD_MIN} 位` });
+    return;
+  }
+  if (newPassword === currentPassword) {
+    sendJson(res, 400, { ok: false, message: '新密码不能和当前密码一样' });
+    return;
+  }
+
+  const row = findUserById(session.id);
+  if (!row || !verifyPassword(currentPassword, row.password_hash)) {
+    sendJson(res, 400, { ok: false, message: '当前密码不对' });
+    return;
+  }
+
+  if (!CODE_PATTERN.test(code)) {
+    sendJson(res, 400, { ok: false, message: '请输入 6 位邮箱验证码' });
+    return;
+  }
+  const verified = consumeCode(row.email, 'change', code);
+  if (!verified.ok) {
+    sendJson(res, 400, { ok: false, message: verified.message });
+    return;
+  }
+
+  updateUserPassword(row.id, newPassword);
+  deleteOtherSessions(row.id, sessionToken(req));
   sendJson(res, 200, { ok: true });
 }
 
@@ -443,12 +636,18 @@ const ROUTES = [
   ['GET', /^\/$/, handleRoot],
   ['GET', /^\/login$/, handleLoginPage],
   ['GET', /^\/admin$/, handleAdminPage],
+  ['GET', /^\/settings$/, handleSettingsPage],
+  ['GET', /^\/forgot$/, handleForgotPage],
   ['GET', /^\/_assets\/([a-zA-Z0-9._-]+)$/, handleAsset],
 
   ['GET', /^\/api\/me$/, handleMe],
   ['POST', /^\/api\/auth\/register$/, handleRegister],
   ['POST', /^\/api\/auth\/login$/, handleLogin],
   ['POST', /^\/api\/auth\/logout$/, handleLogout],
+  ['POST', /^\/api\/auth\/send-code$/, handleSendCode],
+  ['POST', /^\/api\/auth\/password$/, handleChangePassword],
+  ['POST', /^\/api\/auth\/forgot-password$/, handleForgotPassword],
+  ['POST', /^\/api\/auth\/reset-password$/, handleResetPassword],
 
   ['GET', /^\/api\/sites$/, handleMySites],
   ['POST', /^\/api\/upload$/, handleUpload],
