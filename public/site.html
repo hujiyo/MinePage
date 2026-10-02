@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>编辑站点 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<main class="wide">
+  <header class="topbar">
+    <a class="brand" href="/">MinePage</a>
+    <nav id="nav"></nav>
+  </header>
+
+  <div class="row">
+    <h1>编辑 <span id="siteName" style="font-family:ui-monospace,Menlo,Consolas,monospace"></span></h1>
+    <button type="button" class="ghost" disabled title="后续接入智能体辅助编辑">智能体助手（未接入）</button>
+  </div>
+  <!-- 智能体辅助编辑的挂载点：页面按「单页 HTML / 多页文件」两种模式组织，
+       未来在这里调用智能体改写 textarea 内容或批量生成文件即可。 -->
+  <p class="sub" id="siteMeta"></p>
+
+  <!-- 站点设置：标题 / 简介 / 内容标签，之后社区广场按这些信息展示 -->
+  <section id="metaSection" hidden>
+    <h2>站点设置</h2>
+    <label class="field">
+      <span class="label">站点标题</span>
+      <input id="metaTitle" type="text" maxlength="80" placeholder="比如：张三的个人简历">
+      <span class="hint">页面管理卡片和社区广场里展示的名字，最多 80 字</span>
+    </label>
+    <label class="field">
+      <span class="label">站点简介</span>
+      <textarea id="metaDesc" class="area" maxlength="300"
+                placeholder="一两句话介绍这个站点是做什么的"></textarea>
+      <span class="hint">最多 300 字，留空表示清除</span>
+    </label>
+    <label class="field">
+      <span class="label">内容标签</span>
+      <select id="metaTag"></select>
+      <span class="hint">标记站点类型，之后社区按标签归类展示</span>
+    </label>
+    <button type="button" id="metaSave">保存设置</button>
+  </section>
+
+  <!-- 单页站：直接编辑 HTML -->
+  <section id="singleSection" hidden>
+    <label class="field">
+      <span class="label">HTML 内容</span>
+      <textarea id="htmlEditor" spellcheck="false"></textarea>
+      <span class="hint">保存后刷新访问页即可看到效果</span>
+    </label>
+    <button type="button" id="htmlSave">保存</button>
+  </section>
+
+  <!-- 多页站：文件管理 -->
+  <section id="multiSection" hidden>
+    <h2>文件</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>路径</th>
+          <th>大小</th>
+          <th>更新时间</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="fileBody"></tbody>
+    </table>
+
+    <div class="field" style="margin-top:18px">
+      <span class="label">添加 / 覆盖文件</span>
+      <div class="row">
+        <input id="addFile" type="file" hidden>
+        <button type="button" class="ghost" id="addPick">选择文件</button>
+        <span id="addText" class="muted">以文件自身的名字存入站点根目录</span>
+      </div>
+      <span class="hint">单文件 ≤ 10 MB；同名文件会被覆盖</span>
+    </div>
+    <button type="button" id="addSubmit" disabled>上传文件</button>
+  </section>
+
+  <!-- 文本文件编辑器（多页站里点「编辑」弹出） -->
+  <section id="fileEditorSection" hidden>
+    <h2>正在编辑 <span id="editingPath" style="font-family:ui-monospace,Menlo,Consolas,monospace"></span></h2>
+    <label class="field">
+      <textarea id="fileEditor" spellcheck="false"></textarea>
+      <span class="hint">只有文本文件能在线编辑；图片等二进制文件请用「添加 / 覆盖文件」替换</span>
+    </label>
+    <div class="row">
+      <button type="button" id="fileSave">保存文件</button>
+      <button type="button" class="ghost" id="fileCancel">关闭</button>
+    </div>
+  </section>
+
+  <div id="msg" class="result" hidden></div>
+</main>
+
+<script>
+const nav = document.getElementById('nav');
+
+// /edit/:name
+const siteName = decodeURIComponent(location.pathname.split('/')[2] || '');
+document.getElementById('siteName').textContent = siteName ? '/' + siteName : '';
+
+let site = null;        // 站点详情
+let editingPath = null; // 多页站里正在编辑的文件路径
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
+}
+
+function fmtSize(n) {
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+  return n + ' B';
+}
+
+function showMsg(ok, html) {
+  const msg = document.getElementById('msg');
+  msg.hidden = false;
+  msg.className = 'result ' + (ok ? 'ok' : 'err');
+  msg.innerHTML = html;
+}
+
+// ---------------------------------------------------------------- 导航
+
+async function renderNav() {
+  nav.textContent = '';
+
+  let me = null;
+  try {
+    me = (await (await fetch('/api/me')).json()).user;
+  } catch { me = null; }
+  if (!me) {
+    location.href = '/login';
+    return null;
+  }
+
+  const label = document.createElement('span');
+  label.textContent = me.username || me.email;
+  nav.appendChild(label);
+
+  const home = document.createElement('a');
+  home.href = '/';
+  home.textContent = '上传页面';
+  nav.appendChild(home);
+
+  const accountLink = document.createElement('a');
+  accountLink.href = '/account';
+  accountLink.textContent = '个人中心';
+  nav.appendChild(accountLink);
+
+  const sitesLink = document.createElement('a');
+  sitesLink.href = '/sites';
+  sitesLink.textContent = '页面管理';
+  nav.appendChild(sitesLink);
+
+  if (me.isAdmin) {
+    const adminLink = document.createElement('a');
+    adminLink.href = '/admin';
+    adminLink.textContent = '管理后台';
+    nav.appendChild(adminLink);
+  }
+
+  const logout = document.createElement('button');
+  logout.type = 'button';
+  logout.className = 'ghost tiny';
+  logout.textContent = '退出';
+  logout.addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    location.href = '/login';
+  });
+  nav.appendChild(logout);
+}
+
+// ---------------------------------------------------------------- 加载站点
+
+async function loadSite() {
+  if (!siteName) {
+    showMsg(false, '地址不对，缺少站点名。去 <a href="/account">个人中心</a> 挑一个站点。');
+    return;
+  }
+
+  const res = await fetch('/api/sites/' + encodeURIComponent(siteName));
+  const data = await res.json();
+
+  if (!data.ok) {
+    showMsg(false, escapeHtml(data.message || '加载失败'));
+    return;
+  }
+
+  site = data.site;
+
+  const kind = site.kind === 'multi'
+    ? '多页站点 · ' + site.fileCount + ' 个文件'
+    : '单页站点';
+  const status = site.status === 'active' ? '正常' : '已下线';
+  const tagText = site.tagLabel ? ' · ' + escapeHtml(site.tagLabel) : '';
+  document.getElementById('siteMeta').innerHTML =
+    kind + tagText + ' · ' + status + ' · ' + fmtSize(site.size)
+    + ' · <a href="/' + encodeURIComponent(site.name) + '/" target="_blank" rel="noopener">访问站点</a>';
+
+  document.getElementById('singleSection').hidden = site.kind !== 'single';
+  document.getElementById('multiSection').hidden = site.kind !== 'multi';
+
+  fillMetaForm(data.tags);
+  fillMetaValues(site);
+  document.getElementById('metaSection').hidden = false;
+
+  if (site.kind === 'single') {
+    document.getElementById('htmlEditor').value = site.html;
+  } else {
+    loadFiles();
+  }
+}
+
+// ---------------------------------------------------------------- 站点设置
+
+function fillMetaForm(tags) {
+  const select = document.getElementById('metaTag');
+  select.textContent = '';
+
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = '未设置';
+  select.appendChild(none);
+
+  (tags || []).forEach((t) => {
+    const opt = document.createElement('option');
+    opt.value = t.key;
+    opt.textContent = t.label;
+    select.appendChild(opt);
+  });
+}
+
+function fillMetaValues(s) {
+  document.getElementById('metaTitle').value = s.title || '';
+  document.getElementById('metaDesc').value = s.description || '';
+  document.getElementById('metaTag').value = s.tag || '';
+}
+
+document.getElementById('metaSave').addEventListener('click', async (e) => {
+  const button = e.target;
+  button.disabled = true;
+
+  try {
+    const res = await fetch('/api/sites/' + encodeURIComponent(siteName) + '/meta', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: document.getElementById('metaTitle').value,
+        description: document.getElementById('metaDesc').value,
+        tag: document.getElementById('metaTag').value,
+      }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      site.title = data.title;
+      site.description = data.description;
+      site.tag = data.tag;
+      site.tagLabel = data.tagLabel;
+      showMsg(true, '站点设置已保存');
+    } else {
+      showMsg(false, escapeHtml(data.message || '保存失败'));
+    }
+  } catch (err) {
+    showMsg(false, '网络出问题了：' + escapeHtml(err.message));
+  } finally {
+    button.disabled = false;
+  }
+});
+
+// ---------------------------------------------------------------- 单页保存
+
+document.getElementById('htmlSave').addEventListener('click', async (e) => {
+  const button = e.target;
+  button.disabled = true;
+
+  try {
+    const res = await fetch('/api/sites/' + encodeURIComponent(siteName), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ html: document.getElementById('htmlEditor').value }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showMsg(true, '已保存（' + fmtSize(data.size) + '）。<a href="/'
+        + encodeURIComponent(siteName) + '/" target="_blank" rel="noopener">查看效果</a>');
+    } else {
+      showMsg(false, escapeHtml(data.message || '保存失败'));
+    }
+  } catch (err) {
+    showMsg(false, '网络出问题了：' + escapeHtml(err.message));
+  } finally {
+    button.disabled = false;
+  }
+});
+
+// ---------------------------------------------------------------- 多页：文件列表
+
+async function loadFiles() {
+  const res = await fetch('/api/sites/' + encodeURIComponent(siteName) + '/files');
+  const data = await res.json();
+  if (!data.ok) {
+    showMsg(false, escapeHtml(data.message || '文件列表加载失败'));
+    return;
+  }
+
+  const body = document.getElementById('fileBody');
+  body.textContent = '';
+
+  if (data.files.length === 0) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 4;
+    cell.className = 'empty';
+    cell.textContent = '还没有文件';
+    row.appendChild(cell);
+    body.appendChild(row);
+    return;
+  }
+
+  data.files.forEach((file) => {
+    const row = document.createElement('tr');
+
+    const pathCell = document.createElement('td');
+    pathCell.className = 'wrap';
+    pathCell.textContent = file.path;
+    row.appendChild(pathCell);
+
+    const sizeCell = document.createElement('td');
+    sizeCell.textContent = fmtSize(file.size);
+    row.appendChild(sizeCell);
+
+    const timeCell = document.createElement('td');
+    timeCell.textContent = new Date(file.updated_at).toLocaleString('zh-CN');
+    row.appendChild(timeCell);
+
+    const actionCell = document.createElement('td');
+    actionCell.className = 'actions';
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'ghost tiny';
+    editBtn.textContent = '编辑';
+    editBtn.addEventListener('click', () => openFileEditor(file.path));
+    actionCell.appendChild(editBtn);
+
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'danger tiny';
+    delBtn.textContent = '删除';
+    delBtn.addEventListener('click', async () => {
+      if (!confirm('确定删除 ' + file.path + ' ？')) return;
+      const res2 = await fetch(
+        '/api/sites/' + encodeURIComponent(siteName) + '/files?path='
+        + encodeURIComponent(file.path),
+        { method: 'DELETE' },
+      );
+      const data2 = await res2.json();
+      if (data2.ok) {
+        if (editingPath === file.path) closeFileEditor();
+        loadFiles();
+      } else {
+        showMsg(false, escapeHtml(data2.message || '删除失败'));
+      }
+    });
+    actionCell.appendChild(delBtn);
+
+    row.appendChild(actionCell);
+    body.appendChild(row);
+  });
+}
+
+// ---------------------------------------------------------------- 多页：文本文件编辑
+
+function closeFileEditor() {
+  editingPath = null;
+  document.getElementById('fileEditorSection').hidden = true;
+}
+
+async function openFileEditor(filePath) {
+  const res = await fetch(
+    '/api/sites/' + encodeURIComponent(siteName) + '/files/content?path='
+    + encodeURIComponent(filePath),
+  );
+  const data = await res.json();
+
+  if (!data.ok) {
+    showMsg(false, escapeHtml(data.message || '读取失败'));
+    return;
+  }
+  if (data.binary) {
+    showMsg(false, '这是二进制文件，不能在线编辑，用「添加 / 覆盖文件」替换它。');
+    return;
+  }
+
+  editingPath = filePath;
+  document.getElementById('editingPath').textContent = filePath;
+  document.getElementById('fileEditor').value = data.content;
+  document.getElementById('fileEditorSection').hidden = false;
+  document.getElementById('fileEditorSection').scrollIntoView({ behavior: 'smooth' });
+}
+
+document.getElementById('fileSave').addEventListener('click', async (e) => {
+  if (!editingPath) return;
+  const button = e.target;
+  button.disabled = true;
+
+  try {
+    const res = await fetch(
+      '/api/sites/' + encodeURIComponent(siteName) + '/files?path='
+      + encodeURIComponent(editingPath),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: document.getElementById('fileEditor').value,
+      },
+    );
+    const data = await res.json();
+    if (data.ok) {
+      showMsg(true, '已保存 ' + escapeHtml(editingPath) + '（' + fmtSize(data.size) + '）');
+      loadFiles();
+    } else {
+      showMsg(false, escapeHtml(data.message || '保存失败'));
+    }
+  } catch (err) {
+    showMsg(false, '网络出问题了：' + escapeHtml(err.message));
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById('fileCancel').addEventListener('click', closeFileEditor);
+
+// ---------------------------------------------------------------- 多页：添加/覆盖文件
+
+const addFile = document.getElementById('addFile');
+const addPick = document.getElementById('addPick');
+const addText = document.getElementById('addText');
+const addSubmit = document.getElementById('addSubmit');
+
+addPick.addEventListener('click', () => addFile.click());
+addFile.addEventListener('change', () => {
+  const file = addFile.files[0];
+  if (file) {
+    addText.textContent = file.name;
+    addSubmit.disabled = false;
+  } else {
+    addText.textContent = '以文件自身的名字存入站点根目录';
+    addSubmit.disabled = true;
+  }
+});
+
+addSubmit.addEventListener('click', async () => {
+  const file = addFile.files[0];
+  if (!file) return;
+
+  addSubmit.disabled = true;
+
+  try {
+    const res = await fetch(
+      '/api/sites/' + encodeURIComponent(siteName) + '/files?path='
+      + encodeURIComponent(file.name),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: await file.arrayBuffer(),
+      },
+    );
+    const data = await res.json();
+    if (data.ok) {
+      showMsg(true, '已上传 ' + escapeHtml(file.name));
+      addFile.value = '';
+      addText.textContent = '以文件自身的名字存入站点根目录';
+      addSubmit.disabled = true;
+      loadFiles();
+    } else {
+      showMsg(false, escapeHtml(data.message || '上传失败'));
+    }
+  } catch (err) {
+    showMsg(false, '网络出问题了：' + escapeHtml(err.message));
+  } finally {
+    addSubmit.disabled = false;
+  }
+});
+
+// ---------------------------------------------------------------- 启动
+
+renderNav();
+loadSite();
+</script>
+</body>
+</html>

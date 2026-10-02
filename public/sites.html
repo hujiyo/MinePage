@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>页面管理 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<main class="wide">
+  <header class="topbar">
+    <a class="brand" href="/">MinePage</a>
+    <nav id="nav"></nav>
+  </header>
+
+  <h1>页面管理</h1>
+  <p class="sub">这里是你发布过的所有页面，可以访问、编辑或删除。</p>
+
+  <!-- 统计条 -->
+  <div class="stats">
+    <div class="stat"><b id="statSites">–</b><span>站点</span></div>
+    <div class="stat"><b id="statFiles">–</b><span>文件</span></div>
+    <div class="stat"><b id="statSize">–</b><span>总大小</span></div>
+  </div>
+
+  <!-- 站点卡片 -->
+  <div id="siteCards" class="cards"></div>
+  <div id="sitesEmpty" class="empty" hidden>还没有页面，去 <a href="/">首页</a> 上传一个吧。</div>
+
+  <div id="msg" class="result" hidden></div>
+</main>
+
+<script>
+const nav = document.getElementById('nav');
+const msg = document.getElementById('msg');
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
+}
+
+function fmtSize(n) {
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+  return n + ' B';
+}
+
+function showMsg(ok, text) {
+  msg.hidden = false;
+  msg.className = 'result ' + (ok ? 'ok' : 'err');
+  msg.textContent = text;
+}
+
+// ---------------------------------------------------------------- 导航
+
+async function renderNav() {
+  nav.textContent = '';
+
+  let me = null;
+  try {
+    me = (await (await fetch('/api/me')).json()).user;
+  } catch { me = null; }
+
+  if (!me) {
+    location.href = '/login';
+    return null;
+  }
+
+  const label = document.createElement('span');
+  label.textContent = me.username || me.email;
+  nav.appendChild(label);
+
+  const home = document.createElement('a');
+  home.href = '/';
+  home.textContent = '上传页面';
+  nav.appendChild(home);
+
+  const accountLink = document.createElement('a');
+  accountLink.href = '/account';
+  accountLink.textContent = '个人中心';
+  nav.appendChild(accountLink);
+
+  if (me.isAdmin) {
+    const adminLink = document.createElement('a');
+    adminLink.href = '/admin';
+    adminLink.textContent = '管理后台';
+    nav.appendChild(adminLink);
+  }
+
+  const logout = document.createElement('button');
+  logout.type = 'button';
+  logout.className = 'ghost tiny';
+  logout.textContent = '退出';
+  logout.addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    location.href = '/login';
+  });
+  nav.appendChild(logout);
+
+  return me;
+}
+
+// ---------------------------------------------------------------- 站点卡片
+
+function renderSites(sites) {
+  const wrap = document.getElementById('siteCards');
+  const empty = document.getElementById('sitesEmpty');
+  wrap.textContent = '';
+  empty.hidden = sites.length !== 0;
+
+  let files = 0;
+  let size = 0;
+
+  sites.forEach((site) => {
+    files += site.fileCount;
+    size += site.totalSize;
+
+    const card = document.createElement('div');
+    card.className = 'card';
+
+    const title = document.createElement('h3');
+    title.textContent = site.title ? site.title : '/' + site.name;
+    card.appendChild(title);
+
+    const badges = document.createElement('div');
+    if (site.tag) {
+      const tagTag = document.createElement('span');
+      tagTag.className = 'badge tag';
+      tagTag.textContent = site.tagLabel;
+      badges.appendChild(tagTag);
+      badges.appendChild(document.createTextNode(' '));
+    }
+    const statusTag = document.createElement('span');
+    statusTag.className = 'badge' + (site.status === 'active' ? ' ok' : ' bad');
+    statusTag.textContent = site.status === 'active' ? '正常' : '已下线';
+    badges.appendChild(statusTag);
+    badges.appendChild(document.createTextNode(' '));
+    const kindTag = document.createElement('span');
+    kindTag.className = 'badge';
+    kindTag.textContent = site.kind === 'multi'
+      ? '多页 · ' + site.fileCount + ' 个文件'
+      : '单页';
+    badges.appendChild(kindTag);
+    card.appendChild(badges);
+
+    if (site.description) {
+      const desc = document.createElement('div');
+      desc.className = 'desc';
+      desc.textContent = site.description;
+      card.appendChild(desc);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = fmtSize(site.totalSize) + ' · 更新于 '
+      + new Date(site.updatedAt).toLocaleString('zh-CN');
+    card.appendChild(meta);
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+
+    const view = document.createElement('a');
+    view.href = '/' + site.name;
+    view.target = '_blank';
+    view.rel = 'noopener';
+    view.textContent = '访问';
+    actions.appendChild(view);
+
+    const edit = document.createElement('a');
+    edit.href = '/edit/' + site.name;
+    edit.textContent = '编辑';
+    actions.appendChild(edit);
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'danger tiny';
+    del.textContent = '删除';
+    del.addEventListener('click', async () => {
+      if (!confirm('确定删除 /' + site.name + ' ？删了就找不回来了。')) return;
+      const res = await fetch('/api/sites/' + site.name, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.ok) {
+        showMsg(true, '已删除 /' + site.name);
+        loadSites();
+      } else {
+        showMsg(false, data.message || '删除失败');
+      }
+    });
+    actions.appendChild(del);
+
+    card.appendChild(actions);
+    wrap.appendChild(card);
+  });
+
+  document.getElementById('statSites').textContent = sites.length;
+  document.getElementById('statFiles').textContent = files;
+  document.getElementById('statSize').textContent = fmtSize(size);
+}
+
+async function loadSites() {
+  try {
+    const res = await fetch('/api/sites');
+    const data = await res.json();
+    if (data.ok) renderSites(data.sites);
+  } catch { /* 静默：统计保持占位符 */ }
+}
+
+// ---------------------------------------------------------------- 启动
+
+(async () => {
+  const me = await renderNav();
+  if (me) loadSites();
+})();
+</script>
+</body>
+</html>

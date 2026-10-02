@@ -14,7 +14,7 @@
   </header>
 
   <h1>上传你的页面</h1>
-  <p class="sub">上传一个 HTML 文件，起个名字，就得到一个地址。</p>
+  <p class="sub">一个 HTML 文件就是一个单页站；多个文件或整个文件夹就是一个多页站。</p>
 
   <div id="needLogin" class="result" hidden>
     需要先登录才能上传。 <a href="/login">去登录或注册</a>
@@ -28,37 +28,32 @@
         <input id="name" type="text" placeholder="mypage1" autocomplete="off"
                spellcheck="false" maxlength="40">
       </div>
-      <span class="hint">小写字母、数字、连字符，3–32 位</span>
+      <span class="hint">小写字母、数字、连字符，3–32 位；这是你页面的地址</span>
     </label>
 
     <div class="field">
-      <span class="label">HTML 文件</span>
-      <div id="drop" class="drop">
-        <input id="file" type="file" accept=".html,.htm,text/html" hidden>
-        <span id="dropText">点击选择，或把 .html 文件拖到这里</span>
+      <span class="label">内容</span>
+      <div id="drop" class="drop hero">
+        <div class="dropIcon">⇪</div>
+        <div class="dropTitle" id="dropTitle">把 HTML 文件、多个文件或整个文件夹拖到这里</div>
+        <div class="dropSub">也可以用下面的按钮选择</div>
+        <div class="dropBtns">
+          <button type="button" class="ghost" id="pickFiles">选择文件</button>
+          <button type="button" class="ghost" id="pickFolder">选择文件夹</button>
+        </div>
+        <div id="pickList" class="pickList" hidden></div>
+        <div id="modeTag" class="modeTag" hidden></div>
       </div>
-      <span class="hint">CSS 和 JS 请内嵌在这一个文件里</span>
+      <input id="fileInput" type="file" multiple hidden>
+      <input id="folderInput" type="file" webkitdirectory multiple hidden>
+      <span class="hint">单页站：1 个 .html（CSS / JS 请内嵌）；多页站：入口必须是 index.html，
+        单文件 ≤ 10 MB，每站最多 200 个文件</span>
     </div>
 
     <button id="submit" type="submit" class="block">上传</button>
   </form>
 
   <div id="result" class="result" hidden></div>
-
-  <section id="mySites" hidden>
-    <h2>我的页面</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>名字</th>
-          <th>大小</th>
-          <th>状态</th>
-          <th>更新时间</th>
-        </tr>
-      </thead>
-      <tbody id="siteBody"></tbody>
-    </table>
-  </section>
 </main>
 
 <script>
@@ -66,26 +61,19 @@ const nav = document.getElementById('nav');
 const needLogin = document.getElementById('needLogin');
 const form = document.getElementById('form');
 const nameInput = document.getElementById('name');
-const fileInput = document.getElementById('file');
 const drop = document.getElementById('drop');
-const dropText = document.getElementById('dropText');
+const dropTitle = document.getElementById('dropTitle');
+const pickList = document.getElementById('pickList');
+const modeTag = document.getElementById('modeTag');
+const fileInput = document.getElementById('fileInput');
+const folderInput = document.getElementById('folderInput');
 const submit = document.getElementById('submit');
 const result = document.getElementById('result');
-const mySites = document.getElementById('mySites');
-const siteBody = document.getElementById('siteBody');
 
-let picked = null;
-
-function setPicked(file) {
-  picked = file || null;
-  if (picked) {
-    drop.classList.add('ready');
-    drop.classList.remove('over');
-    dropText.textContent = picked.name;
-  } else {
-    drop.classList.remove('ready');
-    dropText.textContent = '点击选择，或把 .html 文件拖到这里';
-  }
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
 }
 
 function showResult(ok, html) {
@@ -94,10 +82,111 @@ function showResult(ok, html) {
   result.innerHTML = html;
 }
 
-const fmtSize = (n) => (n < 1024 ? n + ' B' : (n / 1024).toFixed(1) + ' KB');
+// ---------------------------------------------------------------- 选择与拖放
 
-drop.addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', () => setPicked(fileInput.files[0]));
+let picked = [];        // [{ path, file }]
+let pickedMode = null;  // 'single' | 'multi'
+
+/** 统一入口：根据收集到的文件决定上传模式并刷新界面。 */
+function applyPick(list, source) {
+  picked = list;
+  pickList.textContent = '';
+  modeTag.hidden = true;
+
+  if (list.length === 0) {
+    pickedMode = null;
+    drop.classList.remove('ready');
+    dropTitle.textContent = '把 HTML 文件、多个文件或整个文件夹拖到这里';
+    pickList.hidden = true;
+    return;
+  }
+
+  const onlyOneHtml = source !== 'folder'
+    && list.length === 1 && /\.html?$/i.test(list[0].path);
+
+  if (onlyOneHtml) {
+    pickedMode = 'single';
+    drop.classList.add('ready');
+    dropTitle.textContent = list[0].path;
+    modeTag.hidden = false;
+    modeTag.innerHTML = '<span class="badge">单页模式 · 整个站点就是这一个 HTML</span>';
+    pickList.hidden = true;
+    return;
+  }
+
+  // 多页模式
+  pickedMode = 'multi';
+  drop.classList.add('ready');
+  dropTitle.textContent = list.length + ' 个文件';
+  const hasIndex = list.some((it) => it.path === 'index.html');
+  modeTag.hidden = false;
+  modeTag.innerHTML = hasIndex
+    ? '<span class="badge ok">多页模式 · 入口 index.html</span>'
+    : '<span class="badge bad">多页模式 · 缺 index.html，上传会被拒绝</span>';
+
+  pickList.hidden = false;
+  list.slice(0, 100).forEach((it) => {
+    const line = document.createElement('div');
+    line.textContent = it.path + '（' + it.file.size + ' B）';
+    pickList.appendChild(line);
+  });
+  if (list.length > 100) {
+    const more = document.createElement('div');
+    more.textContent = '…还有 ' + (list.length - 100) + ' 个文件';
+    pickList.appendChild(more);
+  }
+}
+
+document.getElementById('pickFiles').addEventListener('click', () => fileInput.click());
+document.getElementById('pickFolder').addEventListener('click', () => folderInput.click());
+
+fileInput.addEventListener('change', () => {
+  applyPick(Array.from(fileInput.files || []).map((f) => ({ path: f.name, file: f })), 'files');
+});
+
+folderInput.addEventListener('change', () => {
+  const list = [];
+  for (const f of Array.from(folderInput.files || [])) {
+    // webkitRelativePath 形如「文件夹名/css/style.css」，去掉第一段
+    const rel = (f.webkitRelativePath || '').split('/').slice(1).join('/');
+    // 跳过点开头的隐藏文件/文件夹
+    if (!rel || rel.split('/').some((s) => s.startsWith('.'))) continue;
+    list.push({ path: rel, file: f });
+  }
+  applyPick(list, 'folder');
+});
+
+// 拖放：文件直接读，文件夹用 webkitGetAsEntry 递归展开
+
+function readAllEntries(reader) {
+  return new Promise((resolve, reject) => {
+    const all = [];
+    (function next() {
+      // readEntries 每次最多返回 100 条，读到空为止
+      reader.readEntries((entries) => {
+        if (entries.length === 0) { resolve(all); return; }
+        all.push(...entries);
+        next();
+      }, reject);
+    })();
+  });
+}
+
+async function walkEntry(entry) {
+  if (entry.isFile) {
+    const file = await new Promise((res, rej) => entry.file(res, rej));
+    // fullPath 形如「/站点名/css/style.css」，去掉前两段得到站内相对路径；
+    // 直接拖单个文件时是「/foo.html」，回退用文件名
+    const parts = entry.fullPath.split('/').filter(Boolean);
+    const rel = parts.length > 1 ? parts.slice(1).join('/') : file.name;
+    return [{ path: rel, file, fromDir: parts.length > 1 }];
+  }
+  const out = [];
+  for (const child of await readAllEntries(entry.createReader())) {
+    out.push(...await walkEntry(child));
+  }
+  return out;
+}
 
 ['dragenter', 'dragover'].forEach((type) => {
   drop.addEventListener(type, (e) => {
@@ -110,42 +199,98 @@ fileInput.addEventListener('change', () => setPicked(fileInput.files[0]));
   drop.addEventListener(type, () => drop.classList.remove('over'));
 });
 
-drop.addEventListener('drop', (e) => {
+drop.addEventListener('drop', async (e) => {
   e.preventDefault();
   drop.classList.remove('over');
-  const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-  if (file) setPicked(file);
+
+  const items = e.dataTransfer && e.dataTransfer.items;
+  const entries = items
+    ? Array.from(items).map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean)
+    : [];
+
+  if (entries.length === 0) {
+    // 兜底：拿不到 entry 就当散文件处理
+    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    applyPick(files.map((f) => ({ path: f.name, file: f })), 'files');
+    return;
+  }
+
+  dropTitle.textContent = '正在读取拖入的内容…';
+  try {
+    const list = [];
+    for (const entry of entries) list.push(...await walkEntry(entry));
+    const source = list.some((it) => it.fromDir) ? 'folder' : 'files';
+    applyPick(list.filter((it) => !it.path.split('/').some((s) => s.startsWith('.'))), source);
+  } catch (err) {
+    applyPick([], 'files');
+    dropTitle.textContent = '读取拖入内容失败：' + err.message;
+  }
 });
+
+// ---------------------------------------------------------------- 上传
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   result.hidden = true;
 
-  if (!picked) {
-    showResult(false, '先选一个 HTML 文件');
-    return;
-  }
+  const siteName = nameInput.value.trim();
+  if (!siteName) { showResult(false, '先给页面起个名字'); return; }
+  if (picked.length === 0) { showResult(false, '先选择要上传的内容'); return; }
 
   submit.disabled = true;
   submit.textContent = '上传中…';
 
   try {
-    const html = await picked.text();
-    const res = await fetch('/api/upload', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: nameInput.value, html: html }),
-    });
-    const data = await res.json();
-
-    if (data.ok) {
-      const url = data.url;
-      showResult(true, '好了。地址是 <a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>');
-      form.reset();
-      setPicked(null);
-      loadSites();
+    if (pickedMode === 'single') {
+      // 单页：1 个 HTML 文件
+      const html = await picked[0].file.text();
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: siteName, html }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        showResult(true,
+          '好了。地址是 <a href="' + data.url + '" target="_blank" rel="noopener">' + data.url + '</a>'
+          + '，也可以去 <a href="/sites">页面管理</a> 看看。');
+        form.reset();
+        applyPick([], 'files');
+      } else {
+        showResult(false, data.message || '上传失败');
+      }
     } else {
-      showResult(false, data.message || '上传失败');
+      // 多页：逐个文件上传
+      if (!picked.some((it) => it.path === 'index.html')) {
+        showResult(false, '多页站点必须有 index.html 作为入口页');
+        return;
+      }
+
+      let okCount = 0;
+      for (let i = 0; i < picked.length; i++) {
+        const item = picked[i];
+        submit.textContent = '上传中 ' + (i + 1) + '/' + picked.length + '：' + item.path;
+
+        const res = await fetch(
+          '/api/sites/' + encodeURIComponent(siteName) + '/files?path=' + encodeURIComponent(item.path),
+          { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' },
+            body: await item.file.arrayBuffer() },
+        );
+        const data = await res.json();
+        if (!data.ok) {
+          showResult(false,
+            '上传「' + escapeHtml(item.path) + '」失败：' + escapeHtml(data.message || '未知错误'));
+          return;
+        }
+        okCount++;
+      }
+
+      const url = '/' + encodeURIComponent(siteName) + '/';
+      showResult(true,
+        '上传完成，共 ' + okCount + ' 个文件。地址：<a href="' + url + '" target="_blank" rel="noopener">'
+        + url + '</a>，也可以去 <a href="/sites">页面管理</a> 看看。');
+      form.reset();
+      applyPick([], 'files');
     }
   } catch (err) {
     showResult(false, '网络出问题了：' + err.message);
@@ -155,69 +300,12 @@ form.addEventListener('submit', async (e) => {
   }
 });
 
-async function loadSites() {
-  try {
-    const res = await fetch('/api/sites');
-    const data = await res.json();
-    if (!data.ok) {
-      mySites.hidden = true;
-      return;
-    }
-
-    mySites.hidden = false;
-    siteBody.textContent = '';
-
-    if (data.sites.length === 0) {
-      const row = document.createElement('tr');
-      const cell = document.createElement('td');
-      cell.colSpan = 4;
-      cell.className = 'empty';
-      cell.textContent = '还没有上传过页面';
-      row.appendChild(cell);
-      siteBody.appendChild(row);
-      return;
-    }
-
-    data.sites.forEach((site) => {
-      const row = document.createElement('tr');
-
-      const nameCell = document.createElement('td');
-      const link = document.createElement('a');
-      link.href = '/' + site.name;
-      link.target = '_blank';
-      link.rel = 'noopener';
-      link.textContent = '/' + site.name;
-      nameCell.appendChild(link);
-      row.appendChild(nameCell);
-
-      const sizeCell = document.createElement('td');
-      sizeCell.textContent = fmtSize(site.size);
-      row.appendChild(sizeCell);
-
-      const statusCell = document.createElement('td');
-      const tag = document.createElement('span');
-      tag.className = 'badge' + (site.status === 'active' ? ' ok' : ' bad');
-      tag.textContent = site.status === 'active' ? '正常' : '已下线';
-      statusCell.appendChild(tag);
-      row.appendChild(statusCell);
-
-      const timeCell = document.createElement('td');
-      timeCell.textContent = new Date(site.updated_at).toLocaleString('zh-CN');
-      row.appendChild(timeCell);
-
-      siteBody.appendChild(row);
-    });
-  } catch {
-    mySites.hidden = true;
-  }
-}
+// ---------------------------------------------------------------- 导航与启动
 
 async function loadMe() {
   let me = null;
-
   try {
-    const res = await fetch('/api/me');
-    me = (await res.json()).user;
+    me = (await (await fetch('/api/me')).json()).user;
   } catch {
     me = null;
   }
@@ -232,13 +320,22 @@ async function loadMe() {
 
     form.hidden = true;
     needLogin.hidden = false;
-    mySites.hidden = true;
     return;
   }
 
   const label = document.createElement('span');
   label.textContent = me.username || me.email;
   nav.appendChild(label);
+
+  const accountLink = document.createElement('a');
+  accountLink.href = '/account';
+  accountLink.textContent = '个人中心';
+  nav.appendChild(accountLink);
+
+  const sitesLink = document.createElement('a');
+  sitesLink.href = '/sites';
+  sitesLink.textContent = '页面管理';
+  nav.appendChild(sitesLink);
 
   const settingsLink = document.createElement('a');
   settingsLink.href = '/settings';
@@ -264,7 +361,6 @@ async function loadMe() {
 
   form.hidden = false;
   needLogin.hidden = true;
-  loadSites();
 }
 
 loadMe();
