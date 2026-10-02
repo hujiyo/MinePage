@@ -7,11 +7,12 @@
 <link rel="stylesheet" href="/_assets/style.css">
 </head>
 <body>
-<main class="narrow">
+<main>
   <header class="topbar">
     <a class="brand" href="/">MinePage</a>
     <nav>
       <a href="/">上传页</a>
+      <a href="/sites">我的页面</a>
       <button type="button" class="ghost tiny" id="logout">退出</button>
     </nav>
   </header>
@@ -45,6 +46,49 @@
   </form>
 
   <div id="msg" class="result" hidden></div>
+
+  <section id="mcpSection" hidden>
+    <h2>MCP 接入（让 AI 直接帮你管页面）</h2>
+    <p class="hint">
+      建一把密钥填进 Claude、Cursor 这类 AI 客户端的 MCP 配置，之后就能直接对话建站、
+      改内容、管文件，不用再回这个网页操作。密钥相当于你的账户令牌，只在这里显示一次，
+      怀疑泄露就立刻吊销。
+    </p>
+
+    <div class="row token-create">
+      <input id="tokenLabel" type="text" maxlength="60" placeholder="密钥名称，如 claude-desktop">
+      <button type="button" id="createToken">创建密钥</button>
+    </div>
+
+    <div id="tokenReveal" class="result" hidden></div>
+    <div id="tokenMsg" class="result" hidden></div>
+
+    <table id="tokenTable" hidden>
+      <thead>
+        <tr>
+          <th scope="col">名称</th>
+          <th scope="col">创建于</th>
+          <th scope="col">最后使用</th>
+          <th scope="col"><span class="sr-only">操作</span></th>
+        </tr>
+      </thead>
+      <tbody id="tokenBody"></tbody>
+    </table>
+    <p class="empty" id="tokenEmpty">还没有密钥。</p>
+
+    <details class="mcp-help">
+      <summary>怎么填到 AI 客户端里</summary>
+      <p class="hint">Claude Code 一条命令搞定（<code>&lt;密钥&gt;</code> 换成刚创建的那串）：</p>
+      <code class="token" id="cmdHeader"></code>
+      <p class="hint">不能自定义请求头的客户端（豆包等），直接把地址填成带密钥的 URL：</p>
+      <code class="token" id="cmdUrl"></code>
+      <p class="hint">
+        服务端地址是 <span id="mcpOrigin"></span>，密钥走
+        <code>Authorization: Bearer</code> 头。工具一共 10 个：列站点、看详情、建站、
+        改 HTML、改标题简介、删站，以及多页站的文件增删改查。
+      </p>
+    </details>
+  </section>
 </main>
 
 <script>
@@ -144,6 +188,135 @@ document.getElementById('logout').addEventListener('click', async () => {
   location.href = '/';
 });
 
+// ---------------------------------------------------------------- MCP 密钥
+
+const mcpSection = document.getElementById('mcpSection');
+const tokenLabel = document.getElementById('tokenLabel');
+const createTokenBtn = document.getElementById('createToken');
+const tokenReveal = document.getElementById('tokenReveal');
+const tokenMsg = document.getElementById('tokenMsg');
+const tokenTable = document.getElementById('tokenTable');
+const tokenBody = document.getElementById('tokenBody');
+const tokenEmpty = document.getElementById('tokenEmpty');
+
+function el(tag, text, className) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function showTokenMsg(ok, text) {
+  tokenMsg.hidden = false;
+  tokenMsg.className = 'result ' + (ok ? 'ok' : 'err');
+  tokenMsg.textContent = text;
+}
+
+function formatTime(value) {
+  return value ? String(value).slice(0, 10) : '—';
+}
+
+/** 新建成功后把密钥和两种接入方式摆出来。密钥只有这一次机会能看到。 */
+function revealToken(token) {
+  const origin = location.origin;
+
+  tokenReveal.hidden = false;
+  tokenReveal.className = 'result ok';
+  tokenReveal.replaceChildren();
+  tokenReveal.append(el('p', '密钥只显示这一次，请立即复制保存：'));
+  tokenReveal.append(el('code', token, 'token'));
+
+  const copy = el('button', '复制密钥', 'ghost tiny');
+  copy.type = 'button';
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(token);
+      copy.textContent = '已复制';
+    } catch {
+      copy.textContent = '复制失败，请手动选中';
+    }
+  });
+  const actions = el('div', undefined, 'token-actions');
+  actions.append(copy);
+  tokenReveal.append(actions);
+
+  document.getElementById('cmdHeader').textContent =
+    `claude mcp add --transport http minepage ${origin}/mcp `
+    + `--header "Authorization: Bearer ${token}"`;
+  document.getElementById('cmdUrl').textContent = `${origin}/mcp/${token}`;
+}
+
+async function loadTokens() {
+  const res = await fetch('/api/mcp/tokens');
+  const data = await res.json();
+  if (!data.ok) return;
+
+  tokenTable.hidden = data.tokens.length === 0;
+  tokenEmpty.hidden = data.tokens.length > 0;
+  tokenBody.replaceChildren();
+
+  for (const item of data.tokens) {
+    const tr = el('tr');
+    tr.append(el('td', item.label));
+    tr.append(el('td', formatTime(item.createdAt), 'muted'));
+    tr.append(el('td', formatTime(item.lastUsedAt), 'muted'));
+
+    const revoke = el('button', '吊销', 'danger tiny');
+    revoke.type = 'button';
+    revoke.addEventListener('click', () => revokeToken(item.id, item.label));
+
+    const cell = el('td', undefined, 'actions');
+    cell.append(revoke);
+    tr.append(cell);
+    tokenBody.append(tr);
+  }
+}
+
+async function revokeToken(id, label) {
+  if (!confirm(`吊销密钥「${label}」？正在用它的 AI 客户端会立刻失效。`)) return;
+
+  const res = await fetch(`/api/mcp/tokens/${id}/revoke`, { method: 'POST' });
+  const data = await res.json();
+
+  if (data.ok) {
+    showTokenMsg(true, `密钥「${label}」已吊销`);
+    tokenReveal.hidden = true;
+    await loadTokens();
+  } else {
+    showTokenMsg(false, data.message || '吊销失败');
+  }
+}
+
+createTokenBtn.addEventListener('click', async () => {
+  const label = tokenLabel.value.trim();
+  if (!label) {
+    showTokenMsg(false, '先给密钥起个名字');
+    return;
+  }
+
+  createTokenBtn.disabled = true;
+  try {
+    const data = await post('/api/mcp/tokens', { label });
+
+    if (data.ok) {
+      tokenLabel.value = '';
+      tokenMsg.hidden = true;
+      revealToken(data.token);
+      await loadTokens();
+    } else {
+      showTokenMsg(false, data.message || '创建失败');
+    }
+  } catch (err) {
+    showTokenMsg(false, '网络出问题了：' + err.message);
+  } finally {
+    createTokenBtn.disabled = false;
+  }
+});
+
+tokenLabel.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') createTokenBtn.click();
+});
+
 (async () => {
   try {
     const res = await fetch('/api/me');
@@ -156,6 +329,10 @@ document.getElementById('logout').addEventListener('click', async () => {
 
     who.textContent = '登录账号：' + data.user.email;
     form.hidden = false;
+
+    mcpSection.hidden = false;
+    document.getElementById('mcpOrigin').textContent = location.origin;
+    await loadTokens();
   } catch {
     who.textContent = '加载失败，刷新试试';
   }
