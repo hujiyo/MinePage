@@ -80,6 +80,20 @@ input[type=text], input[type=password], input[type=email] {
 input:focus { border-color: var(--accent); }
 input::placeholder { color: var(--muted); }
 
+select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 10px 13px;
+  color: inherit;
+  font-size: 14px;
+  font-family: inherit;
+  outline: 0;
+  transition: border-color .15s;
+}
+select:focus { border-color: var(--accent); }
+
 button {
   padding: 10px 16px;
   border: 0;
@@ -145,6 +159,24 @@ button.tiny { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
 .code-row input { flex: 1; letter-spacing: 2px; }
 .code-row button { white-space: nowrap; flex-shrink: 0; }
 
+/* 合并上传的大框 */
+.drop.hero { padding: 44px 20px; }
+.drop.hero .dropIcon { font-size: 30px; line-height: 1; margin-bottom: 10px; }
+.drop.hero .dropTitle { font-size: 15px; color: var(--text); margin-bottom: 6px; }
+.drop.hero .dropSub { font-size: 12px; }
+.drop.hero .dropBtns { display: flex; gap: 10px; justify-content: center; margin-top: 18px; flex-wrap: wrap; }
+.drop.hero .pickList {
+  margin-top: 14px;
+  max-height: 120px;
+  overflow: auto;
+  text-align: left;
+  font-size: 12px;
+  color: var(--muted);
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+}
+.drop.hero .modeTag { margin-top: 10px; }
+
 .tabs { display: flex; gap: 8px; margin-bottom: 24px; }
 .tab { flex: 1; background: transparent; color: var(--muted); border: 1px solid var(--border); }
 .tab.active { background: var(--panel); color: var(--text); border-color: var(--accent); }
@@ -166,6 +198,106 @@ td.wrap { word-break: break-all; }
 .badge.ok { color: var(--ok); border-color: var(--ok); }
 .badge.bad { color: var(--danger); border-color: var(--danger); }
 .badge.admin { color: var(--accent); border-color: var(--accent); }
+.badge.tag { color: var(--accent); border-color: var(--accent); }
 
 section { margin-top: 38px; }
 .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+
+/* ---------------------------------------------------------------- 个人中心 / 站点卡片 */
+
+.profile { display: flex; align-items: center; gap: 16px; }
+.avatar {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  font-weight: 500;
+  flex: none;
+  user-select: none;
+}
+.profile .who b { display: block; font-size: 16px; font-weight: 500; }
+.profile .who span { color: var(--muted); font-size: 13px; }
+.profile .who .bio {
+  color: var(--text);
+  font-size: 13px;
+  margin-top: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.stats { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 14px; }
+.stat {
+  flex: 1;
+  min-width: 120px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  background: var(--panel);
+}
+.stat b { display: block; font-size: 18px; font-weight: 500; }
+.stat span { color: var(--muted); font-size: 12px; }
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+.card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: var(--panel);
+}
+.card h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+}
+.card .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.card .desc {
+  color: var(--text);
+  font-size: 12px;
+  margin-top: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.card .actions { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
+.card .actions a {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+textarea {
+  width: 100%;
+  min-height: 320px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: inherit;
+  padding: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  outline: 0;
+  resize: vertical;
+  transition: border-color .15s;
+}
+textarea:focus { border-color: var(--accent); }
+
+/* 非代码类的小文本域：站点简介、个人简介 */
+textarea.area {
+  min-height: 96px;
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
