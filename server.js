@@ -312,9 +312,9 @@ async function handleRoot(req, res) {
   await sendPage(res, 'discover.html');
 }
 
-/** 上传页（原来的首页）。 */
+/** 老投稿页：投稿已并入「创作」页的「投稿」标签，这里只做跳转。 */
 async function handleUploadPage(req, res) {
-  await sendPage(res, 'index.html');
+  sendRedirect(res, '/sites?tab=upload');
 }
 
 async function handleLoginPage(req, res) {
