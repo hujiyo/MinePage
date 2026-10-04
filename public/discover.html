@@ -152,12 +152,40 @@ function renderSide() {
 
 // ---------------------------------------------------------------- 列表
 
-function reload() {
-  let sites = MP.querySites({ q, tag });
-  if (sortRank) sites = sites.slice().sort((a, b) => b.views - a.views);
+/**
+ * 数据源：GET /api/discover（真实接口）
+ *
+ * 参数映射说明 —— 服务端对非法参数**不报错，只静默退化**，
+ * 所以这里必须显式映射，不能直接透传：
+ *
+ *   q                直传
+ *   tag=真实标签      直传（服务端白名单校验）
+ *   tag='hot'        前端伪标签，服务端 SITE_TAGS 里没有 hot。
+ *                    直接透传会被当成"不筛选"而返回全部（看着像成功），
+ *                    所以换成 sort=views。「热门」的真正语义待定。
+ *   ?sort=rank       服务端排序白名单是 views/likes/favorites/comments/newest，
+ *                    **没有 rank**。同样会静默退化为默认排序，所以也映射到 views，
+ *                    以保持「排行榜」这个入口原本的可见行为。
+ */
+async function reload() {
+  const sort = (tag === 'hot' || sortRank) ? 'views' : '';
+  const query = new URLSearchParams();
+  if (q) query.set('q', q);
+  if (tag && tag !== 'hot') query.set('tag', tag);
+  if (sort) query.set('sort', sort);
 
   feedTitle.textContent = q ? '搜索：' + q : (tag === 'hot' ? '热门' : '推荐');
-  MP.renderCards(cardsBox, sites);
+  cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">加载中…</div>';
+
+  try {
+    const res = await fetch('/api/discover?' + query.toString(), { headers: { Accept: 'application/json' } });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.message || '加载失败');
+    MP.renderCards(cardsBox, data.sites || []);
+  } catch (err) {
+    cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">'
+      + '加载失败：' + MP.esc(err.message) + '，刷新试试。</div>';
+  }
 }
 
 mountBanner();

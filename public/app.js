@@ -537,10 +537,12 @@
     const cover = document.createElement('div');
     cover.className = 'vcover';
     cover.style.background = grad(site);
-    cover.innerHTML = '<span class="vtag">' + esc(tagLabel(site.tag) || '页面') + '</span>'
+    // 页数：接口给的是 fileCount/kind，演示数据给的是 pages，两种都认
+    const pages = site.fileCount != null ? site.fileCount : (site.pages != null ? site.pages : 1);
+    cover.innerHTML = '<span class="vtag">' + esc(site.tagLabel || tagLabel(site.tag) || '页面') + '</span>'
       + '<span class="coverChar">' + esc(initial(site)) + '</span>'
       + '<span class="vviews">' + icon('view') + fmtNum(site.views) + '</span>'
-      + '<span class="vkind">' + (site.pages > 1 ? site.pages + ' 页' : '单页') + '</span>';
+      + '<span class="vkind">' + (pages > 1 ? pages + ' 页' : '单页') + '</span>';
     card.appendChild(cover);
 
     const body = document.createElement('div');
@@ -561,12 +563,16 @@
 
     const author = document.createElement('div');
     author.className = 'vauthor';
+    const uname = site.author && site.author.username;
+    // 作者可能没有用户名（账号还没设置过），也可能是被删掉的用户留下的无主站点：
+    // 两种情况下 /u/:username 都打不开，所以退回首页而不是造一个死链。
+    const aname = (site.author && site.author.name) || uname || '匿名';
     const a = document.createElement('a');
-    a.href = '/u/' + encodeURIComponent(site.author.username);
-    a.innerHTML = '<span class="avatar xs">' + esc(site.author.name[0]) + '</span>';
+    a.href = uname ? '/u/' + encodeURIComponent(uname) : '/';
+    a.innerHTML = '<span class="avatar xs">' + esc(aname[0] || '?') + '</span>';
     const nm = document.createElement('span');
     nm.className = 'aname';
-    nm.textContent = site.author.name;
+    nm.textContent = aname;
     a.appendChild(nm);
     author.appendChild(a);
     body.appendChild(author);
