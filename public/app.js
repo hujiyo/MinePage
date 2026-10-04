@@ -139,7 +139,8 @@
     { key: 'social', label: '社交聚合页' },
     { key: 'blog', label: '技术博客' },
     { key: 'event', label: '活动落地页' },
-    { key: 'oss', label: '开源项目' },
+    { key: 'opensource', label: '开源项目' },
+    { key: 'docs', label: '学习笔记' },
     { key: 'other', label: '其他' },
   ];
   MP.TAGS = TAGS;
@@ -167,7 +168,7 @@
     { name: 'summer-fest', title: '夏日音乐节 · 活动落地页', tag: 'event',
       description: '演出阵容、购票入口与场地地图，含倒计时与票务进度条。',
       author: { name: 'Momo', username: 'momo' }, views: 31500, likes: 1120, favorites: 508, comments: 132, pages: 4 },
-    { name: 'mini-vue', title: 'mini-vue · 200 行读懂响应式', tag: 'oss',
+    { name: 'mini-vue', title: 'mini-vue · 200 行读懂响应式', tag: 'opensource',
       description: '手写一个迷你 Vue，附可交互的依赖收集演示页面。',
       author: { name: 'Byte', username: 'byte' }, views: 68400, likes: 3210, favorites: 1780, comments: 240, pages: 9 },
     { name: 'coffee-shop', title: '街角咖啡 · 门店与菜单', tag: 'other',
@@ -185,7 +186,7 @@
     { name: 'photo-wall', title: '毕业照云相册墙', tag: 'social',
       description: '全班照片瀑布流，支持按人筛选与一键下载原图。',
       author: { name: '小满', username: 'man' }, views: 14700, likes: 512, favorites: 268, comments: 63, pages: 2 },
-    { name: 'opensource-landing', title: '开源项目落地页 · Pager', tag: 'oss',
+    { name: 'opensource-landing', title: '开源项目落地页 · Pager', tag: 'opensource',
       description: '项目介绍、Star 趋势图与快速上手代码示例。',
       author: { name: 'Pager', username: 'pager' }, views: 39800, likes: 1560, favorites: 890, comments: 102, pages: 7 },
   ];
