@@ -3,61 +3,82 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MinePage</title>
+<title>投稿 · MinePage</title>
 <link rel="stylesheet" href="/_assets/style.css">
 </head>
 <body>
-<main>
-  <header class="topbar">
-    <a class="brand" href="/">MinePage</a>
-    <nav id="nav"></nav>
-  </header>
-
-  <h1>上传你的页面</h1>
+<main class="page">
+  <h1>投稿</h1>
   <p class="sub">一个 HTML 文件就是一个单页站；多个文件或整个文件夹就是一个多页站。</p>
 
-  <div id="needLogin" class="result" hidden>
-    需要先登录才能上传。 <a href="/login">去登录或注册</a>
-  </div>
-
-  <form id="form" novalidate hidden>
-    <label class="field">
-      <span class="label">名字</span>
-      <div class="slug">
-        <span class="prefix">/</span>
-        <input id="name" type="text" placeholder="mypage1" autocomplete="off"
-               spellcheck="false" maxlength="40">
+  <div class="homeGrid">
+    <div>
+      <div id="needLogin" class="result" hidden>
+        需要先登录才能上传。 <a href="/login">去登录或注册</a>
       </div>
-      <span class="hint">小写字母、数字、连字符，3–32 位；这是你页面的地址</span>
-    </label>
 
-    <div class="field">
-      <span class="label">内容</span>
-      <div id="drop" class="drop hero">
-        <div class="dropIcon">⇪</div>
-        <div class="dropTitle" id="dropTitle">把 HTML 文件、多个文件或整个文件夹拖到这里</div>
-        <div class="dropSub">也可以用下面的按钮选择</div>
-        <div class="dropBtns">
-          <button type="button" class="ghost" id="pickFiles">选择文件</button>
-          <button type="button" class="ghost" id="pickFolder">选择文件夹</button>
+      <form id="form" novalidate hidden>
+        <label class="field">
+          <span class="label">页面名字</span>
+          <div class="slug">
+            <span class="prefix">/</span>
+            <input id="name" type="text" placeholder="mypage1" autocomplete="off"
+                   spellcheck="false" maxlength="40">
+          </div>
+          <span class="hint">小写字母、数字、连字符，3–32 位；这就是页面的访问地址</span>
+        </label>
+
+        <div class="field">
+          <span class="label">页面内容</span>
+          <div id="drop" class="drop hero">
+            <div class="dropIcon">⇪</div>
+            <div class="dropTitle" id="dropTitle">把 HTML 文件、多个文件或整个文件夹拖到这里</div>
+            <div class="dropSub">也可以用下面的按钮选择</div>
+            <div class="dropBtns">
+              <button type="button" class="ghost" id="pickFiles">选择文件</button>
+              <button type="button" class="ghost" id="pickFolder">选择文件夹</button>
+            </div>
+            <div id="pickList" class="pickList" hidden></div>
+            <div id="modeTag" class="modeTag" hidden></div>
+          </div>
+          <input id="fileInput" type="file" multiple hidden>
+          <input id="folderInput" type="file" webkitdirectory multiple hidden>
+          <span class="hint">单页站：1 个 .html（CSS / JS 请内嵌）；多页站：入口必须是 index.html，
+            单文件 ≤ 10 MB，每站最多 200 个文件</span>
         </div>
-        <div id="pickList" class="pickList" hidden></div>
-        <div id="modeTag" class="modeTag" hidden></div>
-      </div>
-      <input id="fileInput" type="file" multiple hidden>
-      <input id="folderInput" type="file" webkitdirectory multiple hidden>
-      <span class="hint">单页站：1 个 .html（CSS / JS 请内嵌）；多页站：入口必须是 index.html，
-        单文件 ≤ 10 MB，每站最多 200 个文件</span>
+
+        <button id="submit" type="submit" class="block lg">发布页面</button>
+      </form>
+
+      <div id="result" class="result" hidden></div>
     </div>
 
-    <button id="submit" type="submit" class="block">上传</button>
-  </form>
-
-  <div id="result" class="result" hidden></div>
+    <aside class="homeSide">
+      <div class="panel">
+        <h2>投稿须知</h2>
+        <ul class="muted" style="font-size:13px;margin:0;padding-left:18px;line-height:1.9">
+          <li>单页站所有 CSS / JS 请内嵌在 HTML 里</li>
+          <li>多页站必须包含 <code>index.html</code> 作为入口</li>
+          <li>单个文件不超过 10 MB</li>
+          <li>每个站点最多 200 个文件</li>
+          <li>页面会在沙箱中运行，请勿引用本机资源</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h2>发布之后</h2>
+        <p class="muted" style="font-size:13px;margin:0 0 12px">
+          页面会出现在首页信息流里，其他用户可以搜索、收藏、点赞和评论。
+        </p>
+        <a href="/sites"><button type="button" class="ghost block">进入创作中心</button></a>
+      </div>
+    </aside>
+  </div>
 </main>
 
+<script src="/_assets/app.js"></script>
 <script>
-const nav = document.getElementById('nav');
+MP.topbar({ active: 'upload' });
+
 const needLogin = document.getElementById('needLogin');
 const form = document.getElementById('form');
 const nameInput = document.getElementById('name');
@@ -296,74 +317,21 @@ form.addEventListener('submit', async (e) => {
     showResult(false, '网络出问题了：' + err.message);
   } finally {
     submit.disabled = false;
-    submit.textContent = '上传';
+    submit.textContent = '发布页面';
   }
 });
 
-// ---------------------------------------------------------------- 导航与启动
+// ---------------------------------------------------------------- 启动
 
-async function loadMe() {
-  let me = null;
-  try {
-    me = (await (await fetch('/api/me')).json()).user;
-  } catch {
-    me = null;
-  }
-
-  nav.textContent = '';
-
+MP.me().then((me) => {
   if (!me) {
-    const link = document.createElement('a');
-    link.href = '/login';
-    link.textContent = '登录 / 注册';
-    nav.appendChild(link);
-
     form.hidden = true;
     needLogin.hidden = false;
     return;
   }
-
-  const label = document.createElement('span');
-  label.textContent = me.username || me.email;
-  nav.appendChild(label);
-
-  const accountLink = document.createElement('a');
-  accountLink.href = '/account';
-  accountLink.textContent = '个人中心';
-  nav.appendChild(accountLink);
-
-  const sitesLink = document.createElement('a');
-  sitesLink.href = '/sites';
-  sitesLink.textContent = '页面管理';
-  nav.appendChild(sitesLink);
-
-  const settingsLink = document.createElement('a');
-  settingsLink.href = '/settings';
-  settingsLink.textContent = '设置';
-  nav.appendChild(settingsLink);
-
-  if (me.isAdmin) {
-    const adminLink = document.createElement('a');
-    adminLink.href = '/admin';
-    adminLink.textContent = '管理后台';
-    nav.appendChild(adminLink);
-  }
-
-  const logout = document.createElement('button');
-  logout.type = 'button';
-  logout.className = 'ghost tiny';
-  logout.textContent = '退出';
-  logout.addEventListener('click', async () => {
-    await fetch('/api/auth/logout', { method: 'POST' });
-    location.reload();
-  });
-  nav.appendChild(logout);
-
   form.hidden = false;
   needLogin.hidden = true;
-}
-
-loadMe();
+});
 </script>
 </body>
 </html>

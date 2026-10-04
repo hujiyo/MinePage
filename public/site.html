@@ -7,12 +7,7 @@
 <link rel="stylesheet" href="/_assets/style.css">
 </head>
 <body>
-<main class="wide">
-  <header class="topbar">
-    <a class="brand" href="/">MinePage</a>
-    <nav id="nav"></nav>
-  </header>
-
+<main class="page">
   <div class="row">
     <h1>编辑 <span id="siteName" style="font-family:ui-monospace,Menlo,Consolas,monospace"></span></h1>
     <button type="button" class="ghost" disabled title="后续接入智能体辅助编辑">智能体助手（未接入）</button>
@@ -22,7 +17,7 @@
   <p class="sub" id="siteMeta"></p>
 
   <!-- 站点设置：标题 / 简介 / 内容标签，之后社区广场按这些信息展示 -->
-  <section id="metaSection" hidden>
+  <section id="metaSection" class="panel" hidden>
     <h2>站点设置</h2>
     <label class="field">
       <span class="label">站点标题</span>
@@ -44,7 +39,7 @@
   </section>
 
   <!-- 单页站：直接编辑 HTML -->
-  <section id="singleSection" hidden>
+  <section id="singleSection" class="panel" hidden>
     <label class="field">
       <span class="label">HTML 内容</span>
       <textarea id="htmlEditor" spellcheck="false"></textarea>
@@ -54,7 +49,7 @@
   </section>
 
   <!-- 多页站：文件管理 -->
-  <section id="multiSection" hidden>
+  <section id="multiSection" class="panel" hidden>
     <h2>文件</h2>
     <table>
       <thead>
@@ -81,7 +76,7 @@
   </section>
 
   <!-- 文本文件编辑器（多页站里点「编辑」弹出） -->
-  <section id="fileEditorSection" hidden>
+  <section id="fileEditorSection" class="panel" hidden>
     <h2>正在编辑 <span id="editingPath" style="font-family:ui-monospace,Menlo,Consolas,monospace"></span></h2>
     <label class="field">
       <textarea id="fileEditor" spellcheck="false"></textarea>
@@ -96,8 +91,9 @@
   <div id="msg" class="result" hidden></div>
 </main>
 
+<script src="/_assets/app.js"></script>
 <script>
-const nav = document.getElementById('nav');
+MP.topbar({ active: 'upload' });
 
 // /edit/:name
 const siteName = decodeURIComponent(location.pathname.split('/')[2] || '');
@@ -123,57 +119,6 @@ function showMsg(ok, html) {
   msg.hidden = false;
   msg.className = 'result ' + (ok ? 'ok' : 'err');
   msg.innerHTML = html;
-}
-
-// ---------------------------------------------------------------- 导航
-
-async function renderNav() {
-  nav.textContent = '';
-
-  let me = null;
-  try {
-    me = (await (await fetch('/api/me')).json()).user;
-  } catch { me = null; }
-  if (!me) {
-    location.href = '/login';
-    return null;
-  }
-
-  const label = document.createElement('span');
-  label.textContent = me.username || me.email;
-  nav.appendChild(label);
-
-  const home = document.createElement('a');
-  home.href = '/';
-  home.textContent = '上传页面';
-  nav.appendChild(home);
-
-  const accountLink = document.createElement('a');
-  accountLink.href = '/account';
-  accountLink.textContent = '个人中心';
-  nav.appendChild(accountLink);
-
-  const sitesLink = document.createElement('a');
-  sitesLink.href = '/sites';
-  sitesLink.textContent = '页面管理';
-  nav.appendChild(sitesLink);
-
-  if (me.isAdmin) {
-    const adminLink = document.createElement('a');
-    adminLink.href = '/admin';
-    adminLink.textContent = '管理后台';
-    nav.appendChild(adminLink);
-  }
-
-  const logout = document.createElement('button');
-  logout.type = 'button';
-  logout.className = 'ghost tiny';
-  logout.textContent = '退出';
-  logout.addEventListener('click', async () => {
-    await fetch('/api/auth/logout', { method: 'POST' });
-    location.href = '/login';
-  });
-  nav.appendChild(logout);
 }
 
 // ---------------------------------------------------------------- 加载站点
@@ -490,7 +435,6 @@ addSubmit.addEventListener('click', async () => {
 
 // ---------------------------------------------------------------- 启动
 
-renderNav();
 loadSite();
 </script>
 </body>

@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>私信 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<main class="page wide">
+  <h1>私信</h1>
+  <p class="sub">和创作者直接沟通，注意保护个人隐私。</p>
+
+  <div class="msgLayout" style="margin-top:16px">
+    <div class="msgList" id="convList"></div>
+
+    <div class="chatBox">
+      <div class="chatHead" id="chatHead"></div>
+      <div class="chatBody" id="chatBody"></div>
+      <form class="chatFoot" id="chatForm">
+        <input id="chatInput" type="text" maxlength="500" placeholder="输入消息，回车发送…" autocomplete="off">
+        <button type="submit">发送</button>
+      </form>
+    </div>
+  </div>
+</main>
+
+<script src="/_assets/app.js"></script>
+<script>
+MP.topbar({ active: 'messages' });
+
+// TODO 后端对接：替换为 fetch('/api/messages')
+const CONVS = [
+  { user: { name: 'Aurora', username: 'aurora' }, msgs: [
+    { from: 'me', text: '你好，作品集的滚动动效是怎么做的？', at: '10:12' },
+    { from: 'them', text: '用的是 IntersectionObserver，触发时加一个 class 就好。', at: '10:15' },
+    { from: 'them', text: '需要的话我把 demo 传到社区里，你可以直接看源码。', at: '10:16' },
+  ] },
+  { user: { name: '林同学', username: 'lin' }, msgs: [
+    { from: 'them', text: '简历模板已经更新到第二版了，感谢之前的建议。', at: '昨天' },
+    { from: 'me', text: '看到了，技能雷达那块清楚多了。', at: '昨天' },
+  ] },
+  { user: { name: 'Byte', username: 'byte' }, msgs: [
+    { from: 'them', text: 'mini-vue 的依赖收集演示页上线了，欢迎来试。', at: '周一' },
+  ] },
+  { user: { name: 'Momo', username: 'momo' }, msgs: [
+    { from: 'me', text: '活动页的购票进度条能开源吗？', at: '上周' },
+    { from: 'them', text: '可以的，等我整理一下发出来。', at: '上周' },
+  ] },
+];
+
+let cur = 0;
+
+const convBox = document.getElementById('convList');
+const headBox = document.getElementById('chatHead');
+const bodyBox = document.getElementById('chatBody');
+const input = document.getElementById('chatInput');
+
+function renderConvs() {
+  convBox.textContent = '';
+  CONVS.forEach((c, i) => {
+    const last = c.msgs[c.msgs.length - 1];
+    const item = document.createElement('div');
+    item.className = 'msgItem' + (i === cur ? ' on' : '');
+    item.innerHTML = '<span class="avatar sm">' + MP.esc(c.user.name[0]) + '</span>'
+      + '<div class="mi"><div class="nm"><span>' + MP.esc(c.user.name) + '</span>'
+      + '<time>' + MP.esc(last.at) + '</time></div>'
+      + '<div class="pv">' + MP.esc(last.text) + '</div></div>';
+    item.addEventListener('click', () => { cur = i; renderConvs(); renderChat(); });
+    convBox.appendChild(item);
+  });
+}
+
+function renderChat() {
+  const c = CONVS[cur];
+  headBox.innerHTML = MP.esc(c.user.name)
+    + '<small><a href="/u/' + encodeURIComponent(c.user.username) + '">查看主页</a></small>';
+
+  bodyBox.textContent = '';
+  c.msgs.forEach((m) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'bubble' + (m.from === 'me' ? ' me' : '');
+    const av = document.createElement('span');
+    av.className = 'avatar xs';
+    av.textContent = (m.from === 'me' ? MP.ME.name : c.user.name)[0];
+    const txt = document.createElement('div');
+    txt.className = 'btxt';
+    txt.textContent = m.text;
+    const t = document.createElement('span');
+    t.className = 'bt';
+    t.textContent = m.at;
+    wrap.appendChild(av);
+    wrap.appendChild(txt);
+    wrap.appendChild(t);
+    bodyBox.appendChild(wrap);
+  });
+  bodyBox.scrollTop = bodyBox.scrollHeight;
+}
+
+document.getElementById('chatForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  // TODO 后端对接：POST /api/messages/:username { content }
+  CONVS[cur].msgs.push({ from: 'me', text, at: '刚刚' });
+  input.value = '';
+  renderConvs();
+  renderChat();
+});
+
+renderConvs();
+renderChat();
+</script>
+</body>
+</html>

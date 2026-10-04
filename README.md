@@ -1,7 +1,8 @@
 # MinePage
 
-极简个人 page 托管平台。注册账号，上传一个 HTML 文件，起个名字，
-就能通过 `域名/名字` 访问。管理员在 `/admin` 管理用户和页面。
+极简个人 page 托管 + 社区平台。注册账号，上传一个 HTML 文件，起个名字，
+就能通过 `域名/名字` 访问；`/` 是社区首页（发现流、搜索、标签筛选），
+管理员在 `/admin` 管理用户和页面。
 
 ## 跑起来
 
@@ -32,11 +33,16 @@ lib/db.js                     SQLite 连接与建表（幂等）
 lib/auth.js                   scrypt 密码哈希、会话 token、Cookie 读写
 lib/users.js                  用户与会话的数据操作、管理员种子
 lib/sites.js                  站点的数据操作
+lib/social.js                 社区互动数据操作（点赞 / 评论 / 收藏 / 关注 / 通知 / 浏览量 / 创作者主页）
 lib/names.js                  站名校验
 lib/addressing.js             「站名 ⇄ 访问地址」的唯一映射点，换地址形态只改这里
 lib/email.js                  发信（SMTP），未配置时退化为控制台打印
 lib/verification.js           邮箱验证码的生成、发送、校验与限流
-public/index.html             上传页
+public/index.html             上传页（/upload）
+public/discover.html          社区首页（/）
+public/user.html              创作者主页（/u/:用户名）
+public/view.html              观看包装页（/view/:站名，平台条 + iframe + 评论区）
+public/notifications.html     通知列表页（/notifications）
 public/login.html             登录 / 注册（注册需邮箱验证码）
 public/forgot.html            找回密码
 public/settings.html          账号设置（改密码）
@@ -57,15 +63,30 @@ data/minepage.db              数据库（不进 git）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/` | 上传页 |
+| GET | `/` | 社区首页（发现流、搜索、标签筛选） |
+| GET | `/upload` | 上传站点 |
+| GET | `/u/:用户名` | 创作者公开主页 |
+| GET | `/view/:站名` | 观看包装页（平台条 + 沙箱 iframe + 评论区） |
+| GET | `/notifications` | 通知列表页（收到的互动） |
 | GET | `/login` | 登录 / 注册 |
 | GET | `/admin` | 管理后台（仅管理员） |
 | GET | `/api/me` | 当前登录用户 |
 | POST | `/api/auth/register` | 邮箱注册 |
 | POST | `/api/auth/login` | 登录（邮箱或用户名） |
 | POST | `/api/auth/logout` | 登出 |
+| GET | `/api/discover` | 社区发现流（?q= 模糊搜索，?tag= 标签筛选） |
+| GET | `/api/u/:username/profile` | 创作者主页数据（资料 / 粉丝关注数 / 总浏览量 / TA 的站点） |
 | GET | `/api/sites` | 我上传的页面 |
 | POST | `/api/upload` | 上传 HTML（需登录） |
+| GET | `/api/sites/:name/stats` | 站点互动数字（浏览 / 赞 / 评 / 藏） |
+| POST / DELETE | `/api/sites/:name/like` | 点赞 / 取消（需登录） |
+| GET / POST | `/api/sites/:name/comments` | 评论列表 / 发评论（回复带 replyTo） |
+| DELETE | `/api/sites/:name/comments/:id` | 删评论（作者或管理员） |
+| POST / DELETE | `/api/sites/:name/favorite` | 收藏 / 取消（可选 folder 名字） |
+| POST / DELETE | `/api/users/:id/follow` | 关注 / 取关（不能关注自己） |
+| GET | `/api/users/:id/social` | 粉丝数 / 关注数 / 是否已关注 |
+| GET | `/api/notifications` | 通知列表（最近的互动事件，新到旧，最多 50 条） |
+| POST | `/api/notifications/seen` | 推进已读时间戳（进通知页自动调用） |
 | GET | `/api/admin/users` | 用户列表 |
 | POST | `/api/admin/users/:id/status` | 封禁 / 解封 |
 | GET | `/api/admin/sites` | 全部页面 |

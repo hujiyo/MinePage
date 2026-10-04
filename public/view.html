@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>观看 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<!-- 全屏宿主：对方的个人网页铺满整个视口，平台不占用正文区域 -->
+<div class="viewer" id="viewer">
+  <iframe id="frame" referrerpolicy="no-referrer" title="站点内容"></iframe>
+</div>
+
+<!-- 站点不存在时的占位 -->
+<div class="viewMissing" id="missing" hidden>
+  <div class="panel center" style="max-width:380px">
+    <h1>没有这个站点</h1>
+    <p class="sub" style="margin-bottom:16px">它可能还没发布，或者站名不对。</p>
+    <a href="/"><button type="button">回首页逛逛</button></a>
+  </div>
+</div>
+
+<!-- 底部社区吸附栏（结构由脚本生成） -->
+<div class="snapbar" id="snapbar" hidden></div>
+<!-- 底栏收起后只剩左下角的小三角形 -->
+<button type="button" class="snapHandle" id="snapHandle"></button>
+
+<!-- 评论面板：可拖拽调高，不做暗化遮罩，两边都能照常滚动 -->
+<div class="sheet" id="sheet">
+  <div class="sheetGrip" id="sheetGrip" title="按住上下拖动，调整评论面板高度"><i></i></div>
+  <div class="sheetHead">
+    <b>评论 <span class="muted" id="cHead"></span></b>
+    <div class="row" style="gap:10px;flex-wrap:nowrap">
+      <a class="hint" id="toAuthor" style="font-size:13px"></a>
+      <button type="button" class="ghost tiny" id="sheetClose">收起</button>
+    </div>
+  </div>
+  <div class="sheetBody">
+    <form id="cForm" style="padding-top:12px">
+      <textarea id="cInput" class="area" maxlength="500" placeholder="友善评论，最多 500 字…"></textarea>
+      <div class="row" style="justify-content:space-between;margin-top:8px">
+        <span class="hint">评论会通知作者。</span>
+        <button type="submit">发表评论</button>
+      </div>
+    </form>
+    <div id="cList"></div>
+    <div id="cEmpty" class="empty" hidden>还没有评论，来抢沙发。</div>
+  </div>
+</div>
+
+<script src="/_assets/app.js"></script>
+<script>
+// /view/:站名  ——  全屏看对方的网页，社区功能收进底部吸附栏
+MP.topbar({ collapse: true });
+
+const SITE = decodeURIComponent(location.pathname.replace(/^\/view\//, '').replace(/\/+$/, ''));
+
+const viewer = document.getElementById('viewer');
+const missing = document.getElementById('missing');
+const snapbar = document.getElementById('snapbar');
+const snapHandle = document.getElementById('snapHandle');
+const sheet = document.getElementById('sheet');
+const sheetGrip = document.getElementById('sheetGrip');
+const cHead = document.getElementById('cHead');
+const cForm = document.getElementById('cForm');
+const cInput = document.getElementById('cInput');
+const cList = document.getElementById('cList');
+const cEmpty = document.getElementById('cEmpty');
+
+let site = null;
+let following = false;
+let liked = false;
+let favored = false;
+let coined = false;
+
+// TODO 后端对接：替换为 fetch('/api/sites/:name/stats') 的互动数据
+const stats = { likes: 0, favorites: 0, coins: 0, comments: 0 };
+let comments = [];   // 评论列表（含一二级回复）
+
+// TODO 后端对接：替换为 fetch('/api/sites/:name/comments')
+const DEMO_COMMENTS = [
+  { id: 1, author: { name: '小林', username: 'lin' }, content: '配色很舒服，滚动动效也不卡，请问用了什么方案？', createdAt: Date.now() - 3600e3, likes: 12 },
+  { id: 2, author: { name: '演示用户', username: 'demo' }, content: '纯 CSS + IntersectionObserver，没用框架，所以体积很小。', createdAt: Date.now() - 3000e3, replyTo: 1, likes: 6 },
+  { id: 3, author: { name: 'Aurora', username: 'aurora' }, content: '首页头部的留白可以再收一点，移动端会更紧凑。', createdAt: Date.now() - 7200e3, likes: 20 },
+  { id: 4, author: { name: 'Momo', username: 'momo' }, content: '已经收藏，准备照着改改自己的主页。', createdAt: Date.now() - 86400e3, likes: 3 },
+];
+
+// TODO 后端对接：站名不存在时应跳 404 提示
+site = MP.SITES.find((s) => s.name === SITE) || null;
+
+function fmtTime(ts) {
+  const diff = (Date.now() - ts) / 1000;
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+  if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+  if (diff < 86400 * 30) return Math.floor(diff / 86400) + ' 天前';
+  const d = new Date(ts);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+/* ---------------------------------------------------------------- 播放区 */
+
+function renderFrame() {
+  document.title = (site.title || site.name) + ' · MinePage';
+  stats.likes = site.likes;
+  stats.favorites = site.favorites;
+  stats.coins = Math.floor(site.likes / 4);
+  stats.comments = site.comments;
+  comments = DEMO_COMMENTS.slice();
+
+  // 前端阶段站点 slug 不存在，主体用 srcdoc 生成预览占位
+  // TODO 后端对接：frame.src = '/' + encodeURIComponent(SITE) + '/';
+  document.getElementById('frame').srcdoc = '<!DOCTYPE html><html><head><meta charset="utf-8"><style>'
+    + 'html,body{margin:0;height:100%;font-family:system-ui,-apple-system,sans-serif;'
+    + 'display:flex;align-items:center;justify-content:center;color:#fff;'
+    + 'background:' + MP.grad(site) + '}'
+    + '.w{text-align:center;padding:24px;max-width:620px}'
+    + '.w b{font-size:28px;display:block;margin-bottom:12px}'
+    + '.w p{opacity:.92;font-size:15px;line-height:1.8;margin:0}'
+    + '.w i{display:inline-block;margin-top:22px;font-size:12px;opacity:.8;'
+    + 'border:1px solid rgba(255,255,255,.5);padding:5px 14px;border-radius:99px;font-style:normal}'
+    + '</style></head><body><div class="w"><b>' + MP.esc(site.title || site.name)
+    + '</b><p>' + MP.esc(site.description || '') + '</p><i>演示预览 · 由 MinePage 沙箱渲染</i></div></body></html>';
+}
+
+/* ---------------------------------------------------------------- 底部吸附栏 */
+
+const SNAP_KEY = 'mp_snap_collapsed';
+let snapCollapsed = MP.readFlag(SNAP_KEY);
+let commentBtn = null;   // 底部栏「评论」按钮，发评论后同步文字与悬浮提示
+
+// 收起后整条栏隐藏，只在左下角留一个小三角形；点它重新展开
+snapHandle.innerHTML = MP.icon('triUp', null, 14);
+
+function applySnap() {
+  document.body.classList.toggle('snap-collapsed', snapCollapsed);
+  snapHandle.title = snapCollapsed ? '展开导航栏' : '收起导航栏';
+}
+
+snapHandle.addEventListener('click', () => {
+  snapCollapsed = false;
+  MP.writeFlag(SNAP_KEY, false);
+  applySnap();
+});
+
+/** 生成一个吸附栏按钮 / 链接。 */
+function makeItem(ic, text, opt) {
+  const o = opt || {};
+  const el = document.createElement(o.href ? 'a' : 'button');
+  el.className = 'snapItem' + (o.on ? ' on' : '');
+  if (o.href) el.href = o.href;
+  else el.type = 'button';
+  el.title = o.title || text;
+  el.innerHTML = MP.icon(ic) + '<span class="sText">' + MP.esc(text) + '</span>';
+  if (o.click) el.addEventListener('click', o.click);
+  return el;
+}
+
+/** 重新渲染底部吸附栏（互动状态变化时调用）。 */
+function renderBar() {
+  if (!site) return;
+  const a = site.author;
+
+  snapbar.textContent = '';
+
+  // 左组：分享 / 赞 / 投币 / 收藏
+  const gLeft = document.createElement('div');
+  gLeft.className = 'sgroup';
+  gLeft.appendChild(makeItem('share', '分享', {
+    click: () => { MP.toast('链接已复制，去分享给朋友吧'); },
+  }));
+  gLeft.appendChild(makeItem('like', '赞 ' + MP.fmtNum(stats.likes), {
+    on: liked,
+    click: () => { liked = !liked; stats.likes += liked ? 1 : -1; renderBar(); },
+  }));
+  gLeft.appendChild(makeItem('coin', '投币 ' + MP.fmtNum(stats.coins), {
+    on: coined,
+    click: () => { coined = !coined; stats.coins += coined ? 1 : -1; renderBar(); },
+  }));
+  gLeft.appendChild(makeItem('fav', '收藏 ' + MP.fmtNum(stats.favorites), {
+    on: favored,
+    click: () => { favored = !favored; stats.favorites += favored ? 1 : -1; renderBar(); },
+  }));
+
+  // 中间：收起小三角形（点击整条栏收起，只在左下角留一个小三角形）
+  const mid = document.createElement('button');
+  mid.type = 'button';
+  mid.className = 'snapMid';
+  mid.title = '收起导航栏';
+  mid.innerHTML = MP.icon('triUp', null, 15);
+  mid.addEventListener('click', () => {
+    snapCollapsed = true;
+    MP.writeFlag(SNAP_KEY, true);
+    applySnap();
+  });
+
+  // 右组：评论 / 博主头像 / 关注 / 私信
+  const gRight = document.createElement('div');
+  gRight.className = 'sgroup';
+  const btnComment = makeItem('comment', '评论 ' + MP.fmtNum(stats.comments), {
+    click: openSheet,
+  });
+  commentBtn = btnComment;
+  gRight.appendChild(btnComment);
+
+  const avEl = document.createElement('a');
+  avEl.className = 'snapItem';
+  avEl.href = '/u/' + encodeURIComponent(a.username);
+  avEl.title = a.name + ' 的主页';
+  avEl.innerHTML = '<span class="avatar xs">' + MP.esc(a.name[0]) + '</span>'
+    + '<span class="sText">' + MP.esc(a.name) + '</span>';
+  gRight.appendChild(avEl);
+
+  const isOwn = a.username === MP.ME.username;
+  if (!isOwn) {
+    gRight.appendChild(makeItem(following ? 'check' : 'plus', following ? '已关注' : '关注', {
+      on: following,
+      // TODO 后端对接：POST/DELETE /api/users/:id/follow
+      click: () => {
+        following = !following;
+        renderBar();
+        MP.toast(following ? '已关注 ' + a.name : '已取消关注');
+      },
+    }));
+  }
+  gRight.appendChild(makeItem('message', '私信', { href: '/messages' }));
+
+  snapbar.appendChild(gLeft);
+  snapbar.appendChild(mid);
+  snapbar.appendChild(gRight);
+  snapbar.hidden = false;
+  applySnap();
+  // TODO 后端对接：赞 / 投币 / 收藏改为请求 /api/sites/:name/like | /coin | /favorite
+}
+
+/* ---------------------------------------------------------------- 评论面板 */
+
+let sheetOpened = false;
+
+function openSheet() {
+  sheet.classList.add('open');
+  sheetOpened = true;
+}
+
+function closeSheet() {
+  sheet.classList.remove('open');
+  sheetOpened = false;
+}
+
+document.getElementById('sheetClose').addEventListener('click', closeSheet);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheetOpened) closeSheet(); });
+
+// 拖拽上沿调高：最小约等于底栏高度（只露面板头部），最大铺满整屏
+const SHEET_MIN_H = 58;
+let gripFrom = null;
+
+function setSheetHeight(px) {
+  sheet.style.height = Math.min(Math.max(px, SHEET_MIN_H), window.innerHeight) + 'px';
+}
+
+sheetGrip.addEventListener('pointerdown', (e) => {
+  gripFrom = { y: e.clientY, h: sheet.getBoundingClientRect().height };
+  sheet.classList.add('dragging');
+  sheetGrip.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+
+sheetGrip.addEventListener('pointermove', (e) => {
+  if (!gripFrom) return;
+  setSheetHeight(gripFrom.h + (gripFrom.y - e.clientY));
+});
+
+['pointerup', 'pointercancel'].forEach((type) => {
+  sheetGrip.addEventListener(type, (e) => {
+    if (!gripFrom) return;
+    gripFrom = null;
+    sheet.classList.remove('dragging');
+    if (sheetGrip.hasPointerCapture(e.pointerId)) sheetGrip.releasePointerCapture(e.pointerId);
+  });
+});
+
+// 窗口变小时把面板压回视口内
+window.addEventListener('resize', () => {
+  if (sheet.style.height) setSheetHeight(parseFloat(sheet.style.height));
+});
+
+function authorNode(author) {
+  const a = document.createElement('a');
+  a.href = '/u/' + encodeURIComponent(author.username);
+  a.textContent = author.name;
+  return a;
+}
+
+function renderComment(c, isTop) {
+  const div = document.createElement('div');
+  div.className = 'comment';
+
+  const head = document.createElement('div');
+  head.className = 'cHead';
+  const who = document.createElement('span');
+  who.className = 'who';
+  who.appendChild(authorNode(c.author));
+  head.appendChild(who);
+
+  // 回复：显示在回复谁
+  if (c.replyTo != null) {
+    const parent = comments.find((x) => x.id === c.replyTo);
+    if (parent) {
+      const at = document.createElement('span');
+      at.className = 'at';
+      at.textContent = '回复 @' + parent.author.name;
+      head.appendChild(at);
+    }
+  }
+
+  const time = document.createElement('span');
+  time.className = 'time';
+  time.textContent = fmtTime(c.createdAt);
+  head.appendChild(time);
+  div.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'cBody';
+  body.textContent = c.content;
+  div.appendChild(body);
+
+  const ops = document.createElement('div');
+  ops.className = 'cOps';
+
+  const likeBtn = document.createElement('button');
+  likeBtn.type = 'button';
+  likeBtn.textContent = '赞 ' + (c.likes || 0);
+  likeBtn.addEventListener('click', () => {
+    c.likes = (c.likes || 0) + 1;
+    likeBtn.textContent = '赞 ' + c.likes;
+  });
+  ops.appendChild(likeBtn);
+
+  // 回复按钮：只挂在顶层评论上（回复的回复归到同一父评论）
+  if (isTop) {
+    const replyBtn = document.createElement('button');
+    replyBtn.type = 'button';
+    replyBtn.textContent = '回复';
+    replyBtn.addEventListener('click', () => toggleReplyBox(div, c));
+    ops.appendChild(replyBtn);
+  }
+
+  // 删除：作者本人或管理员
+  if (c.author.username === MP.ME.username || MP.ME.isAdmin) {
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'del';
+    delBtn.textContent = '删除';
+    delBtn.addEventListener('click', () => {
+      if (!confirm('确定删除这条评论吗？')) return;
+      comments = comments.filter((x) => x.id !== c.id && x.replyTo !== c.id);
+      renderComments();
+      MP.toast('已删除');
+    });
+    ops.appendChild(delBtn);
+  }
+  // TODO 后端对接：删除与点赞改为请求 /api/sites/:name/comments/:id
+
+  if (ops.children.length > 0) div.appendChild(ops);
+
+  // 挂上一级回复
+  if (isTop) {
+    const replies = comments.filter((r) => r.replyTo != null && rootOf(r).id === c.id);
+    if (replies.length > 0) {
+      const box = document.createElement('div');
+      box.className = 'replies';
+      replies.forEach((r) => box.appendChild(renderComment(r, false)));
+      div.appendChild(box);
+    }
+  }
+
+  return div;
+}
+
+/** 沿 replyTo 往上找到顶层评论。 */
+function rootOf(c) {
+  let cur = c;
+  const seen = new Set();
+  while (cur.replyTo != null && !seen.has(cur.replyTo)) {
+    seen.add(cur.replyTo);
+    const parent = comments.find((x) => x.id === cur.replyTo);
+    if (!parent) break;
+    cur = parent;
+  }
+  return cur;
+}
+
+/** 在评论下面展开 / 收起回复输入框。 */
+function toggleReplyBox(commentDiv, parent) {
+  const existing = commentDiv.querySelector('.replyBox');
+  if (existing) { existing.remove(); return; }
+
+  // 必须是 form：type=submit 按钮与 submit 事件只对 form 生效
+  const box = document.createElement('form');
+  box.className = 'replyBox';
+
+  const ta = document.createElement('textarea');
+  ta.className = 'area';
+  ta.maxLength = 500;
+  ta.placeholder = '回复 @' + parent.author.name + '（最多 500 字）…';
+  box.appendChild(ta);
+
+  const row = document.createElement('div');
+  row.className = 'cRow';
+  row.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:8px';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'ghost tiny';
+  cancel.textContent = '取消';
+  cancel.addEventListener('click', () => box.remove());
+  const submit = document.createElement('button');
+  submit.type = 'submit';
+  submit.textContent = '回复';
+  row.appendChild(cancel);
+  row.appendChild(submit);
+  box.appendChild(row);
+
+  box.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const content = ta.value.trim();
+    if (content === '') return;
+    // TODO 后端对接：POST /api/sites/:name/comments（带 replyTo）
+    comments.push({
+      id: Date.now(),
+      author: { name: MP.ME.name, username: MP.ME.username },
+      content,
+      createdAt: Date.now(),
+      replyTo: parent.id,
+      likes: 0,
+    });
+    renderComments();
+    MP.toast('回复已发布');
+  });
+
+  commentDiv.appendChild(box);
+  ta.focus();
+}
+
+function renderComments() {
+  cList.textContent = '';
+  const tops = comments.filter((c) => c.replyTo == null);
+  cHead.textContent = comments.length;
+  cEmpty.hidden = comments.length > 0;
+  tops.forEach((c) => cList.appendChild(renderComment(c, true)));
+
+  // 底部栏上的评论数同步（可见文字 + 悬浮提示）
+  stats.comments = comments.length;
+  if (commentBtn) {
+    commentBtn.title = '评论 ' + MP.fmtNum(stats.comments);
+    const text = commentBtn.querySelector('.sText');
+    if (text) text.textContent = commentBtn.title;
+  }
+}
+
+cForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const content = cInput.value.trim();
+  if (content === '') return;
+  // TODO 后端对接：POST /api/sites/:name/comments
+  comments.push({
+    id: Date.now(),
+    author: { name: MP.ME.name, username: MP.ME.username },
+    content,
+    createdAt: Date.now(),
+    likes: 0,
+  });
+  cInput.value = '';
+  renderComments();
+  MP.toast('评论已发布');
+});
+
+/* ---------------------------------------------------------------- 启动 */
+
+if (!site) {
+  viewer.hidden = true;
+  snapbar.hidden = true;
+  sheet.hidden = true;
+  missing.hidden = false;
+} else {
+  const a = site.author;
+  document.title = (site.title || site.name) + ' · MinePage';
+  document.getElementById('toAuthor').innerHTML =
+    '作者 <a href="/u/' + encodeURIComponent(a.username) + '">' + MP.esc(a.name) + '</a>';
+  renderFrame();
+  renderBar();
+  renderComments();
+}
+</script>
+</body>
+</html>

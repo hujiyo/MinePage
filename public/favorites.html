@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>我的收藏 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<main class="page wide">
+  <div class="secHead">
+    <h1 style="margin:0">我的收藏</h1>
+    <a class="more" href="/">去首页发现更多 →</a>
+  </div>
+
+  <div class="msgLayout" style="margin-top:16px">
+    <!-- 收藏夹分类 -->
+    <div>
+      <div class="msgList" id="folders"></div>
+      <div class="panel" style="margin-top:12px">
+        <b style="display:block;margin-bottom:6px">新建收藏夹</b>
+        <p class="muted" style="font-size:12px;margin:0 0 10px">把喜欢的页面分门别类地收好。</p>
+        <button type="button" class="ghost block" id="newFolder">+ 新建收藏夹</button>
+      </div>
+    </div>
+
+    <!-- 收藏内容 -->
+    <div>
+      <div class="secHead">
+        <h2 id="folderName">默认收藏夹</h2>
+        <span class="muted" style="font-size:13px" id="folderCount"></span>
+      </div>
+      <div class="cards" id="cards"></div>
+    </div>
+  </div>
+</main>
+
+<script src="/_assets/app.js"></script>
+<script>
+MP.topbar();
+
+// TODO 后端对接：替换为 fetch('/api/favorites')，收藏夹由用户自定义
+const FOLDERS = [
+  { name: '默认收藏夹', sites: MP.topSites(6) },
+  { name: '设计灵感', sites: MP.SITES.filter((s) => s.tag === 'portfolio' || s.tag === 'blog') },
+  { name: '前端学习', sites: MP.SITES.filter((s) => s.tag === 'oss' || s.tag === 'blog') },
+  { name: '稍后再看', sites: MP.SITES.slice(0, 3) },
+];
+
+let cur = 0;
+
+const foldersBox = document.getElementById('folders');
+const cardsBox = document.getElementById('cards');
+const folderName = document.getElementById('folderName');
+const folderCount = document.getElementById('folderCount');
+
+function renderFolders() {
+  foldersBox.textContent = '';
+  FOLDERS.forEach((f, i) => {
+    const item = document.createElement('div');
+    item.className = 'msgItem' + (i === cur ? ' on' : '');
+    item.innerHTML = '<span class="avatar sm">' + MP.esc(f.name[0]) + '</span>'
+      + '<div class="mi"><div class="nm"><span>' + MP.esc(f.name) + '</span>'
+      + '<time>' + f.sites.length + '</time></div>'
+      + '<div class="pv">' + MP.esc(f.sites.map((s) => s.author.name).slice(0, 3).join('、')) + '</div></div>';
+    item.addEventListener('click', () => { cur = i; renderFolders(); renderSites(); });
+    foldersBox.appendChild(item);
+  });
+}
+
+function renderSites() {
+  const f = FOLDERS[cur];
+  folderName.textContent = f.name;
+  folderCount.textContent = '共 ' + f.sites.length + ' 个页面';
+  MP.renderCards(cardsBox, f.sites);
+}
+
+document.getElementById('newFolder').addEventListener('click', () => {
+  MP.toast('新建收藏夹需要登录后使用');
+});
+
+renderFolders();
+renderSites();
+</script>
+</body>
+</html>

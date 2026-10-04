@@ -7,21 +7,11 @@
 <link rel="stylesheet" href="/_assets/style.css">
 </head>
 <body>
-<main class="wide">
-  <header class="topbar">
-    <a class="brand" href="/">MinePage</a>
-    <nav>
-      <span id="who"></span>
-      <a href="/">上传页</a>
-      <a href="/settings">设置</a>
-      <button type="button" class="ghost tiny" id="logout">退出</button>
-    </nav>
-  </header>
-
+<main class="page">
   <h1>管理后台</h1>
   <p class="sub" id="summary"></p>
 
-  <section>
+  <section class="panel">
     <h2>用户</h2>
     <table>
       <thead>
@@ -38,7 +28,7 @@
     </table>
   </section>
 
-  <section>
+  <section class="panel">
     <h2>页面</h2>
     <table>
       <thead>
@@ -58,11 +48,13 @@
   <div id="msg" class="result" hidden></div>
 </main>
 
+<script src="/_assets/app.js"></script>
 <script>
+MP.topbar({ active: 'upload' });
+
 const usersBody = document.getElementById('usersBody');
 const sitesBody = document.getElementById('sitesBody');
 const summary = document.getElementById('summary');
-const who = document.getElementById('who');
 const msg = document.getElementById('msg');
 
 let hideTimer = null;
@@ -254,11 +246,10 @@ async function loadAll() {
       api('/api/admin/sites'),
     ]);
 
-    const me = results[0];
+    // results[0] 是 /api/me，用于校验登录态
     const users = results[1];
     const sites = results[2];
 
-    who.textContent = me.user.username || me.user.email;
     summary.textContent = users.total + ' 个用户 · ' + sites.total + ' 个页面';
 
     renderUsers(users.users);
@@ -267,11 +258,6 @@ async function loadAll() {
     showMsg(false, err.message);
   }
 }
-
-document.getElementById('logout').addEventListener('click', async () => {
-  await fetch('/api/auth/logout', { method: 'POST' });
-  location.href = '/login';
-});
 
 loadAll();
 </script>
