@@ -44,6 +44,8 @@ import {
   updateUserPassword,
 } from './lib/users.js';
 import { issueCode, consumeCode } from './lib/verification.js';
+import { handleMcp } from './lib/mcp/server.js';
+import { createMcpToken, listMcpTokens, revokeMcpToken } from './lib/mcp/tokens.js';
 import {
   countSiteFiles,
   countSites,
@@ -1516,6 +1518,64 @@ async function handleMessageSend(req, res, [id]) {
   sendJson(res, 201, { ok: true, id: mid, at: new Date().toISOString() });
 }
 
+// ---------------------------------------------------------------- MCP
+
+/**
+ * MCP 的 HTTP 入口。协议本身在 lib/mcp/server.js 里，这里只做路由。
+ * 密钥走 Authorization: Bearer / ?key= / /mcp/<key> 三选一，与登录 Cookie 无关。
+ */
+async function handleMcpPost(req, res) {
+  await handleMcp(req, res, '');
+}
+
+async function handleMcpPostWithKey(req, res, [key]) {
+  await handleMcp(req, res, key);
+}
+
+/** 密钥管理：走登录态，和 MCP 运行时那条 API key 路径互不相交。 */
+async function handleMcpTokenList(req, res) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  sendJson(res, 200, { ok: true, tokens: listMcpTokens(user.id) });
+}
+
+async function handleMcpTokenCreate(req, res) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  try {
+    const { token, record } = createMcpToken(user.id, body.label);
+    // 明文只在这里出现一次，库里存的是 sha256
+    sendJson(res, 201, { ok: true, token, record });
+  } catch (err) {
+    if (err.code === 'BAD_LABEL') {
+      sendJson(res, 400, { ok: false, message: err.message });
+      return;
+    }
+    if (err.code === 'TOO_MANY_TOKENS') {
+      sendJson(res, 409, { ok: false, message: err.message });
+      return;
+    }
+    throw err;
+  }
+}
+
+async function handleMcpTokenRevoke(req, res, [id]) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  if (revokeMcpToken(user.id, id) === 0) {
+    sendJson(res, 404, { ok: false, message: '没有这把密钥' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, id: Number(id) });
+}
+
 // ---------------------------------------------------------------- 管理接口
 
 async function handleAdminUsers(req, res) {
@@ -1725,6 +1785,13 @@ const ROUTES = [
   ['GET', /^\/api\/admin\/sites$/, handleAdminSites],
   ['POST', /^\/api\/admin\/sites\/(\d+)\/status$/, handleAdminSiteStatus],
   ['DELETE', /^\/api\/admin\/sites\/(\d+)$/, handleAdminDeleteSite],
+
+  // MCP：运行时用密钥，管理用登录态，两条路互不相交
+  ['POST', /^\/mcp$/, handleMcpPost],
+  ['POST', /^\/mcp\/([A-Za-z0-9_-]+)$/, handleMcpPostWithKey],
+  ['GET', /^\/api\/mcp\/tokens$/, handleMcpTokenList],
+  ['POST', /^\/api\/mcp\/tokens$/, handleMcpTokenCreate],
+  ['POST', /^\/api\/mcp\/tokens\/(\d+)\/revoke$/, handleMcpTokenRevoke],
 ];
 
 async function handleRequest(req, res) {
@@ -1744,6 +1811,17 @@ async function handleRequest(req, res) {
       await handler(req, res, match.slice(1));
       return;
     }
+  }
+
+  // MCP 只收 POST：其余方法明确回 405，免得掉进「用户站点」那条路变成误导性的 404
+  if (pathname === '/mcp' || pathname.startsWith('/mcp/')) {
+    res.writeHead(405, {
+      Allow: 'POST',
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+    });
+    res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+    return;
   }
 
   // 平台自己的路由都没命中，最后才考虑用户站点
