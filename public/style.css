@@ -664,7 +664,17 @@ section { margin-top: 32px; }
 .tmenu .who { padding: 8px 10px 4px; font-weight: 600; color: var(--text); }
 .tmenu .who small { display: block; font-weight: 400; color: var(--muted); }
 
-.tlogin { flex: none; display: flex; gap: 8px; margin-left: auto; }
+/* 未登录时的顶栏入口。
+   注意不要再加 margin-left:auto —— .tacts 已经用 auto 顶到右边了，
+   两个 auto 会互相分摊空白，把这里挤到换行（"登录/注册" 竖成三行）。
+   它是 .tuser 的子元素，位置由 .tacts 决定就够了。 */
+.tlogin {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
 
 /* ============================================================
    通用列表行（通知 / 历史 / 收藏 / 私信会话）
@@ -1185,3 +1195,158 @@ code.token {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
 }
+
+/* ============================================================
+   登录弹窗
+   ------------------------------------------------------------
+   行为要求（刻意如此，改之前想清楚）：
+   - 遮罩铺满视口，把后面页面的指针事件全部挡掉：弹窗打开时，
+     后面任何链接、按钮、输入框都点不动。
+   - 但**不给 body 加 overflow:hidden**：遮罩本身不可滚动，滚轮
+     事件会冒泡到文档，后面的页面仍然可以滚。这是明确要求——
+     弹窗打开时除了滚轮，其他都不可操作。
+   ============================================================ */
+
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, .5);
+  animation: maskIn .16s ease-out;
+}
+@keyframes maskIn { from { opacity: 0 } to { opacity: 1 } }
+
+.modal {
+  position: relative;
+  width: 400px;
+  max-width: 100%;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  padding: 26px 30px 20px;
+  background: var(--panel);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lift);
+  animation: modalIn .18s ease-out;
+}
+@keyframes modalIn {
+  from { transform: translateY(10px) scale(.98); opacity: 0 }
+  to { transform: none; opacity: 1 }
+}
+
+.modal-x {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.modal-x:hover { background: var(--panel2); color: var(--text); }
+
+.modal-title { margin: 0 0 18px; font-size: 19px; font-weight: 600; color: var(--text); }
+
+.modal-tabs {
+  display: flex;
+  gap: 24px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 22px;
+}
+.mtab {
+  position: relative;
+  padding: 0 0 11px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 15px;
+  color: var(--muted2);
+}
+.mtab.on { color: var(--pink); font-weight: 600; }
+.mtab.on::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: var(--pink);
+  border-radius: 2px;
+}
+
+.modal .field { display: block; margin-bottom: 16px; }
+.modal .label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 7px;
+  font-size: 13px;
+  color: var(--muted2);
+}
+.modal input {
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 14px;
+  color: var(--text);
+  box-sizing: border-box;
+}
+.modal input:focus { border-color: var(--blue); background: var(--panel); outline: none; }
+.modal .forgot { font-size: 12.5px; color: var(--blue); text-decoration: none; }
+.modal .forgot:hover { text-decoration: underline; }
+.modal .code-row { display: flex; gap: 8px; }
+.modal .code-row input { flex: 1; min-width: 0; }
+.modal .hint { display: block; margin-top: 6px; font-size: 12px; color: var(--muted); }
+
+.mbtn {
+  height: 42px;
+  border: 0;
+  border-radius: var(--radius);
+  font-size: 15px;
+  cursor: pointer;
+}
+.mbtn.primary { display: block; width: 100%; margin-top: 6px; background: var(--pink); color: #fff; }
+.mbtn.primary:hover { background: var(--pink-hover); }
+.mbtn.primary:disabled { opacity: .6; cursor: default; }
+.mbtn.ghost {
+  flex: none;
+  height: 40px;
+  padding: 0 14px;
+  background: var(--panel2);
+  color: var(--muted2);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+.mbtn.ghost:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
+.mbtn.ghost:disabled { opacity: .55; cursor: default; }
+
+.modal .result { margin-top: 14px; }
+.mswitch { margin: 14px 0 0; text-align: center; font-size: 13px; color: var(--muted); }
+.mswitch a { color: var(--pink); text-decoration: none; }
+.mswitch a:hover { text-decoration: underline; }
+
+.modal-foot {
+  margin: 18px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+.modal-foot a { color: var(--muted2); }

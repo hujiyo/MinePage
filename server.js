@@ -314,6 +314,10 @@ async function handleRoot(req, res) {
 
 /** 上传页（原来的首页）。 */
 async function handleUploadPage(req, res) {
+  if (!currentUser(req)) {
+    sendRedirect(res, '/login');
+    return;
+  }
   await sendPage(res, 'index.html');
 }
 
