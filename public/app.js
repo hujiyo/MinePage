@@ -106,6 +106,10 @@
     'linear-gradient(135deg,#00b7c3,#7fe3e9)',
     'linear-gradient(135deg,#8a6d3b,#d8c39a)',
   ];
+  /**
+   * 按站点名算一个稳定的封面渐变：同名站点每次刷新拿到的颜色都一样。
+   * 取的是 site.name（没有才退到 title），所以改站名会换色；色板是写死的 8 条。
+   */
   function grad(site) {
     const key = String(site.name || site.title || '');
     let h = 0;
@@ -118,6 +122,7 @@
      3. 演示数据（TODO 后端对接：全部替换为 /api/* 返回）
      ---------------------------------------------------------- */
 
+  // 演示数据占位对象：全文没有任何代码读它，真正被页面用的是下面的 MP.ME / MP.SITES / MP.HOT / MP.BANNERS。
   const DEMO = { enabled: true };
 
   // TODO 后端对接：替换为 fetch('/api/me')
@@ -131,6 +136,11 @@
     dynamic: 5,     // 未读动态
   };
 
+  // 标签词表。
+  // '' 和 'hot' 是筛选专用的伪标签（服务端不认，也不会被提交）；
+  // 其余 key 必须与服务端 lib/sites.js 的 SITE_TAGS 完全一致，
+  // 否则前端筛选项和服务端存的 key 对不上，筛出来是空的。
+  // tests/scripts/consistency.mjs 会核对这件事。
   const TAGS = [
     { key: '', label: '全部' },
     { key: 'hot', label: '热门' },
@@ -145,6 +155,11 @@
   ];
   MP.TAGS = TAGS;
 
+  /**
+   * 标签 key → 中文名；词表里查不到的 key 返回空串。
+   * 注意 '' 在词表里是筛选项「全部」，所以没打标签的站点会得到「全部」而不是空串，
+   * 想要别的兜底文案，调用方得自己先判断 key 是否为空（vcard 就是自己兜的）。
+   */
   function tagLabel(key) {
     const t = TAGS.find((x) => x.key === key);
     return t ? t.label : '';
@@ -213,6 +228,7 @@
       img: 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=deep%20blue%20night%20sky%20with%20tiny%20glowing%20stars%20and%20soft%20light%20streaks%2C%20minimal%20tech%20poster%2C%20no%20text%2C%20no%20letters%2C%20no%20words&image_size=landscape_16_9' },
   ];
 
+  // TODO 后端对接：真要用时替换为 fetch('/api/discover?tag=…&q=…')；当前没有页面调用它，发现页走的是真实接口。
   /** 按标签/关键词过滤演示数据。 */
   MP.querySites = function (opt) {
     const q = (opt && opt.q || '').trim().toLowerCase();
@@ -224,6 +240,8 @@
     });
   };
 
+  // n 省略或传 0 都会落到默认的 8 条（内部是 n || 8）；返回新数组，排序不会动到 MP.SITES。
+  // 数据源是写死的演示数据（见 MP.SITES 上面的 TODO），接口接上后要换成 /api/discover?sort=views。
   /** 热门榜单（按浏览排序）。 */
   MP.topSites = function (n) {
     return MP.SITES.slice().sort((a, b) => b.views - a.views).slice(0, n || 8);
@@ -236,6 +254,10 @@
   const HIST_KEY = 'mp_search_hist';
   const HIST_MAX = 8;
 
+  /**
+   * 读本地搜索历史：最近 8 条，新的在前。
+   * 隐私模式、或存进去的内容不是数组时返回空数组，不抛错；返回的是新数组，调用方随便改都不影响存储。
+   */
   MP.searchHist = function () {
     try {
       const raw = localStorage.getItem(HIST_KEY);
@@ -244,6 +266,10 @@
     } catch { return []; }
   };
 
+  /**
+   * 记一条搜索历史：按词去重后插到最前，只保留最近 8 条。
+   * 会写 localStorage；空白词直接忽略；写失败（隐私模式、配额满）静默放弃，调用方不用管。
+   */
   MP.pushSearchHist = function (word) {
     const w = String(word || '').trim();
     if (!w) return;
@@ -252,6 +278,7 @@
     try { localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX))); } catch { /* 忽略隐私模式报错 */ }
   };
 
+  /** 清空本地搜索历史；只影响当前浏览器，服务端没有这份记录。 */
   MP.clearSearchHist = function () {
     try { localStorage.removeItem(HIST_KEY); } catch { /* 同上 */ }
   };
@@ -350,6 +377,7 @@
     const nav = NAVS.map((n) => '<a href="' + n.href + '"'
       + (active === n.key ? ' class="on"' : '') + '>' + n.label + '</a>').join('');
 
+    // 先按「未登录」渲染，避免闪出假的用户信息；拿到真实会话后由 MP.topbar 补上
     return ''
       + '<div class="tinner">'
       +   '<a class="tlogo" href="/">' + icon('logo') + '<span class="tname">MinePage</span></a>'
@@ -376,6 +404,12 @@
    * 挂载顶栏：注入到 body 最前。
    * @param {{active?:string, collapse?:boolean}} [opt]
    *   collapse=true 时在顶栏左下角加「收起/展开」箭头，并在收起后于屏幕顶部留一条触发带
+   *
+   * 副作用不少：改 DOM（插到 body 最前）、往 document 上挂 click 监听（挂上就不摘）、
+   * 读 MP.searchHist / MP.HOT 填搜索面板、发 /api/me 请求，点「退出登录」还会
+   * POST /api/auth/logout 再跳 /login。
+   * 顺序是先本地渲染未登录态、再用会话打补丁，所以登录用户会看到极短的一下「登录 / 注册」，属预期。
+   * 返回注入的 header 元素；一个页面只该调一次，重复调用会插出第二个顶栏（连带两套全局监听）。
    */
   MP.topbar = function (opt) {
     const o = opt || {};
@@ -395,6 +429,11 @@
     const params = new URLSearchParams(location.search);
     if (params.get('q')) input.value = params.get('q');
 
+    /**
+     * 渲染搜索历史词条（每次展开、清空后各调一次）。
+     * 用 textContent 写而不是拼 innerHTML：历史词是用户输入的内容，拼进去会被当成标签。
+     * 绑 mousedown 而不是 click：输入框 blur 后才会延时收起面板，mousedown 早于 blur 触发，点词条不会扑空。
+     */
     function renderHist() {
       const list = MP.searchHist();
       if (!list.length) { histBox.innerHTML = '<span class="none">还没有搜索记录</span>'; return; }
@@ -441,7 +480,8 @@
       MP.goSearch(input.value);
     });
 
-    // 头像下拉
+    // 头像下拉。退出登录同样走委托绑定：用户区是异步补上的，
+    // 直接绑到 #tLogout 元素上会在重渲染之后失效。
     const tu = header.querySelector('#tuser');
     tu.addEventListener('click', (e) => {
       if (e.target.closest('#tLogout')) {
@@ -506,6 +546,10 @@
     handle.innerHTML = icon('triUp', null, 14);
     document.body.appendChild(handle);
 
+    /**
+     * 把当前的收起状态刷到 body 的 class 与按钮 title 上；只读不写 localStorage
+     *（写只在点击时做，所以挂载时能沿用上次的折叠状态）。
+     */
     function sync() {
       document.body.classList.toggle('nav-collapsed', collapsed);
       handle.title = collapsed ? '展开导航栏' : '收起导航栏';
@@ -528,6 +572,12 @@
    * 生成一张站点卡片。
    * @param {object} site 站点数据
    * @param {{peek?:boolean}} [opt]
+   *
+   * 返回的是 DOM 节点（不是 HTML 字符串），由调用方自己 append。
+   * 字段兼容两套来源：页数认接口给的 fileCount，演示数据只有 pages；标签中文名优先 site.tagLabel，
+   * 没有才用 tagLabel(site.tag) 去查词表。
+   * opt.peek=false 时这张卡不挂悬停预览（卡片多的列表页更省）。
+   * 右下角赞 / 藏两个按钮目前只切自己的 .on 样式，不发请求（见函数里的 TODO）。
    */
   MP.vcard = function (site, opt) {
     const o = opt || {};
@@ -615,6 +665,7 @@
   function attachPeek(card, site, cover) {
     let iframe = null;
     let timer = null;
+    /** 悬停 300ms 后才挂 iframe：防止鼠标扫过卡片时一路建预览。 */
     const open = () => {
       timer = setTimeout(() => {
         iframe = document.createElement('iframe');
@@ -633,6 +684,7 @@
         card.appendChild(iframe);
       }, 300);
     };
+    /** 离开卡片：取消还没触发的定时器，并把已挂上的 iframe 摘掉（预览不常驻）。 */
     const close = () => {
       clearTimeout(timer);
       if (iframe) { iframe.remove(); iframe = null; }
@@ -656,6 +708,11 @@
      7. 轻提示
      ---------------------------------------------------------- */
 
+  /**
+   * 页内轻提示：页面顶部居中显示一行字，1.8 秒后淡出。
+   * 节点是单例（#mpToast），连着调用只换文字并重新计时，不会叠出好几个；
+   * 它带 pointer-events:none，所以盖在什么东西上都不挡点击。没有返回值。
+   */
   MP.toast = function (msg) {
     let el = document.getElementById('mpToast');
     if (!el) {
@@ -680,9 +737,12 @@
   let sessionCache;
 
   /**
-   * 获取当前用户。
-   * 前端阶段直接返回演示用户；接后端时改回 fetch('/api/me')。
-   * @returns {Promise<object|null>}
+   * 读取当前会话：{ user, unread, unreadMessages }。
+   *   user          为 null 表示未登录
+   *   unread        未读「动态」（通知）
+   *   unreadMessages 未读「消息」（私信）
+   * 请求失败按未登录处理，不抛错。
+   * @returns {Promise<{user:object|null, unread:number, unreadMessages:number}>}
    */
   MP.session = async function () {
     if (sessionCache !== undefined) return sessionCache;

@@ -36,6 +36,7 @@ const subBox = document.getElementById('sub');
 function bucketOf(ts) {
   const d = new Date(ts);
   const today = new Date();
+  /** 两个日期是否落在同一天（按浏览器的本地时区判断，不做跨时区处理）。 */
   const sameDay = (a, b) => a.getFullYear() === b.getFullYear()
     && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
   if (sameDay(d, today)) return '今天';
@@ -44,12 +45,18 @@ function bucketOf(ts) {
   return '更早';
 }
 
+/** 把时间戳格式化成「月-日 时:分」，只用于列表右侧那一列显示。 */
 function fmtTime(ts) {
   const d = new Date(ts);
   return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
     + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
 
+/**
+ * 整体重画：清空容器，按「今天 / 昨天 / 更早」分组渲染记录，并同步副标题条数和空态。
+ * 数据源是页内变量 records（app.js 演示数据，见文件顶部的 TODO），**不发请求**；
+ * 删除单条和清空都只改这个数组，改完直接调本函数即可。
+ */
 function render() {
   groupsBox.textContent = '';
   emptyBox.hidden = records.length > 0;
@@ -73,6 +80,11 @@ function render() {
   });
 }
 
+/**
+ * 造一条观看记录：渐变缩略图 + 标题链接（/view/:name）+ 作者 / 标签 / 浏览数 + 删除按钮。
+ * 删除按钮只从内存数组 records 里摘掉这一条再重画，**不发请求**（后端其实已有
+ * DELETE /api/history/:name，见文件顶部的 TODO），刷新页面记录就回来了。
+ */
 function rowItem(r) {
   const s = r.site;
   const el = document.createElement('div');

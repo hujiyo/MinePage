@@ -20,6 +20,17 @@
 // 登录身份默认 admin/123（种子管理员），可用 SMOKE_LOGIN / SMOKE_PASSWORD 覆盖；
 // 管理员身份用 ADMIN_LOGIN / ADMIN_PASSWORD 覆盖；服务地址用 BASE_URL 覆盖。
 
+// ---------------------------------------------------------------- 为什么要单独起一套服务
+//
+// 这脚本会真写库：建站、上传和删文件、删站、吊销密钥，--ban-check 那条还会真的把账号封掉
+// 再解封。拿常驻的开发服务跑，等于把真实数据当测试数据，所以先按文件头那行命令起一个
+// 干净的 PORT + DB_FILE，跑完连库文件一起删。
+//
+// 断言本身就依赖「库是干净的」：新账户站点列表必须为空、结束时站点数必须正好 2。
+// 另外每次运行都会新建一把 label='smoke' 的密钥却不回收，同一个账号攒到
+// MCP_TOKENS_PER_USER（10 把）就会被上限挡住，连建密钥都会失败。
+// 端口也要独立：和正在跑的 3000 撞上会莫名其妙地打到别的库。
+
 const BASE = process.env.BASE_URL ?? 'http://127.0.0.1:3100';
 const LOGIN = process.env.SMOKE_LOGIN ?? 'admin';
 const PASSWORD = process.env.SMOKE_PASSWORD ?? '123';
@@ -30,6 +41,12 @@ const isolationIndex = args.indexOf('--isolation');
 let passed = 0;
 let failed = 0;
 
+/**
+ * 记一条断言结果：通过打 ✓，不通过打 ✗ 并把 detail 附在后面（detail 只在失败时显示）。
+ *
+ * 只累加 passed / failed，不抛错也不中断——某条挂了后面的检查照跑，
+ * 一次运行就能拿到完整清单，最后由退出码统一表态。
+ */
 function check(name, ok, detail = '') {
   if (ok) {
     passed += 1;
@@ -40,6 +57,12 @@ function check(name, ok, detail = '') {
   }
 }
 
+/**
+ * 薄封装 fetch：body 有值时自动 JSON 序列化并带上 Content-Type，cookie 是整条 Cookie 头。
+ *
+ * 不抛 HTTP 错误，JSON 解析失败时 body 为 null，所以调用方必须自己看 res.status 或 body?.ok
+ * ——这条脚本里既要用状态码断言（401 / 405 / 413），也要用 body.ok 断言，两者都不能省。
+ */
 async function api(path, { cookie, method = 'GET', body } = {}) {
   const res = await fetch(BASE + path, {
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -52,6 +75,11 @@ async function api(path, { cookie, method = 'GET', body } = {}) {
   return { body: await res.json().catch(() => null), res };
 }
 
+/**
+ * 用网页登录接口换一个 Cookie 会话，返回 { cookie, user }。
+ * Set-Cookie 的多个头只取每条的 name=value 拼成一条 Cookie，属性（Path / HttpOnly / Max-Age）丢掉。
+ * 登录失败直接抛：后面的接口全靠这个 cookie，继续跑没有意义。
+ */
 async function login(loginValue = LOGIN, passwordValue = PASSWORD) {
   const { res, body } = await api('/api/auth/login', {
     body: { login: loginValue, password: passwordValue },
@@ -62,8 +90,10 @@ async function login(loginValue = LOGIN, passwordValue = PASSWORD) {
   return { cookie, user: body.user };
 }
 
-/** 用管理员身份调接口（封禁联动那条要用），登录态懒加载一次。 */
+/** 管理员会话 Cookie 的缓存，第一次调用 adminApi 时登录并填上。 */
 let adminCookie = '';
+
+/** 用管理员身份调接口（封禁联动那条要用），登录态懒加载一次。 */
 async function adminApi(path, options = {}) {
   if (!adminCookie) {
     const session = await login(
@@ -75,12 +105,21 @@ async function adminApi(path, options = {}) {
   return api(path, { ...options, cookie: adminCookie });
 }
 
+/**
+ * 建一把密钥，只拿走明文 token（record 里的 id / 时间这里用不上）。
+ * 明文只在创建响应里出现一次，所以后续所有 MCP 调用都靠它。
+ */
 async function mintToken(cookie, label) {
   const { body } = await api('/api/mcp/tokens', { body: { label }, cookie, method: 'POST' });
   if (!body?.ok) throw new Error(`创建密钥失败：${body?.message}`);
   return body.token;
 }
 
+/**
+ * 直接往 /mcp 发一条 JSON-RPC 消息，密钥走 Authorization 头。
+ * token 为空串时不带 Authorization —— 这是故意留的，用来验证「没密钥就 401」。
+ * 只看 body 和 res，不检查状态码：状态码断言留给调用方，这样同一个函数能测 200 / 202 / 401 各分支。
+ */
 async function rpc(token, method, params, id = 1) {
   const res = await fetch(`${BASE}/mcp`, {
     body: JSON.stringify({ id, jsonrpc: '2.0', method, params }),
@@ -164,6 +203,13 @@ async function runBanCheck(token, email, sessionUser) {
 
 // ---------------------------------------------------------------- 密钥吊销
 
+/**
+ * 验证吊销链路：吊销前可用（200）→ 吊销 → 立刻 401 → 再吊销一次 404。
+ *
+ * 待吊销的那把是按 label='smoke' 去 /api/mcp/tokens 里找的，所以依赖入口用同一个 label 建密钥；
+ * 同 label 有多把时列表按 id 倒序，取到的正是本次刚建的那把。
+ * 关键在于「吊销后立刻 401」：吊销就是删行，鉴权必须当场查不到，不能有任何缓存兜着。
+ */
 async function runRevokeCheck(cookie, token) {
   console.log('\n吊销：吊销后密钥立刻失效\n');
 
@@ -186,6 +232,14 @@ async function runRevokeCheck(cookie, token) {
 
 // ---------------------------------------------------------------- 主流程
 
+/**
+ * 主流程回归：密钥管理 → 协议层 → 单页站 → 多页站 → 收尾。
+ *
+ * 前提是库干净：开头就断言新账户站点列表为空，结尾断言删完清空、站点数正好 2。
+ * 副作用：结尾会留下一个 SMOKE_FRIEND（默认 smoke-friend）站点给隔离测试用，
+ * 那把 'smoke' 密钥也不回收——所以同一个库反复跑会攒到密钥上限。
+ * 这里只打印「接着跑隔离测试」的提示，不自己跑：隔离测试必须换另一个账号的密钥。
+ */
 async function runMain(cookie, token) {
   // --- 密钥管理 ---
   console.log('密钥管理');
@@ -368,6 +422,7 @@ async function runMain(cookie, token) {
 
 // ---------------------------------------------------------------- 入口
 
+// 四种模式互斥，按命令行参数挑一个跑；不管是哪一种，都先登录并新建一把 label='smoke' 的密钥。
 const { cookie, user } = await login();
 console.log(`\n以 ${user.email}（id=${user.id}）登录 ${BASE}\n`);
 

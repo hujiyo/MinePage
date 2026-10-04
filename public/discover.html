@@ -63,6 +63,13 @@ const hotBox = document.getElementById('hot');
 
 // ---------------------------------------------------------------- 轮播
 
+/**
+ * 在首页顶部挂一张自动轮播的 banner：4.5s 换一张，鼠标移入暂停、移出继续，点整张进 /view/:site。
+ * 带搜索词（?q=）时直接不渲染，把版面让给搜索结果。
+ * 目前启动处是注释掉的（见文件末尾的说明）：MP.BANNERS 是写死的运营配置，指向的站点在真实库里
+ * 都不存在，图片也来自外部地址。
+ * 副作用：往 bannerArea 追加节点，并留下一个 4.5s 的 setInterval（页面卸载前不会主动清理）。
+ */
 function mountBanner() {
   if (q) return; // 搜索结果页不显示轮播，把版面让给结果
   const list = MP.BANNERS;
@@ -71,6 +78,11 @@ function mountBanner() {
   let idx = 0;
   let timer = null;
 
+  /**
+   * 按当前下标 idx 重画 banner 的图片、文案、左右箭头和圆点。
+   * 整块用 innerHTML 重建，所以箭头和圆点的事件必须每次重新绑定——这正是它们写在本函数里、
+   * 而不是在 mountBanner 里绑一次的原因。
+   */
   function paint() {
     const b = list[idx];
     el.innerHTML =
@@ -88,11 +100,21 @@ function mountBanner() {
     });
   }
 
+  /**
+   * 切到指定下标的 banner：先对 list.length 取模实现首尾回环（传 idx-1 / idx+1 即可左右翻，
+   * 越界的负数也会被纠正），再重画并重置自动轮播计时器。
+   */
   function go(i) {
     idx = (i + list.length) % list.length;
     paint();
     restart();
   }
+
+  /**
+   * 重置自动轮播计时器：先 clearInterval 再重新 setInterval，间隔固定 4.5s。
+   * 悬停暂停只是 clearInterval（不把 timer 置空），所以移出时调本函数恢复即可；
+   * 重复调用是安全的，不会叠出两个计时器。
+   */
   function restart() {
     clearInterval(timer);
     timer = setInterval(() => { idx = (idx + 1) % list.length; paint(); }, 4500);
@@ -112,6 +134,11 @@ function mountBanner() {
 
 // ---------------------------------------------------------------- 分类 chips
 
+/**
+ * 渲染分类 chips（词表来自 MP.TAGS，其中 '' 是「全部」、'hot' 是伪标签）。
+ * 点击会改全局 tag、重绘自身并调用 reload() 重新拉列表——本函数只管视图，
+ * 真正带参数的请求在 reload() 里，伪标签 hot 在那里被映射成 sort=views。
+ */
 function renderChips() {
   chipsBox.textContent = '';
   MP.TAGS.forEach((t) => {
@@ -125,6 +152,11 @@ function renderChips() {
 
 // ---------------------------------------------------------------- 侧栏
 
+/**
+ * 渲染右侧栏两块列表：「热门榜单」点进观看页，「热搜」走 MP.goSearch（跳 /?q=）。
+ * 数据源仍是 app.js 里的演示数据 MP.topSites(10) 与 MP.HOT，**不发请求**；
+ * 主信息流 reload() 已经换成真实接口，侧栏这两块还没接后端，目前也没有 TODO 标记。
+ */
 function renderSide() {
   const tops = MP.topSites(10);
   rankBox.textContent = '';
@@ -188,6 +220,12 @@ async function reload() {
   }
 }
 
+// 轮播位恢复正常渲染。
+// 注意：MP.BANNERS 是写死的运营配置（TODO 后端对接：轮播位来自运营配置），
+// 它指向 aurora-portfolio / mini-vue / opensource-landing 三个站点。
+// 这三个在**演示数据 MP.SITES 里存在**，所以现在点得开；
+// 等 view.html 接上真实接口之后它们就不存在了，届时轮播位需要换成真实的运营配置。
+// 图片来自外部第三方地址，不受我们控制，加载失败时会是个空框。
 mountBanner();
 renderChips();
 renderSide();

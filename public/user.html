@@ -77,6 +77,12 @@ let following = false;
 let isOwn = false;
 
 // TODO 后端对接：替换为 fetch('/api/u/:name/profile')
+/**
+ * 拼出这个创作者的公开资料：{ user, sites, stats }。
+ * 作品为空、且用户名也不是当前登录的演示身份（MP.ME）时返回 null，调用方据此显示「没有这个创作者」。
+ * 数据源是 MP.SITES 这份演示数据（按 s.author.username 过滤），**不发任何请求**；
+ * 粉丝数是拿作品点赞数凑的（1280 + 点赞 % 900），关注数写死 86，简介也是写死的示例文案。
+ */
 function loadProfile() {
   const sites = MP.SITES.filter((s) => s.author.username === USERNAME);
   const mine = USERNAME === MP.ME.username;
@@ -84,6 +90,7 @@ function loadProfile() {
   if (!sites.length && !mine) return null;
 
   const name = sites.length ? sites[0].author.name : MP.ME.name;
+  /** 把这批站点的某个数字字段加起来（用于统计条上的总浏览 / 总赞 / 总收藏）。 */
   const sum = (k) => sites.reduce((n, s) => n + (s[k] || 0), 0);
   return {
     user: { name, username: USERNAME, bio: mine ? MP.ME.bio : '喜欢把想法做成能点开的网页。' },
@@ -108,6 +115,11 @@ const FAV_FOLDERS = [
 
 // ---------------------------------------------------------------- 头部
 
+/**
+ * 渲染创作者主页的头部与「关于」页：页面标题、头像首字、展示名、简介、统计条和关于页的数字。
+ * 只处理头部这一块，作品列表和收藏夹在 renderChips / renderWorks / renderFavs 里。
+ * 会顺带刷新全局 isOwn，而 renderActions 依赖它，所以本函数必须跑在那之前（启动分支就是这么做的）。
+ */
 function renderProfile() {
   const { user, stats } = profile;
   isOwn = USERNAME === MP.ME.username;
@@ -133,6 +145,11 @@ function renderProfile() {
   ].map(([label, val]) => '<div class="stat"><b>' + val + '</b><span>' + label + '</span></div>').join('');
 }
 
+/**
+ * 重建头部右侧的操作区：看自己的主页只给「编辑资料」，看别人的给「关注」+「私信」。
+ * 关注按钮只翻转本地变量 following 再重绘，**不发请求**（见函数内 TODO），刷新即复原。
+ * isOwn 由 renderProfile 赋值，本函数不能先于它单独调用，否则会按「不是自己」渲染。
+ */
 function renderActions() {
   actionsBox.textContent = '';
 
@@ -166,6 +183,10 @@ function renderActions() {
 
 // ---------------------------------------------------------------- 作品
 
+/**
+ * 重建作品标签筛选条：只列出这个创作者真的有作品的标签（带条数），并高亮当前选中的 tag。
+ * 点击会先改全局 tag，再同时重绘筛选条和作品列表——只重绘其中一个会让选中态和列表对不上。
+ */
 function renderChips() {
   chipsBox.textContent = '';
   chipsBox.appendChild(chip('全部 ' + profile.sites.length, tag === '', () => {
@@ -180,6 +201,10 @@ function renderChips() {
   });
 }
 
+/**
+ * 造一个可点的筛选标签（span.chip，active 控制高亮），返回未挂载的节点给调用方插入。
+ * 文字用 textContent 写入，不必再转义；点击行为完全由 onClick 参数决定。
+ */
 function chip(label, active, onClick) {
   const el = document.createElement('span');
   el.className = 'chip' + (active ? ' active' : '');
@@ -188,11 +213,21 @@ function chip(label, active, onClick) {
   return el;
 }
 
+/**
+ * 把当前创作者的作品按 tag 过滤后交给 MP.renderCards 渲染（tag 是空串表示不筛选）。
+ * 依赖全局 profile 已就绪；过滤后为空时由 MP.renderCards 自己渲染「没有找到相关页面」占位。
+ */
 function renderWorks() {
   const sites = tag ? profile.sites.filter((s) => s.tag === tag) : profile.sites;
   MP.renderCards(cardsBox, sites);
 }
 
+/**
+ * 渲染「收藏」页：收藏夹 chips + 当前收藏夹里的站点卡片。
+ * 数据源是下面写死的 FAV_FOLDERS 演示数据（内容来自 MP.topSites(4) 和按 tag 从 MP.SITES 里
+ * 筛出来的站点），**不发请求**，这一块目前也没有 TODO 标记。
+ * favFolder 存的是下标，点 chips 先改它再整体重绘；FAV_FOLDERS 至少要有一项，否则取 .sites 会抛错。
+ */
 function renderFavs() {
   favChipsBox.textContent = '';
   FAV_FOLDERS.forEach((f, i) => {

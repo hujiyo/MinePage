@@ -91,12 +91,21 @@ const folderInput = document.getElementById('folderInput');
 const submit = document.getElementById('submit');
 const result = document.getElementById('result');
 
+/**
+ * 把 & < > " ' 转成 HTML 实体，用于拼 innerHTML 时包住文件名和服务端返回的 message。
+ * 和 app.js 的 MP.esc 几乎一样，区别是本函数不兜 null / undefined（会转出 "undefined" 字样），
+ * 本页调用点传给它的都是已知字符串。
+ */
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   })[c]);
 }
 
+/**
+ * 在表单下方显示一条结果（ok 决定绿色 / 红色配色），每次调用覆盖上一条。
+ * html 是按 HTML 插入的，所以拼接文件名、message 和链接时调用方必须自己先做转义。
+ */
 function showResult(ok, html) {
   result.hidden = false;
   result.className = 'result ' + (ok ? 'ok' : 'err');
@@ -179,6 +188,10 @@ folderInput.addEventListener('change', () => {
 
 // 拖放：文件直接读，文件夹用 webkitGetAsEntry 递归展开
 
+/**
+ * 把目录读取器的分页接口读完：readEntries 每次最多返回 100 条，这里反复读到空数组才结束。
+ * 返回 Promise<FileSystemEntry[]>；读取失败时以读取器的错误 reject，本函数只负责收集、不过滤。
+ */
 function readAllEntries(reader) {
   return new Promise((resolve, reject) => {
     const all = [];
@@ -193,6 +206,13 @@ function readAllEntries(reader) {
   });
 }
 
+/**
+ * 递归展开拖入的 FileSystemEntry，把文件收成 { path, file, fromDir } 数组，目录继续下钻。
+ * path 是站内相对路径：fullPath 形如「/站点名/css/style.css」，所以要砍掉第一段（拖入的文件夹名）；
+ * 直接拖单个文件时 fullPath 只有一段，退回用 file.name。
+ * fromDir 标记「这个文件是从文件夹里翻出来的」，调用方靠它判断来源：拖入文件夹时即使里面
+ * 只有一个 HTML 也不会走单页模式（applyPick 要求 source !== 'folder'）。
+ */
 async function walkEntry(entry) {
   if (entry.isFile) {
     const file = await new Promise((res, rej) => entry.file(res, rej));

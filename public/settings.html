@@ -98,12 +98,18 @@ const codeInput = document.getElementById('code');
 const sendCodeBtn = document.getElementById('sendCode');
 const codeHint = document.getElementById('codeHint');
 
+/** 在改密码表单下面的结果条里显示提示；不会自动消失，下一次调用直接覆盖。 */
 function showMsg(ok, text) {
   msg.hidden = false;
   msg.className = 'result ' + (ok ? 'ok' : 'err');
   msg.textContent = text;
 }
 
+/**
+ * 发一个 JSON POST 并返回解析后的响应体。
+ * 注意：这里**不看 HTTP 状态码**，成败一律由调用方读 data.ok / data.message 判断，
+ * 所以 4xx / 5xx 的响应不会在这里抛错。
+ */
 async function post(url, payload) {
   const res = await fetch(url, {
     method: 'POST',
@@ -116,6 +122,11 @@ async function post(url, payload) {
 let countdown = 0;
 let timer = null;
 
+/**
+ * 禁用「发送验证码」按钮并按秒倒计时，结束后把文案改成「重新发送」。
+ * 副作用：覆盖模块级的 timer，且不会先清掉上一个计时器 —— 所以只在按钮已经被禁用的
+ * 场景下调用（本文件只在发送成功之后调），别在别处随手调。
+ */
 function startCountdown(seconds) {
   countdown = seconds;
   sendCodeBtn.disabled = true;
@@ -193,6 +204,7 @@ const tokenTable = document.getElementById('tokenTable');
 const tokenBody = document.getElementById('tokenBody');
 const tokenEmpty = document.getElementById('tokenEmpty');
 
+/** 造一个元素，可带 class 和文本；text 传 undefined 就不设 textContent，方便后面自己塞子节点。 */
 function el(tag, text, className) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -200,12 +212,14 @@ function el(tag, text, className) {
   return node;
 }
 
+/** MCP 密钥区域的专用提示条；和改密码那条（showMsg）是两个不同的 DOM，互不影响。 */
 function showTokenMsg(ok, text) {
   tokenMsg.hidden = false;
   tokenMsg.className = 'result ' + (ok ? 'ok' : 'err');
   tokenMsg.textContent = text;
 }
 
+/** 时间只截前 10 个字符当日期用（后端给的是 ISO 字符串）；空值显示 '—'。 */
 function formatTime(value) {
   return value ? String(value).slice(0, 10) : '—';
 }
@@ -240,6 +254,11 @@ function revealToken(token) {
   document.getElementById('cmdUrl').textContent = `${origin}/mcp/${token}`;
 }
 
+/**
+ * 拉当前账号的 MCP 密钥列表（GET /api/mcp/tokens）并重建表格，顺带切换表格与空态的显隐。
+ * data.ok 为 false 时静默返回，界面保持原样；接口只给名称和创建 / 最后使用时间，
+ * 明文密钥不会再出现第二次。
+ */
 async function loadTokens() {
   const res = await fetch('/api/mcp/tokens');
   const data = await res.json();
@@ -266,6 +285,10 @@ async function loadTokens() {
   }
 }
 
+/**
+ * 吊销一把密钥（POST /api/mcp/tokens/:id/revoke），删之前先弹 confirm。
+ * 成功后顺手藏掉密钥展示区并重拉列表；正在用这把密钥的 AI 客户端会立刻失效。
+ */
 async function revokeToken(id, label) {
   if (!confirm(`吊销密钥「${label}」？正在用它的 AI 客户端会立刻失效。`)) return;
 

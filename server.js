@@ -140,10 +140,15 @@ const MIME_TYPES = {
 
 // ---------------------------------------------------------------- 基础工具
 
+/**
+ * 从请求的 Host 头拼出本站对外源（形如 http://host:port），生成站点绝对地址时用。
+ * 注意 scheme 写死 http://：站点跑在 HTTPS 反向代理后面时会拼出 http 链接。
+ */
 function originOf(req) {
   return `http://${req.headers.host ?? `${HOST}:${PORT}`}`;
 }
 
+/** 回一个 JSON 响应。固定 no-store，Content-Length 按 UTF-8 字节数算。 */
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
@@ -154,6 +159,7 @@ function sendJson(res, status, payload) {
   res.end(body);
 }
 
+/** 回一段 HTML，带 nosniff；extraHeaders 用来追加 CSP 之类的头，同名键会覆盖默认值。 */
 function sendHtml(res, status, html, extraHeaders = {}) {
   const body = Buffer.from(html, 'utf8');
   res.writeHead(status, {
@@ -165,11 +171,16 @@ function sendHtml(res, status, html, extraHeaders = {}) {
   res.end(body);
 }
 
+/** 302 跳转，固定带 no-store，避免浏览器把带登录态的跳转缓存住。 */
 function sendRedirect(res, location) {
   res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
   res.end();
 }
 
+/**
+ * 读 public/ 下的静态页面文件下发。filename 由调用方硬编码，不来自用户输入。
+ * 文件缺失时不抛异常，而是降级成一张 500 提示页，服务继续跑。
+ */
 async function sendPage(res, filename, status = 200) {
   try {
     const html = await fs.readFile(path.join(PUBLIC_DIR, filename), 'utf8');
@@ -179,6 +190,7 @@ async function sendPage(res, filename, status = 200) {
   }
 }
 
+/** 写会话 Cookie。maxAge 单位是秒，传 0 表示立即失效（登出用）。 */
 function setSessionCookie(res, token, maxAge) {
   res.setHeader(
     'Set-Cookie',
@@ -186,6 +198,7 @@ function setSessionCookie(res, token, maxAge) {
   );
 }
 
+/** 从 Cookie 头里取会话 token，没有就回 null。 */
 function sessionToken(req) {
   return parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? null;
 }
@@ -198,6 +211,12 @@ function currentUser(req) {
   return publicUser(row);
 }
 
+/**
+ * 收完请求体再 JSON.parse。
+ * 超过 limit 会 reject { code: 'TOO_LARGE' } 并 destroy 掉请求，连接被直接掐断——
+ * 调用方此时再回 413 不一定送得出去；不是合法 JSON 则 reject { code: 'BAD_JSON' }。
+ * 裸函数，不负责回响应。
+ */
 function readJsonBody(req, limit = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -234,6 +253,7 @@ function readJsonBody(req, limit = MAX_BODY_BYTES) {
   });
 }
 
+/** 与 readJsonBody 同样的收流 / 限流逻辑，只是原样返回 Buffer（二进制文件上传用）。 */
 function readRawBody(req, limit = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -286,6 +306,7 @@ async function readFileBody(req, res, limit) {
   }
 }
 
+/** 登录守卫：未登录时已经替你回了 401 并返回 null，调用方写 `if (!user) return;` 即可。 */
 function requireLogin(req, res) {
   const user = currentUser(req);
   if (!user) {
@@ -295,6 +316,7 @@ function requireLogin(req, res) {
   return user;
 }
 
+/** 管理员守卫：未登录回 401、已登录但不是管理员回 403，两种情况都返回 null。 */
 function requireAdmin(req, res) {
   const user = requireLogin(req, res);
   if (!user) return null;
@@ -312,7 +334,7 @@ async function handleRoot(req, res) {
   await sendPage(res, 'discover.html');
 }
 
-/** 上传页（原来的首页）。 */
+/** 上传页（原来的首页）。上传必须登录，所以页面本身就挡掉未登录访问。 */
 async function handleUploadPage(req, res) {
   if (!currentUser(req)) {
     sendRedirect(res, '/login');
@@ -321,6 +343,7 @@ async function handleUploadPage(req, res) {
   await sendPage(res, 'index.html');
 }
 
+/** 登录页；已登录用户直接跳回首页。 */
 async function handleLoginPage(req, res) {
   if (currentUser(req)) {
     sendRedirect(res, '/');
@@ -329,6 +352,7 @@ async function handleLoginPage(req, res) {
   await sendPage(res, 'login.html');
 }
 
+/** 管理后台页；未登录跳登录页，已登录但不是管理员时回 403 页面而不是跳转，避免来回弹。 */
 async function handleAdminPage(req, res) {
   const user = currentUser(req);
   if (!user) {
@@ -342,6 +366,7 @@ async function handleAdminPage(req, res) {
   await sendPage(res, 'admin.html');
 }
 
+/** 设置页（改密码 / 换绑邮箱 / MCP 密钥管理），未登录跳登录页。 */
 async function handleSettingsPage(req, res) {
   if (!currentUser(req)) {
     sendRedirect(res, '/login');
@@ -350,6 +375,7 @@ async function handleSettingsPage(req, res) {
   await sendPage(res, 'settings.html');
 }
 
+/** 找回密码页；已登录用户直接跳回首页。 */
 async function handleForgotPage(req, res) {
   if (currentUser(req)) {
     sendRedirect(res, '/');
@@ -358,6 +384,7 @@ async function handleForgotPage(req, res) {
   await sendPage(res, 'forgot.html');
 }
 
+/** 个人资料页（用户名 / 简介），未登录跳登录页。 */
 async function handleAccountPage(req, res) {
   if (!currentUser(req)) {
     sendRedirect(res, '/login');
@@ -384,6 +411,10 @@ async function handleSiteEditPage(req, res) {
   await sendPage(res, 'site.html');
 }
 
+/**
+ * 平台自己的静态资源（/_assets/<文件名>，目前主要是 style.css）。
+ * 只放行单层文件名，挡掉 ../ 穿越；扩展名查 MIME_TYPES，查不到按 octet-stream 下发。
+ */
 async function handleAsset(req, res, [file]) {
   // 只放行单层文件名，杜绝 ../ 之类的穿越
   if (!/^[a-zA-Z0-9._-]+$/.test(file) || file.includes('..')) {
@@ -406,6 +437,10 @@ async function handleAsset(req, res, [file]) {
 
 // ---------------------------------------------------------------- 账号接口
 
+/**
+ * GET /api/me：当前登录用户 + 未读通知数 / 未读私信数，导航条一次请求拿全。
+ * 未登录时不报 401，而是 user: null、两个未读数都为 0，前端据此决定显示登录入口还是头像。
+ */
 async function handleMe(req, res) {
   const user = currentUser(req);
   // 登录用户附带未读通知数 / 未读私信数，导航条不用额外请求
@@ -417,6 +452,10 @@ async function handleMe(req, res) {
   });
 }
 
+/**
+ * POST /api/auth/login：校验账号密码（登录名可以是邮箱也可以是用户名），成功后建会话并下发 Cookie。
+ * 密码错回 401，账号被封回 403，两种文案不同。
+ */
 async function handleLogin(req, res) {
   const body = await readBody(req, res);
   if (!body) return;
@@ -438,6 +477,7 @@ async function handleLogin(req, res) {
   sendJson(res, 200, { ok: true, user: publicUser(user) });
 }
 
+/** POST /api/auth/logout：删掉服务端会话记录并把 Cookie 置空；本来就没登录也照常回 ok。 */
 async function handleLogout(req, res) {
   deleteSession(sessionToken(req));
   setSessionCookie(res, '', 0);
@@ -646,6 +686,7 @@ async function handleChangePassword(req, res) {
 
 // ---------------------------------------------------------------- 账号自助设置接口
 
+/** POST /api/account/username：改用户名（body.username 传空即清空）。名字不合法回 400、被占用回 409。 */
 async function handleAccountUsername(req, res) {
   const user = requireLogin(req, res);
   if (!user) return;
@@ -669,6 +710,10 @@ async function handleAccountUsername(req, res) {
   }
 }
 
+/**
+ * POST /api/account/password：已登录状态下凭「当前密码」直接改密码。
+ * 与 /api/auth/password 的区别：这里不校验邮箱验证码，也不踢其他设备的会话。
+ */
 async function handleAccountPassword(req, res) {
   const user = requireLogin(req, res);
   if (!user) return;
@@ -710,6 +755,11 @@ async function handleAccountBio(req, res) {
 
 // ---------------------------------------------------------------- 站点接口
 
+/**
+ * GET /api/sites：当前用户的站点列表（个人中心用）。
+ * kind 由 file_count 反推（有附件文件就是 multi，否则 single）；
+ * totalSize = 入口 html 大小 + 全部附件大小之和。
+ */
 async function handleMySites(req, res) {
   const user = requireLogin(req, res);
   if (!user) return;
@@ -732,6 +782,7 @@ async function handleMySites(req, res) {
   sendJson(res, 200, { ok: true, sites });
 }
 
+/** POST /api/upload：老的单 HTML 上传入口，校验站名与体积后建站，返回可访问的绝对 URL。 */
 async function handleUpload(req, res) {
   const user = requireLogin(req, res);
   if (!user) return;
@@ -1085,6 +1136,7 @@ async function handleSiteStats(req, res, [name]) {
   });
 }
 
+/** 点赞（幂等，重复点仍回成功）；已下线站点回 451，拒绝新的互动。 */
 async function handleSiteLike(req, res, [name]) {
   const user = requireLogin(req, res);
   if (!user) return;
@@ -1096,6 +1148,7 @@ async function handleSiteLike(req, res, [name]) {
   sendJson(res, 200, { ok: true, liked: true, likes: countLikes(site.id) });
 }
 
+/** 取消点赞。这里不校验站点状态，已下线的站点也能取消（只有点赞那条路才会挡）。 */
 async function handleSiteUnlike(req, res, [name]) {
   const user = requireLogin(req, res);
   if (!user) return;
@@ -1107,6 +1160,7 @@ async function handleSiteUnlike(req, res, [name]) {
   sendJson(res, 200, { ok: true, liked: false, likes: countLikes(site.id) });
 }
 
+/** 评论列表，公开只读接口。同样不校验站点状态，已下线站点已有的评论仍看得见。 */
 async function handleSiteCommentsList(req, res, [name]) {
   const site = siteHeaderOrRespond(res, name);
   if (!site) return;
@@ -1114,6 +1168,10 @@ async function handleSiteCommentsList(req, res, [name]) {
   sendJson(res, 200, { ok: true, total: countComments(site.id), comments: listComments(site.id) });
 }
 
+/**
+ * 发评论。body.replyTo 可选，只支持一级回复：被回复的评论必须存在且属于同一个站点。
+ * 响应里直接带回新评论和最新总数，前端不用再拉一次列表。
+ */
 async function handleSiteCommentAdd(req, res, [name]) {
   const user = requireLogin(req, res);
   if (!user) return;
@@ -1181,6 +1239,7 @@ async function handleSiteCommentDelete(req, res, [name, id]) {
   sendJson(res, 200, { ok: true, total: countComments(site.id) });
 }
 
+/** 收藏。body.folder 是收藏夹名，缺省「默认收藏夹」，最长 50 字。已下线站点回 451。 */
 async function handleSiteFavorite(req, res, [name]) {
   const user = requireLogin(req, res);
   if (!user) return;
@@ -1202,6 +1261,7 @@ async function handleSiteFavorite(req, res, [name]) {
   sendJson(res, 200, { ok: true, favorited: true, favorites: countFavorites(site.id) });
 }
 
+/** 取消收藏。同样不校验站点状态，已下线的站点也能取消。 */
 async function handleSiteUnfavorite(req, res, [name]) {
   const user = requireLogin(req, res);
   if (!user) return;
@@ -1232,6 +1292,7 @@ async function handleUserFollow(req, res, [id]) {
   sendJson(res, 200, { ok: true, following: true, followers: socialProfile(targetId).followers });
 }
 
+/** 取关（按用户 id）。取关本身幂等，没关注过也回 ok；只有目标用户确实不存在才回 404。 */
 async function handleUserUnfollow(req, res, [id]) {
   const user = requireLogin(req, res);
   if (!user) return;
@@ -1330,7 +1391,7 @@ async function handleViewPage(req, res) {
   await sendPage(res, 'view.html');
 }
 
-/** 通知列表页。 */
+/** 通知列表页。通知是私人的，和其他「我的」页面一样挡掉未登录访问。 */
 async function handleNotificationsPage(req, res) {
   if (!currentUser(req)) {
     sendRedirect(res, '/login');
@@ -1536,6 +1597,7 @@ async function handleMcpPost(req, res) {
   await handleMcp(req, res, '');
 }
 
+/** /mcp/<key> 形式的 MCP 入口，密钥从路径段取（优先级低于 Authorization 头和 ?key=）。 */
 async function handleMcpPostWithKey(req, res, [key]) {
   await handleMcp(req, res, key);
 }
@@ -1548,6 +1610,10 @@ async function handleMcpTokenList(req, res) {
   sendJson(res, 200, { ok: true, tokens: listMcpTokens(user.id) });
 }
 
+/**
+ * POST /api/mcp/tokens：给自己的账号新建一把 MCP 密钥。
+ * 返回的 token 明文只出现这一次，库里只存 sha256，所以必须让用户当场存下。
+ */
 async function handleMcpTokenCreate(req, res) {
   const user = requireLogin(req, res);
   if (!user) return;
@@ -1572,6 +1638,7 @@ async function handleMcpTokenCreate(req, res) {
   }
 }
 
+/** POST /api/mcp/tokens/:id/revoke：吊销自己的一把密钥；不存在或不属于自己都回 404。 */
 async function handleMcpTokenRevoke(req, res, [id]) {
   const user = requireLogin(req, res);
   if (!user) return;
@@ -1586,6 +1653,7 @@ async function handleMcpTokenRevoke(req, res, [id]) {
 
 // ---------------------------------------------------------------- 管理接口
 
+/** GET /api/admin/users：全部用户，按 id 倒序最多 200 条（已过 publicUser，不含密码哈希）。 */
 async function handleAdminUsers(req, res) {
   if (!requireAdmin(req, res)) return;
 
@@ -1596,6 +1664,10 @@ async function handleAdminUsers(req, res) {
   });
 }
 
+/**
+ * POST /api/admin/users/:id/status：封禁 / 解封。只认 body.status === 'banned'，其余值一律按 active 处理。
+ * 不能封自己；封禁不删会话记录，但 currentUser 会把非 active 的账号当未登录，效果是立刻掉线。
+ */
 async function handleAdminUserStatus(req, res, [id]) {
   const admin = requireAdmin(req, res);
   if (!admin) return;
@@ -1620,6 +1692,7 @@ async function handleAdminUserStatus(req, res, [id]) {
   sendJson(res, 200, { ok: true, id: targetId, status });
 }
 
+/** GET /api/admin/sites：全部站点（含已下线的），管理页列表用。 */
 async function handleAdminSites(req, res) {
   if (!requireAdmin(req, res)) return;
 
@@ -1630,6 +1703,10 @@ async function handleAdminSites(req, res) {
   });
 }
 
+/**
+ * POST /api/admin/sites/:id/status：上线 / 下线站点。只认 body.status === 'offline'，其余值按 active 处理。
+ * 下线后访问回 451，且不能再被赞 / 评 / 藏。
+ */
 async function handleAdminSiteStatus(req, res, [id]) {
   if (!requireAdmin(req, res)) return;
 
@@ -1647,6 +1724,7 @@ async function handleAdminSiteStatus(req, res, [id]) {
   sendJson(res, 200, { ok: true, id: Number(id), status });
 }
 
+/** DELETE /api/admin/sites/:id：管理员直接删站（site_files 靠外键级联一起清掉）。 */
 async function handleAdminDeleteSite(req, res, [id]) {
   if (!requireAdmin(req, res)) return;
 
@@ -1661,6 +1739,10 @@ async function handleAdminDeleteSite(req, res, [id]) {
 
 // ---------------------------------------------------------------- 用户站点
 
+/**
+ * 按扩展名猜 MIME 下发一个站点文件，content 是刚从库里取出来的 Buffer。
+ * html / htm / svg / xml 都是能带脚本的文档类型，必须补 SANDBOX_CSP 关进沙箱，漏一个就前功尽弃。
+ */
 function serveSiteFile(res, filePath, content) {
   const ext = path.extname(filePath).toLowerCase();
   // html / svg / xml 都是可以带脚本的文档类型，必须一起关进沙箱
@@ -1676,6 +1758,12 @@ function serveSiteFile(res, filePath, content) {
   res.end(content);
 }
 
+/**
+ * GET /站名[/站内路径]：用户站点的兜底路由，只有平台自己的路由全没命中时才会走到这里。
+ * rest 为空或 '/' 时取 index.html，且只有入口页才 +1 浏览量（站内 css / js 子资源不算）。
+ * 站内文件不存在时会退回老的「单 HTML 站点」兜底，但只兜 index.html，子路径一律 404。
+ * 站点不存在回 404，非 active 回 451。
+ */
 function handleSite(req, res, [name, rest = '']) {
   const site = findSiteHeaderByName(name);
 
@@ -1802,6 +1890,12 @@ const ROUTES = [
   ['POST', /^\/api\/mcp\/tokens\/(\d+)\/revoke$/, handleMcpTokenRevoke],
 ];
 
+/**
+ * 总入口：先按 ROUTES 逐条匹配（method + 正则），命中就把正则捕获组数组当作第三个参数交给 handler。
+ * 全都没命中才依次尝试：/mcp 非 POST 的 405 → 用户站点兜底（只 GET）→ 404。
+ * favicon.ico 在最前面短路成 204，免得掉进用户站点那条路变成误导性的 404。
+ * 这里不兜异常，异常统一由 createServer 的回调捕获。
+ */
 async function handleRequest(req, res) {
   const { pathname } = new URL(req.url, 'http://internal');
 
@@ -1847,6 +1941,7 @@ async function handleRequest(req, res) {
 
 // ---------------------------------------------------------------- 通用页面
 
+/** HTML 转义（& < > " '），只用在 messagePage 拼提示页时。 */
 function escapeHtml(text) {
   return String(text).replace(
     /[&<>"']/g,
@@ -1854,6 +1949,7 @@ function escapeHtml(text) {
   );
 }
 
+/** 拼一张最简单的提示页（404 / 403 / 已下线等场景直接 sendHtml 出去）。两个参数都会被转义，不要再转一遍。 */
 function messagePage(title, message) {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1886,6 +1982,10 @@ const server = http.createServer((req, res) => {
   });
 });
 
+/**
+ * SIGINT / SIGTERM 的优雅退出：停收新连接 → 关数据库 → 退出码 0。
+ * 5 秒还没关干净就强退 1；这个兜底定时器 unref 过，不会挡正常退出。
+ */
 function shutdown(signal) {
   console.log(`\n收到 ${signal}，正在关闭…`);
   server.close(() => {
