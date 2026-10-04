@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>创作者主页 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<main class="page wide">
+  <div id="notFound" class="empty" hidden>
+    没有这个创作者。TA 可能还没设置用户名，或者账号已注销。<br><br><a href="/">回社区逛逛</a>
+  </div>
+
+  <div id="page" hidden>
+    <section class="uspace">
+      <div class="ucover"></div>
+      <div class="uinfo">
+        <div class="avatar xl" id="avatar"></div>
+        <div class="uwho">
+          <b id="pName"></b>
+          <div class="usub" id="pStats"></div>
+        </div>
+        <div class="ubtns" id="actions"></div>
+      </div>
+      <div class="utabs" id="utabs">
+        <a data-tab="works" class="on">作品</a>
+        <a data-tab="favs">收藏</a>
+        <a data-tab="about">关于</a>
+      </div>
+    </section>
+
+    <section id="tabWorks">
+      <div class="chips" id="chips" style="margin:16px 0 4px"></div>
+      <div class="cards" id="cards"></div>
+    </section>
+
+    <section id="tabFavs" hidden>
+      <div class="chips" id="favChips" style="margin:16px 0 4px"></div>
+      <div class="cards" id="favCards"></div>
+    </section>
+
+    <section id="tabAbout" hidden>
+      <div class="panel" style="margin-top:16px">
+        <h2>个人简介</h2>
+        <p id="aboutBio" style="margin:0 0 16px"></p>
+        <div class="stats" style="margin:0" id="aboutStats"></div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script src="/_assets/app.js"></script>
+<script>
+MP.topbar();
+
+// URL 里的用户名：/u/:用户名
+const USERNAME = decodeURIComponent(location.pathname.replace(/^\/u\//, '').replace(/\/+$/, ''));
+
+const notFoundBox = document.getElementById('notFound');
+const pageBox = document.getElementById('page');
+const avatarBox = document.getElementById('avatar');
+const nameBox = document.getElementById('pName');
+const statsBox = document.getElementById('pStats');
+const actionsBox = document.getElementById('actions');
+const chipsBox = document.getElementById('chips');
+const cardsBox = document.getElementById('cards');
+const favChipsBox = document.getElementById('favChips');
+const favCardsBox = document.getElementById('favCards');
+const aboutBio = document.getElementById('aboutBio');
+const aboutStats = document.getElementById('aboutStats');
+
+let profile = null;   // 当前创作者
+let tag = '';         // 作品标签筛选
+let favFolder = 0;    // 收藏夹下标
+let following = false;
+let isOwn = false;
+
+// TODO 后端对接：替换为 fetch('/api/u/:name/profile')
+function loadProfile() {
+  const sites = MP.SITES.filter((s) => s.author.username === USERNAME);
+  const mine = USERNAME === MP.ME.username;
+
+  if (!sites.length && !mine) return null;
+
+  const name = sites.length ? sites[0].author.name : MP.ME.name;
+  const sum = (k) => sites.reduce((n, s) => n + (s[k] || 0), 0);
+  return {
+    user: { name, username: USERNAME, bio: mine ? MP.ME.bio : '喜欢把想法做成能点开的网页。' },
+    sites,
+    stats: {
+      followers: 1280 + sum('likes') % 900,
+      following: 86,
+      sites: sites.length,
+      views: sum('views'),
+      likes: sum('likes'),
+      favorites: sum('favorites'),
+    },
+  };
+}
+
+// 收藏夹（演示数据）
+const FAV_FOLDERS = [
+  { name: '默认收藏夹', sites: MP.topSites(4) },
+  { name: '设计灵感', sites: MP.SITES.filter((s) => s.tag === 'portfolio' || s.tag === 'blog') },
+  { name: '好用的工具站', sites: MP.SITES.filter((s) => s.tag === 'oss') },
+];
+
+// ---------------------------------------------------------------- 头部
+
+function renderProfile() {
+  const { user, stats } = profile;
+  isOwn = USERNAME === MP.ME.username;
+
+  document.title = user.name + ' · MinePage';
+  avatarBox.textContent = user.name.charAt(0).toUpperCase();
+  nameBox.textContent = user.name;
+  document.getElementById('aboutBio').textContent = user.bio || '这个人很懒，什么都没写。';
+
+  statsBox.innerHTML = [
+    ['粉丝', MP.fmtNum(stats.followers)],
+    ['关注', stats.following],
+    ['作品', stats.sites],
+    ['总浏览', MP.fmtNum(stats.views)],
+  ].map(([label, val]) => '<span><b>' + val + '</b> ' + label + '</span>').join('');
+
+  renderActions();
+
+  aboutStats.innerHTML = [
+    ['获得点赞', MP.fmtNum(stats.likes)],
+    ['被收藏', MP.fmtNum(stats.favorites)],
+    ['作品数', stats.sites],
+  ].map(([label, val]) => '<div class="stat"><b>' + val + '</b><span>' + label + '</span></div>').join('');
+}
+
+function renderActions() {
+  actionsBox.textContent = '';
+
+  if (isOwn) {
+    const edit = document.createElement('a');
+    edit.href = '/account';
+    edit.innerHTML = MP.icon('edit') + ' 编辑资料';
+    edit.className = 'badge';
+    edit.style.padding = '6px 14px';
+    actionsBox.appendChild(edit);
+    return;
+  }
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = following ? 'ghost' : '';
+  btn.textContent = following ? '已关注' : '+ 关注';
+  // TODO 后端对接：POST/DELETE /api/users/:id/follow
+  btn.addEventListener('click', () => {
+    following = !following;
+    renderActions();
+    MP.toast(following ? '已关注' : '已取消关注');
+  });
+  actionsBox.appendChild(btn);
+
+  const msg = document.createElement('a');
+  msg.href = '/messages';
+  msg.innerHTML = '<button type="button" class="ghost">' + MP.icon('message') + ' 私信</button>';
+  actionsBox.appendChild(msg);
+}
+
+// ---------------------------------------------------------------- 作品
+
+function renderChips() {
+  chipsBox.textContent = '';
+  chipsBox.appendChild(chip('全部 ' + profile.sites.length, tag === '', () => {
+    tag = ''; renderChips(); renderWorks();
+  }));
+  MP.TAGS.forEach((t) => {
+    const count = profile.sites.filter((s) => s.tag === t.key).length;
+    if (!count) return;
+    chipsBox.appendChild(chip(t.label + ' ' + count, tag === t.key, () => {
+      tag = t.key; renderChips(); renderWorks();
+    }));
+  });
+}
+
+function chip(label, active, onClick) {
+  const el = document.createElement('span');
+  el.className = 'chip' + (active ? ' active' : '');
+  el.textContent = label;
+  el.addEventListener('click', onClick);
+  return el;
+}
+
+function renderWorks() {
+  const sites = tag ? profile.sites.filter((s) => s.tag === tag) : profile.sites;
+  MP.renderCards(cardsBox, sites);
+}
+
+function renderFavs() {
+  favChipsBox.textContent = '';
+  FAV_FOLDERS.forEach((f, i) => {
+    favChipsBox.appendChild(chip(f.name + ' ' + f.sites.length, favFolder === i, () => {
+      favFolder = i; renderFavs();
+    }));
+  });
+  MP.renderCards(favCardsBox, FAV_FOLDERS[favFolder].sites);
+}
+
+// ---------------------------------------------------------------- Tab 切换
+
+document.getElementById('utabs').addEventListener('click', (e) => {
+  const a = e.target.closest('a[data-tab]');
+  if (!a) return;
+  document.querySelectorAll('#utabs a').forEach((x) => x.classList.toggle('on', x === a));
+  const tab = a.dataset.tab;
+  document.getElementById('tabWorks').hidden = tab !== 'works';
+  document.getElementById('tabFavs').hidden = tab !== 'favs';
+  document.getElementById('tabAbout').hidden = tab !== 'about';
+});
+
+// ---------------------------------------------------------------- 启动
+
+profile = loadProfile();
+if (!profile) {
+  notFoundBox.hidden = false;
+} else {
+  pageBox.hidden = false;
+  renderProfile();
+  renderChips();
+  renderWorks();
+  renderFavs();
+}
+</script>
+</body>
+</html>

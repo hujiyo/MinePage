@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>通知 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<main class="page">
+  <div class="secHead">
+    <h1 style="margin:0">通知</h1>
+    <button type="button" class="ghost tiny" id="seen">全部标为已读</button>
+  </div>
+
+  <div class="chips" id="tabs" style="margin:16px 0 4px"></div>
+
+  <div class="rows" id="list"></div>
+  <div id="empty" class="empty" hidden>这里还没有消息。有人赞、评论、收藏你的页面，或者关注你的时候，就会出现在这里。</div>
+</main>
+
+<script src="/_assets/app.js"></script>
+<script>
+MP.topbar({ active: 'dynamic' });
+
+// TODO 后端对接：替换为 fetch('/api/notifications')
+let items = [
+  { type: 'comment', actor: '小林', actorUsername: 'lin', siteName: 'weekly-blog', siteTitle: '前端周刊笔记 · 第 42 期',
+    snippet: '渲染性能那一段很有帮助，能否再展开讲讲批量更新？', at: Date.now() - 8 * 60e3, unread: true },
+  { type: 'like', actor: 'Aurora', actorUsername: 'aurora', siteName: 'linkhub', siteTitle: '我的社交聚合页 · LinkHub',
+    at: Date.now() - 42 * 60e3, unread: true },
+  { type: 'favorite', actor: 'Byte', actorUsername: 'byte', siteName: 'ui-notes', siteTitle: '设计系统笔记 · 色彩与间距',
+    at: Date.now() - 3 * 3600e3, unread: true },
+  { type: 'follow', actor: 'Momo', actorUsername: 'momo', at: Date.now() - 26 * 3600e3 },
+  { type: 'like', actor: 'Ken', actorUsername: 'ken', siteName: 'grad-apply', siteTitle: '保研材料汇总页（简历+项目+成绩）',
+    at: Date.now() - 2 * 86400e3 },
+  { type: 'comment', actor: 'Momo', actorUsername: 'momo', siteName: 'weekly-blog', siteTitle: '前端周刊笔记 · 第 42 期',
+    snippet: '已经在团队周会上分享了，感谢整理！', at: Date.now() - 4 * 86400e3 },
+  { type: 'system', actor: 'MinePage 小助手',
+    snippet: '你投稿的「我的社交聚合页 · LinkHub」已通过审核，现在可以在首页被搜索到了。', at: Date.now() - 6 * 86400e3 },
+];
+
+const TABS = [
+  { key: 'all', label: '全部' },
+  { key: 'comment', label: '回复我的' },
+  { key: 'interact', label: '赞与收藏' },
+  { key: 'follow', label: '新增关注' },
+  { key: 'system', label: '系统通知' },
+];
+
+const TYPE_TEXT = {
+  like: '赞了你的页面',
+  comment: '评论了你的页面',
+  favorite: '收藏了你的页面',
+  follow: '关注了你',
+};
+
+let tab = 'all';
+
+const tabsBox = document.getElementById('tabs');
+const listBox = document.getElementById('list');
+const emptyBox = document.getElementById('empty');
+
+function fmtTime(ts) {
+  const diff = (Date.now() - ts) / 1000;
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+  if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+  if (diff < 86400 * 30) return Math.floor(diff / 86400) + ' 天前';
+  const d = new Date(ts);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function match(it) {
+  if (tab === 'all') return true;
+  if (tab === 'interact') return it.type === 'like' || it.type === 'favorite';
+  return it.type === tab;
+}
+
+function renderTabs() {
+  tabsBox.textContent = '';
+  TABS.forEach((t) => {
+    const el = document.createElement('span');
+    el.className = 'chip' + (t.key === tab ? ' active' : '');
+    el.textContent = t.label;
+    el.addEventListener('click', () => { tab = t.key; renderTabs(); render(); });
+    tabsBox.appendChild(el);
+  });
+}
+
+function renderItem(it) {
+  const el = document.createElement('div');
+  el.className = 'rowItem' + (it.unread ? ' unread' : '');
+
+  const av = document.createElement('span');
+  av.className = 'avatar sm';
+  av.textContent = it.actor[0];
+
+  const grow = document.createElement('div');
+  grow.className = 'grow';
+
+  const t = document.createElement('div');
+  t.className = 't';
+
+  if (it.type === 'system') {
+    t.textContent = it.actor;
+  } else {
+    if (it.actorUsername) {
+      const a = document.createElement('a');
+      a.href = '/u/' + encodeURIComponent(it.actorUsername);
+      a.textContent = it.actor;
+      a.style.color = 'var(--muted2)';
+      t.appendChild(a);
+    } else {
+      t.appendChild(document.createTextNode(it.actor));
+    }
+    t.appendChild(document.createTextNode(' ' + (TYPE_TEXT[it.type] || '和你互动了')));
+    if (it.type !== 'follow' && it.siteName) {
+      const s = document.createElement('a');
+      s.href = '/view/' + encodeURIComponent(it.siteName);
+      s.textContent = '「' + (it.siteTitle || it.siteName) + '」';
+      s.style.color = 'var(--pink)';
+      t.appendChild(document.createTextNode(' '));
+      t.appendChild(s);
+    }
+  }
+  grow.appendChild(t);
+
+  if (it.snippet) {
+    const d = document.createElement('div');
+    d.className = 'd';
+    d.textContent = it.snippet;
+    grow.appendChild(d);
+  }
+
+  el.appendChild(av);
+  el.appendChild(grow);
+
+  const time = document.createElement('span');
+  time.className = 'muted';
+  time.style.cssText = 'font-size:12px;flex:none';
+  time.textContent = fmtTime(it.at);
+  el.appendChild(time);
+
+  return el;
+}
+
+function render() {
+  listBox.textContent = '';
+  const list = items.filter(match);
+  emptyBox.hidden = list.length > 0;
+  list.forEach((it) => listBox.appendChild(renderItem(it)));
+  listBox.hidden = list.length === 0;
+}
+
+document.getElementById('seen').addEventListener('click', () => {
+  items.forEach((it) => { it.unread = false; });
+  render();
+  MP.toast('已全部标为已读');
+});
+
+renderTabs();
+render();
+</script>
+</body>
+</html>

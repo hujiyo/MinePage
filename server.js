@@ -17,6 +17,7 @@ import {
   SITE_TITLE_MAX,
   SITE_DESC_MAX,
   BIO_MAX,
+  COMMENT_MAX,
 } from './lib/config.js';
 import { checkName } from './lib/names.js';
 import { absoluteUrlForSite } from './lib/addressing.js';
@@ -66,6 +67,44 @@ import {
   upsertSiteFile,
   SITE_TAGS,
 } from './lib/sites.js';
+import {
+  addComment,
+  countComments,
+  countFavorites,
+  countLikes,
+  countUnread,
+  countUnreadMessages,
+  clearHistory,
+  creatorPage,
+  deleteComment,
+  discoverSites,
+  favoriteSite,
+  followUser,
+  getComment,
+  hasFavorited,
+  hasLiked,
+  incrementViews,
+  isFollowing,
+  likeSite,
+  listComments,
+  listConversations,
+  listFavorites,
+  listFollows,
+  listHistory,
+  listMessagesWith,
+  listNotifications,
+  markConversationRead,
+  markNotificationsSeen,
+  recordView,
+  removeHistory,
+  searchUsers,
+  sendMessage,
+  socialProfile,
+  siteStats,
+  unfavoriteSite,
+  unfollowUser,
+  unlikeSite,
+} from './lib/social.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -268,7 +307,13 @@ function requireAdmin(req, res) {
 
 // ---------------------------------------------------------------- 页面路由
 
+/** 社区首页（发现流）。 */
 async function handleRoot(req, res) {
+  await sendPage(res, 'discover.html');
+}
+
+/** 上传页（原来的首页）。 */
+async function handleUploadPage(req, res) {
   await sendPage(res, 'index.html');
 }
 
@@ -358,7 +403,14 @@ async function handleAsset(req, res, [file]) {
 // ---------------------------------------------------------------- 账号接口
 
 async function handleMe(req, res) {
-  sendJson(res, 200, { ok: true, user: currentUser(req) });
+  const user = currentUser(req);
+  // 登录用户附带未读通知数 / 未读私信数，导航条不用额外请求
+  sendJson(res, 200, {
+    ok: true,
+    user,
+    unread: user ? countUnread(user.id) : 0,
+    unreadMessages: user ? countUnreadMessages(user.id) : 0,
+  });
 }
 
 async function handleLogin(req, res) {
@@ -978,6 +1030,494 @@ async function handleSiteFileDelete(req, res, [name]) {
   sendJson(res, 200, { ok: true });
 }
 
+// ---------------------------------------------------------------- 社区互动接口（阶段 1 数据层）
+
+/** 按名字取站点头部，不存在时已回 404 并返回 null。 */
+function siteHeaderOrRespond(res, name) {
+  const site = findSiteHeaderByName(name);
+  if (!site) {
+    sendJson(res, 404, { ok: false, message: '没有这个站点' });
+    return null;
+  }
+  return site;
+}
+
+/** 已下线的站点不再接受新的互动（看统计和评论列表没关系）。 */
+function activeSiteOrRespond(res, site) {
+  if (site.status !== 'active') {
+    sendJson(res, 451, { ok: false, message: '站点已下线，暂停互动' });
+    return null;
+  }
+  return site;
+}
+
+/** 互动数字汇总。公开接口，登录后附带「我是否赞过 / 藏过」。 */
+async function handleSiteStats(req, res, [name]) {
+  const site = siteHeaderOrRespond(res, name);
+  if (!site) return;
+
+  const viewer = currentUser(req);
+  // 附带站点与作者信息，观看包装页一次请求全拿到
+  const authorRow = findUserById(site.owner_id);
+  sendJson(res, 200, {
+    ok: true,
+    stats: siteStats(site.id, viewer?.id ?? null),
+    site: {
+      name: site.name,
+      title: site.title || site.name,
+      description: site.description,
+      tag: site.tag,
+      tagLabel: tagLabelOf(site.tag),
+      ownerId: site.owner_id,
+      status: site.status,
+      author: authorRow
+        ? {
+            id: authorRow.id,
+            name: authorRow.username || String(authorRow.email).split('@')[0],
+            username: authorRow.username ?? null,
+          }
+        : null,
+    },
+  });
+}
+
+async function handleSiteLike(req, res, [name]) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  const site = siteHeaderOrRespond(res, name);
+  if (!site || !activeSiteOrRespond(res, site)) return;
+
+  likeSite(site.id, user.id);
+  sendJson(res, 200, { ok: true, liked: true, likes: countLikes(site.id) });
+}
+
+async function handleSiteUnlike(req, res, [name]) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  const site = siteHeaderOrRespond(res, name);
+  if (!site) return;
+
+  unlikeSite(site.id, user.id);
+  sendJson(res, 200, { ok: true, liked: false, likes: countLikes(site.id) });
+}
+
+async function handleSiteCommentsList(req, res, [name]) {
+  const site = siteHeaderOrRespond(res, name);
+  if (!site) return;
+
+  sendJson(res, 200, { ok: true, total: countComments(site.id), comments: listComments(site.id) });
+}
+
+async function handleSiteCommentAdd(req, res, [name]) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  const site = siteHeaderOrRespond(res, name);
+  if (!site || !activeSiteOrRespond(res, site)) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const content = String(body.content ?? '').trim();
+  if (content === '') {
+    sendJson(res, 400, { ok: false, message: '评论不能是空的' });
+    return;
+  }
+  if (content.length > COMMENT_MAX) {
+    sendJson(res, 400, { ok: false, message: `评论最多 ${COMMENT_MAX} 字` });
+    return;
+  }
+
+  // 一级回复：被回复的评论必须存在且属于同一站点
+  let replyTo = null;
+  if (body.replyTo !== undefined && body.replyTo !== null) {
+    const parent = getComment(Number(body.replyTo));
+    if (!parent || parent.site_id !== site.id) {
+      sendJson(res, 400, { ok: false, message: '要回复的评论不存在' });
+      return;
+    }
+    replyTo = parent.id;
+  }
+
+  const id = addComment({ siteId: site.id, userId: user.id, replyTo, content });
+  sendJson(res, 201, {
+    ok: true,
+    comment: {
+      id,
+      replyTo,
+      content,
+      createdAt: new Date().toISOString(),
+      author: { id: user.id, name: user.username ?? user.email.split('@')[0], username: user.username ?? null },
+    },
+    total: countComments(site.id),
+  });
+}
+
+/** 删评论：作者本人或管理员。删掉的评论若有回复，回复一并级联删除。 */
+async function handleSiteCommentDelete(req, res, [name, id]) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  const site = siteHeaderOrRespond(res, name);
+  if (!site) return;
+
+  const comment = getComment(Number(id));
+  if (!comment || comment.site_id !== site.id) {
+    sendJson(res, 404, { ok: false, message: '没有这条评论' });
+    return;
+  }
+  if (comment.user_id !== user.id && !user.isAdmin) {
+    sendJson(res, 403, { ok: false, message: '只能删除自己的评论' });
+    return;
+  }
+
+  deleteComment(comment.id);
+  sendJson(res, 200, { ok: true, total: countComments(site.id) });
+}
+
+async function handleSiteFavorite(req, res, [name]) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  const site = siteHeaderOrRespond(res, name);
+  if (!site || !activeSiteOrRespond(res, site)) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  // 收藏夹用简单版：只存一个名字，不传就是「默认收藏夹」
+  const folder = String(body.folder ?? '').trim() || '默认收藏夹';
+  if (folder.length > 50) {
+    sendJson(res, 400, { ok: false, message: '收藏夹名字最多 50 字' });
+    return;
+  }
+
+  favoriteSite(site.id, user.id, folder);
+  sendJson(res, 200, { ok: true, favorited: true, favorites: countFavorites(site.id) });
+}
+
+async function handleSiteUnfavorite(req, res, [name]) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  const site = siteHeaderOrRespond(res, name);
+  if (!site) return;
+
+  unfavoriteSite(site.id, user.id);
+  sendJson(res, 200, { ok: true, favorited: false, favorites: countFavorites(site.id) });
+}
+
+/** 关注 / 取关一个用户（按用户 id）。不能关注自己。 */
+async function handleUserFollow(req, res, [id]) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  const targetId = Number(id);
+  if (targetId === user.id) {
+    sendJson(res, 400, { ok: false, message: '不能关注自己' });
+    return;
+  }
+  if (!findUserById(targetId)) {
+    sendJson(res, 404, { ok: false, message: '没有这个用户' });
+    return;
+  }
+
+  followUser(user.id, targetId);
+  sendJson(res, 200, { ok: true, following: true, followers: socialProfile(targetId).followers });
+}
+
+async function handleUserUnfollow(req, res, [id]) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  const targetId = Number(id);
+  if (unfollowUser(user.id, targetId) === 0 && !findUserById(targetId)) {
+    sendJson(res, 404, { ok: false, message: '没有这个用户' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, following: false, followers: socialProfile(targetId).followers });
+}
+
+/** 粉丝数 / 关注数 / 我是否已关注。公开接口。 */
+async function handleUserSocial(req, res, [id]) {
+  const target = findUserById(Number(id));
+  if (!target) {
+    sendJson(res, 404, { ok: false, message: '没有这个用户' });
+    return;
+  }
+
+  const viewer = currentUser(req);
+  const profile = socialProfile(target.id);
+  sendJson(res, 200, {
+    ok: true,
+    followers: profile.followers,
+    following: profile.following,
+    isFollowing: isFollowing(viewer?.id ?? null, target.id),
+  });
+}
+
+/** 某用户的粉丝 / 关注列表。?type=followers|following，默认 followers。公开接口。 */
+async function handleFollowList(req, res, [id]) {
+  const target = findUserById(Number(id));
+  if (!target) {
+    sendJson(res, 404, { ok: false, message: '没有这个用户' });
+    return;
+  }
+
+  const url = new URL(req.url, 'http://localhost');
+  const type = url.searchParams.get('type') === 'following' ? 'following' : 'followers';
+  const viewer = currentUser(req);
+  const users = listFollows(target.id, type, viewer?.id ?? null);
+  sendJson(res, 200, { ok: true, type, users });
+}
+
+/** tag key -> 中文标签。 */
+const tagLabelOf = (key) => SITE_TAGS.find((t) => t.key === key)?.label ?? '';
+
+/** 社区发现流：公开上线站点 + 互动数字。?q= 模糊搜索，?tag= 标签筛选，?sort= 排序。 */
+async function handleDiscover(req, res) {
+  const url = new URL(req.url, 'http://localhost');
+  const q = String(url.searchParams.get('q') ?? '').slice(0, 50);
+  const tagParam = String(url.searchParams.get('tag') ?? '');
+  const tag = SITE_TAGS.some((t) => t.key === tagParam) ? tagParam : '';
+  const sort = String(url.searchParams.get('sort') ?? '');
+
+  const sites = discoverSites({ q, tag, sort }).map((s) => ({
+    ...s,
+    tagLabel: tagLabelOf(s.tag),
+  }));
+
+  sendJson(res, 200, { ok: true, total: sites.length, sites });
+}
+
+// ---------------------------------------------------------------- 创作者主页（阶段 3）
+
+/** /u/:用户名 创作者公开主页。 */
+async function handleUserPage(req, res) {
+  await sendPage(res, 'user.html');
+}
+
+/** 创作者主页数据：资料 + 社交数字 + TA 的公开站点列表。 */
+async function handleCreatorProfile(req, res, [username]) {
+  const page = creatorPage(username);
+  if (!page) {
+    sendJson(res, 404, { ok: false, message: '没有这个创作者' });
+    return;
+  }
+
+  const viewer = currentUser(req);
+  sendJson(res, 200, {
+    ok: true,
+    user: page.user,
+    stats: page.stats,
+    isFollowing: isFollowing(viewer?.id ?? null, page.user.id),
+    isOwn: viewer?.id === page.user.id,
+    sites: page.sites.map((s) => ({ ...s, tagLabel: tagLabelOf(s.tag) })),
+  });
+}
+
+// ---------------------------------------------------------------- 观看包装页与通知（阶段 4）
+
+/** /view/:站名 观看包装页：平台导航条 + iframe 嵌用户站点 + 评论区。 */
+async function handleViewPage(req, res) {
+  await sendPage(res, 'view.html');
+}
+
+/** 通知列表页。 */
+async function handleNotificationsPage(req, res) {
+  await sendPage(res, 'notifications.html');
+}
+
+/** 我的收藏页。 */
+async function handleFavoritesPage(req, res) {
+  if (!currentUser(req)) {
+    sendRedirect(res, '/login');
+    return;
+  }
+  await sendPage(res, 'favorites.html');
+}
+
+/** 浏览历史页。 */
+async function handleHistoryPage(req, res) {
+  if (!currentUser(req)) {
+    sendRedirect(res, '/login');
+    return;
+  }
+  await sendPage(res, 'history.html');
+}
+
+/** 私信页。 */
+async function handleMessagesPage(req, res) {
+  if (!currentUser(req)) {
+    sendRedirect(res, '/login');
+    return;
+  }
+  await sendPage(res, 'messages.html');
+}
+
+/** 通知列表：谁赞 / 评 / 藏 / 关注了我。 */
+async function handleNotificationsList(req, res) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  sendJson(res, 200, {
+    ok: true,
+    items: listNotifications(user.id),
+  });
+}
+
+/** 标记通知已读：把已读时间戳推进到当前时刻。 */
+async function handleNotificationsSeen(req, res) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  markNotificationsSeen(user.id);
+  sendJson(res, 200, { ok: true });
+}
+
+// ---------------------------------------------------------------- 浏览历史 / 收藏夹 / 用户搜索 / 私信
+
+/** 列表统一补 tagLabel。 */
+const withTagLabel = (sites) => sites.map((s) => ({ ...s, tagLabel: tagLabelOf(s.tag) }));
+
+/** 我的浏览历史列表。 */
+async function handleHistoryList(req, res) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  sendJson(res, 200, { ok: true, sites: withTagLabel(listHistory(user.id)) });
+}
+
+/** 记录浏览历史（观看页打开时调用）。 */
+async function handleHistoryRecord(req, res) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const site = findSiteHeaderByName(String(body.site ?? ''));
+  if (!site) {
+    sendJson(res, 404, { ok: false, message: '没有这个站点' });
+    return;
+  }
+
+  recordView(user.id, site.id);
+  sendJson(res, 200, { ok: true });
+}
+
+/** 删除单条浏览历史。 */
+async function handleHistoryDelete(req, res, [name]) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  const site = findSiteHeaderByName(name);
+  if (site) removeHistory(user.id, site.id);
+  sendJson(res, 200, { ok: true });
+}
+
+/** 清空浏览历史。 */
+async function handleHistoryClear(req, res) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  clearHistory(user.id);
+  sendJson(res, 200, { ok: true });
+}
+
+/** 我的收藏列表（平铺，前端按收藏夹分组）。 */
+async function handleFavoritesList(req, res) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  sendJson(res, 200, { ok: true, sites: withTagLabel(listFavorites(user.id)) });
+}
+
+/** 用户搜索（搜索下拉的「用户」分区用）。 */
+async function handleUserSearch(req, res) {
+  const url = new URL(req.url, 'http://localhost');
+  const q = String(url.searchParams.get('q') ?? '').slice(0, 50);
+  sendJson(res, 200, { ok: true, users: searchUsers(q) });
+}
+
+/** 私信会话列表。 */
+async function handleConversations(req, res) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  sendJson(res, 200, { ok: true, conversations: listConversations(user.id) });
+}
+
+/** 与某人的消息往来，顺手把对方发来的标为已读。 */
+async function handleMessagesWith(req, res, [id]) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  const otherId = Number(id);
+  if (otherId === user.id) {
+    sendJson(res, 400, { ok: false, message: '不能和自己私信' });
+    return;
+  }
+  const other = findUserById(otherId);
+  if (!other) {
+    sendJson(res, 404, { ok: false, message: '没有这个用户' });
+    return;
+  }
+
+  const messages = listMessagesWith(user.id, otherId);
+  markConversationRead(user.id, otherId);
+  sendJson(res, 200, {
+    ok: true,
+    user: {
+      id: other.id,
+      name: other.username ?? other.email.split('@')[0],
+      username: other.username ?? null,
+      bio: other.bio ?? '',
+    },
+    messages,
+  });
+}
+
+/** 发私信。 */
+async function handleMessageSend(req, res, [id]) {
+  const user = requireLogin(req, res);
+  if (!user) return;
+
+  const otherId = Number(id);
+  if (otherId === user.id) {
+    sendJson(res, 400, { ok: false, message: '不能和自己私信' });
+    return;
+  }
+  const other = findUserById(otherId);
+  if (!other) {
+    sendJson(res, 404, { ok: false, message: '没有这个用户' });
+    return;
+  }
+  if (other.status !== 'active') {
+    sendJson(res, 403, { ok: false, message: '对方账号当前不可用' });
+    return;
+  }
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const content = String(body.content ?? '').trim();
+  if (content === '') {
+    sendJson(res, 400, { ok: false, message: '私信不能是空的' });
+    return;
+  }
+  if (content.length > COMMENT_MAX) {
+    sendJson(res, 400, { ok: false, message: `私信最多 ${COMMENT_MAX} 字` });
+    return;
+  }
+
+  const mid = sendMessage(user.id, otherId, content);
+  sendJson(res, 201, { ok: true, id: mid, at: new Date().toISOString() });
+}
+
 // ---------------------------------------------------------------- MCP
 
 /**
@@ -1145,6 +1685,8 @@ function handleSite(req, res, [name, rest = '']) {
 
   const content = getSiteFile(site.id, filePath);
   if (content) {
+    // 浏览量简单版：只有入口页 +1，站内 css / js 等子资源不算
+    if (filePath === 'index.html') incrementViews(site.id);
     serveSiteFile(res, filePath, content);
     return;
   }
@@ -1153,6 +1695,7 @@ function handleSite(req, res, [name, rest = '']) {
   if (filePath === 'index.html') {
     const legacy = findSiteByName(name);
     if (legacy && legacy.html && legacy.html.trim() !== '') {
+      incrementViews(site.id);
       sendHtml(res, 200, legacy.html, {
         'Content-Security-Policy': SANDBOX_CSP,
         'Cache-Control': 'no-cache',
@@ -1168,6 +1711,13 @@ function handleSite(req, res, [name, rest = '']) {
 
 const ROUTES = [
   ['GET', /^\/$/, handleRoot],
+  ['GET', /^\/upload$/, handleUploadPage],
+  ['GET', /^\/u\/([a-z0-9-]+)\/*$/, handleUserPage],
+  ['GET', /^\/view\/([a-z0-9-]+)\/*$/, handleViewPage],
+  ['GET', /^\/notifications$/, handleNotificationsPage],
+  ['GET', /^\/favorites$/, handleFavoritesPage],
+  ['GET', /^\/history$/, handleHistoryPage],
+  ['GET', /^\/messages$/, handleMessagesPage],
   ['GET', /^\/login$/, handleLoginPage],
   ['GET', /^\/account$/, handleAccountPage],
   ['GET', /^\/sites$/, handleSitesPage],
@@ -1178,6 +1728,10 @@ const ROUTES = [
   ['GET', /^\/_assets\/([a-zA-Z0-9._-]+)$/, handleAsset],
 
   ['GET', /^\/api\/me$/, handleMe],
+  ['GET', /^\/api\/discover$/, handleDiscover],
+  ['GET', /^\/api\/u\/([a-z0-9-]+)\/profile$/, handleCreatorProfile],
+  ['GET', /^\/api\/notifications$/, handleNotificationsList],
+  ['POST', /^\/api\/notifications\/seen$/, handleNotificationsSeen],
   ['POST', /^\/api\/auth\/register$/, handleRegister],
   ['POST', /^\/api\/auth\/login$/, handleLogin],
   ['POST', /^\/api\/auth\/logout$/, handleLogout],
@@ -1200,6 +1754,31 @@ const ROUTES = [
   ['POST', /^\/api\/sites\/([a-z0-9-]+)\/files$/, handleSiteFileUpload],
   ['GET', /^\/api\/sites\/([a-z0-9-]+)\/files\/content$/, handleSiteFileContent],
   ['DELETE', /^\/api\/sites\/([a-z0-9-]+)\/files$/, handleSiteFileDelete],
+
+  // 社区互动（阶段 1 数据层）
+  ['GET', /^\/api\/sites\/([a-z0-9-]+)\/stats$/, handleSiteStats],
+  ['POST', /^\/api\/sites\/([a-z0-9-]+)\/like$/, handleSiteLike],
+  ['DELETE', /^\/api\/sites\/([a-z0-9-]+)\/like$/, handleSiteUnlike],
+  ['GET', /^\/api\/sites\/([a-z0-9-]+)\/comments$/, handleSiteCommentsList],
+  ['POST', /^\/api\/sites\/([a-z0-9-]+)\/comments$/, handleSiteCommentAdd],
+  ['DELETE', /^\/api\/sites\/([a-z0-9-]+)\/comments\/(\d+)$/, handleSiteCommentDelete],
+  ['POST', /^\/api\/sites\/([a-z0-9-]+)\/favorite$/, handleSiteFavorite],
+  ['DELETE', /^\/api\/sites\/([a-z0-9-]+)\/favorite$/, handleSiteUnfavorite],
+  ['POST', /^\/api\/users\/(\d+)\/follow$/, handleUserFollow],
+  ['DELETE', /^\/api\/users\/(\d+)\/follow$/, handleUserUnfollow],
+  ['GET', /^\/api\/users\/(\d+)\/social$/, handleUserSocial],
+  ['GET', /^\/api\/users\/(\d+)\/follow-list$/, handleFollowList],
+  ['GET', /^\/api\/users\/search$/, handleUserSearch],
+
+  // 浏览历史 / 收藏夹 / 私信
+  ['GET', /^\/api\/history$/, handleHistoryList],
+  ['POST', /^\/api\/history$/, handleHistoryRecord],
+  ['DELETE', /^\/api\/history$/, handleHistoryClear],
+  ['DELETE', /^\/api\/history\/([a-z0-9-]+)$/, handleHistoryDelete],
+  ['GET', /^\/api\/favorites$/, handleFavoritesList],
+  ['GET', /^\/api\/messages$/, handleConversations],
+  ['GET', /^\/api\/messages\/(\d+)$/, handleMessagesWith],
+  ['POST', /^\/api\/messages\/(\d+)$/, handleMessageSend],
 
   ['GET', /^\/api\/admin\/users$/, handleAdminUsers],
   ['POST', /^\/api\/admin\/users\/(\d+)\/status$/, handleAdminUserStatus],

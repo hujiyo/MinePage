@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MinePage · 首页</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<main class="page wide">
+  <div id="bannerArea"></div>
+
+  <div class="homeGrid">
+    <div>
+      <div class="secHead">
+        <h2 id="feedTitle">推荐</h2>
+        <a class="more" href="/?sort=rank">按浏览量查看 →</a>
+      </div>
+      <div class="chips" id="chips" style="margin-bottom:14px"></div>
+      <div class="cards" id="cards"></div>
+    </div>
+
+    <aside class="homeSide">
+      <div>
+        <div class="secHead">
+          <h2>热门榜单</h2>
+          <a class="more" href="/?sort=rank">更多</a>
+        </div>
+        <div class="rankList" id="rank"></div>
+      </div>
+
+      <div>
+        <div class="secHead"><h2>热搜</h2></div>
+        <div class="rankList" id="hot"></div>
+      </div>
+
+      <div class="panel">
+        <b style="display:block;margin-bottom:6px">想让更多人看到你的页面？</b>
+        <p class="muted" style="font-size:13px;margin:0 0 12px">
+          上传一个 HTML，就是一个可被搜索、收藏、评论的站点。
+        </p>
+        <a href="/upload"><button type="button" class="block">去投稿</button></a>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<script src="/_assets/app.js"></script>
+<script>
+MP.topbar();
+
+const params = new URLSearchParams(location.search);
+const q = (params.get('q') || '').trim();
+const sortRank = params.get('sort') === 'rank';
+let tag = '';
+
+const bannerArea = document.getElementById('bannerArea');
+const chipsBox = document.getElementById('chips');
+const cardsBox = document.getElementById('cards');
+const feedTitle = document.getElementById('feedTitle');
+const rankBox = document.getElementById('rank');
+const hotBox = document.getElementById('hot');
+
+// ---------------------------------------------------------------- 轮播
+
+function mountBanner() {
+  if (q) return; // 搜索结果页不显示轮播，把版面让给结果
+  const list = MP.BANNERS;
+  const el = document.createElement('div');
+  el.className = 'banner';
+  let idx = 0;
+  let timer = null;
+
+  function paint() {
+    const b = list[idx];
+    el.innerHTML =
+      '<img src="' + b.img + '" alt="' + MP.esc(b.title) + '">'
+      + '<div class="binfo"><b>' + MP.esc(b.title) + '</b><span>' + MP.esc(b.sub) + '</span></div>'
+      + '<button type="button" class="bnav prev" title="上一张">' + MP.icon('left') + '</button>'
+      + '<button type="button" class="bnav next" title="下一张">' + MP.icon('right') + '</button>'
+      + '<div class="bdots">' + list.map((_, i) =>
+          '<i class="' + (i === idx ? 'on' : '') + '" data-i="' + i + '"></i>').join('') + '</div>';
+
+    el.querySelector('.prev').addEventListener('click', () => go(idx - 1));
+    el.querySelector('.next').addEventListener('click', () => go(idx + 1));
+    el.querySelectorAll('.bdots i').forEach((d) => {
+      d.addEventListener('click', () => go(Number(d.dataset.i)));
+    });
+  }
+
+  function go(i) {
+    idx = (i + list.length) % list.length;
+    paint();
+    restart();
+  }
+  function restart() {
+    clearInterval(timer);
+    timer = setInterval(() => { idx = (idx + 1) % list.length; paint(); }, 4500);
+  }
+  el.addEventListener('mouseenter', () => clearInterval(timer));
+  el.addEventListener('mouseleave', restart);
+  // 整体点击进观看页；导航键与圆点单独响应
+  el.addEventListener('click', (e) => {
+    if (e.target.closest('.bnav') || e.target.closest('.bdots')) return;
+    location.href = '/view/' + encodeURIComponent(list[idx].site);
+  });
+
+  paint();
+  restart();
+  bannerArea.appendChild(el);
+}
+
+// ---------------------------------------------------------------- 分类 chips
+
+function renderChips() {
+  chipsBox.textContent = '';
+  MP.TAGS.forEach((t) => {
+    const el = document.createElement('span');
+    el.className = 'chip' + (t.key === tag ? ' active' : '');
+    el.textContent = t.label;
+    el.addEventListener('click', () => { tag = t.key; renderChips(); reload(); });
+    chipsBox.appendChild(el);
+  });
+}
+
+// ---------------------------------------------------------------- 侧栏
+
+function renderSide() {
+  const tops = MP.topSites(10);
+  rankBox.textContent = '';
+  tops.forEach((s, i) => {
+    const row = document.createElement('div');
+    row.className = 'rankItem';
+    row.innerHTML = '<span class="no">' + (i + 1) + '</span>'
+      + '<span class="rw">' + MP.esc(s.title) + '</span>'
+      + '<span class="rv">' + MP.fmtNum(s.views) + '</span>';
+    row.addEventListener('click', () => { location.href = '/view/' + encodeURIComponent(s.name); });
+    rankBox.appendChild(row);
+  });
+
+  hotBox.textContent = '';
+  MP.HOT.slice(0, 8).forEach((h, i) => {
+    const row = document.createElement('div');
+    row.className = 'rankItem';
+    row.innerHTML = '<span class="no">' + (i + 1) + '</span>'
+      + '<span class="rw">' + MP.esc(h.word) + '</span>'
+      + '<span class="rv">' + MP.esc(h.val) + '</span>';
+    row.addEventListener('click', () => MP.goSearch(h.word));
+    hotBox.appendChild(row);
+  });
+}
+
+// ---------------------------------------------------------------- 列表
+
+function reload() {
+  let sites = MP.querySites({ q, tag });
+  if (sortRank) sites = sites.slice().sort((a, b) => b.views - a.views);
+
+  feedTitle.textContent = q ? '搜索：' + q : (tag === 'hot' ? '热门' : '推荐');
+  MP.renderCards(cardsBox, sites);
+}
+
+mountBanner();
+renderChips();
+renderSide();
+reload();
+</script>
+</body>
+</html>

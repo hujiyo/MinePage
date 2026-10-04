@@ -7,54 +7,63 @@
 <link rel="stylesheet" href="/_assets/style.css">
 </head>
 <body>
-<main class="narrow">
-  <h1 class="center">MinePage</h1>
-  <p class="sub center">登录，或者注册一个新账号。</p>
-
-  <div class="tabs">
-    <button type="button" class="tab active" id="tabLogin">登录</button>
-    <button type="button" class="tab" id="tabRegister">注册</button>
+<main class="page narrow">
+  <div style="display:flex;justify-content:center;margin:6px 0 22px">
+    <a class="tlogo" href="/" id="brand"></a>
   </div>
 
-  <form id="loginForm" novalidate>
-    <label class="field">
-      <span class="label">邮箱或用户名</span>
-      <input id="loginId" type="text" autocomplete="username" placeholder="you@example.com">
-    </label>
-    <label class="field">
-      <span class="label">密码</span>
-      <input id="loginPassword" type="password" autocomplete="current-password">
-    </label>
-    <button type="submit" class="block" id="loginSubmit">登录</button>
-    <p class="hint center"><a href="/forgot">忘记密码？</a></p>
-  </form>
+  <div class="panel">
+    <h1 class="center" style="margin-bottom:4px">登录 MinePage</h1>
+    <p class="sub center">登录，或者注册一个新账号。</p>
 
-  <form id="registerForm" novalidate hidden>
-    <label class="field">
-      <span class="label">邮箱</span>
-      <input id="registerEmail" type="email" autocomplete="email" placeholder="you@example.com">
-    </label>
-    <label class="field">
-      <span class="label">邮箱验证码</span>
-      <div class="code-row">
-        <input id="registerCode" inputmode="numeric" autocomplete="one-time-code"
-               maxlength="6" placeholder="6 位数字">
-        <button type="button" class="ghost" id="sendCode" disabled>发送验证码</button>
-      </div>
-      <span class="hint" id="codeHint">先填邮箱，再点「发送验证码」</span>
-    </label>
-    <label class="field">
-      <span class="label">密码</span>
-      <input id="registerPassword" type="password" autocomplete="new-password">
-      <span class="hint">至少 6 位</span>
-    </label>
-    <button type="submit" class="block" id="registerSubmit">注册</button>
-  </form>
+    <div class="tabs">
+      <button type="button" class="tab active" id="tabLogin">登录</button>
+      <button type="button" class="tab" id="tabRegister">注册</button>
+    </div>
+
+    <form id="loginForm" novalidate>
+      <label class="field">
+        <span class="label">邮箱或用户名</span>
+        <input id="loginId" type="text" autocomplete="username" placeholder="you@example.com">
+      </label>
+      <label class="field">
+        <span class="label">密码</span>
+        <input id="loginPassword" type="password" autocomplete="current-password">
+      </label>
+      <button type="submit" class="block" id="loginSubmit">登录</button>
+      <p class="hint center"><a href="/forgot">忘记密码？</a></p>
+    </form>
+
+    <form id="registerForm" novalidate hidden>
+      <label class="field">
+        <span class="label">邮箱</span>
+        <input id="registerEmail" type="email" autocomplete="email" placeholder="you@example.com">
+      </label>
+      <label class="field">
+        <span class="label">邮箱验证码</span>
+        <div class="code-row">
+          <input id="registerCode" inputmode="numeric" autocomplete="one-time-code"
+                 maxlength="6" placeholder="6 位数字">
+          <button type="button" class="ghost" id="sendCode" disabled>发送验证码</button>
+        </div>
+        <span class="hint" id="codeHint">先填邮箱，再点「发送验证码」</span>
+      </label>
+      <label class="field">
+        <span class="label">密码</span>
+        <input id="registerPassword" type="password" autocomplete="new-password">
+        <span class="hint">至少 6 位</span>
+      </label>
+      <button type="submit" class="block" id="registerSubmit">注册</button>
+    </form>
+  </div>
 
   <div id="msg" class="result" hidden></div>
 </main>
 
+<script src="/_assets/app.js"></script>
 <script>
+document.getElementById('brand').innerHTML = MP.icon('logo') + 'MinePage';
+
 const tabLogin = document.getElementById('tabLogin');
 const tabRegister = document.getElementById('tabRegister');
 const loginForm = document.getElementById('loginForm');

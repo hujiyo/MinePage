@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>观看历史 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body>
+<main class="page">
+  <div class="secHead">
+    <h1 style="margin:0">观看历史</h1>
+    <button type="button" class="ghost tiny" id="clear">清空历史</button>
+  </div>
+  <p class="sub" id="sub">最近看过的页面都在这里，只保留最近 30 天。</p>
+
+  <div id="groups"></div>
+  <div id="empty" class="empty" hidden>还没有观看记录，去 <a href="/">首页</a> 逛逛吧。</div>
+</main>
+
+<script src="/_assets/app.js"></script>
+<script>
+MP.topbar({ active: 'history' });
+
+// TODO 后端对接：替换为 fetch('/api/history')
+let records = MP.SITES.slice(0, 9).map((s, i) => ({
+  site: s,
+  at: Date.now() - [0.2, 1.5, 5, 8, 26, 30, 50, 74, 100][i] * 3600e3,
+}));
+
+const groupsBox = document.getElementById('groups');
+const emptyBox = document.getElementById('empty');
+const subBox = document.getElementById('sub');
+
+/** 按时间归到「今天 / 昨天 / 更早」三组。 */
+function bucketOf(ts) {
+  const d = new Date(ts);
+  const today = new Date();
+  const sameDay = (a, b) => a.getFullYear() === b.getFullYear()
+    && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  if (sameDay(d, today)) return '今天';
+  const yesterday = new Date(today.getTime() - 86400e3);
+  if (sameDay(d, yesterday)) return '昨天';
+  return '更早';
+}
+
+function fmtTime(ts) {
+  const d = new Date(ts);
+  return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+    + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+function render() {
+  groupsBox.textContent = '';
+  emptyBox.hidden = records.length > 0;
+  subBox.textContent = records.length
+    ? '共 ' + records.length + ' 条记录，只保留最近 30 天。'
+    : '还没有观看记录。';
+
+  ['今天', '昨天', '更早'].forEach((label) => {
+    const list = records.filter((r) => bucketOf(r.at) === label);
+    if (!list.length) return;
+
+    const h = document.createElement('h2');
+    h.textContent = label;
+    h.style.margin = '24px 0 10px';
+    groupsBox.appendChild(h);
+
+    const box = document.createElement('div');
+    box.className = 'rows';
+    list.forEach((r) => box.appendChild(rowItem(r)));
+    groupsBox.appendChild(box);
+  });
+}
+
+function rowItem(r) {
+  const s = r.site;
+  const el = document.createElement('div');
+  el.className = 'rowItem';
+  el.innerHTML =
+    '<div class="rthumb" style="background:' + MP.grad(s) + '">' + MP.esc(MP.initial(s)) + '</div>'
+    + '<div class="grow">'
+    +   '<div class="t"><a href="/view/' + encodeURIComponent(s.name) + '">' + MP.esc(s.title) + '</a></div>'
+    +   '<div class="d">' + MP.esc(s.author.name) + ' · ' + MP.esc(MP.tagLabel(s.tag))
+    +     ' · ' + MP.fmtNum(s.views) + ' 次浏览</div>'
+    + '</div>'
+    + '<span class="muted" style="font-size:12px;flex:none">' + fmtTime(r.at) + '</span>'
+    + '<button type="button" class="ghost tiny" title="删除这条记录">删除</button>';
+
+  el.querySelector('button').addEventListener('click', () => {
+    records = records.filter((x) => x !== r);
+    render();
+    MP.toast('已删除这条记录');
+  });
+  return el;
+}
+
+document.getElementById('clear').addEventListener('click', () => {
+  if (!records.length) return;
+  if (!confirm('确定清空全部观看历史吗？')) return;
+  records = [];
+  render();
+  MP.toast('已清空观看历史');
+});
+
+render();
+</script>
+</body>
+</html>

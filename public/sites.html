@@ -3,17 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>页面管理 · MinePage</title>
+<title>创作中心 · MinePage</title>
 <link rel="stylesheet" href="/_assets/style.css">
 </head>
 <body>
-<main class="wide">
-  <header class="topbar">
-    <a class="brand" href="/">MinePage</a>
-    <nav id="nav"></nav>
-  </header>
-
-  <h1>页面管理</h1>
+<main class="page">
+  <div class="secHead">
+    <h1 style="margin:0">创作中心</h1>
+    <a href="/upload"><button type="button" class="tiny">+ 投稿新页面</button></a>
+  </div>
   <p class="sub">这里是你发布过的所有页面，可以访问、编辑或删除。</p>
 
   <!-- 统计条 -->
@@ -23,22 +21,17 @@
     <div class="stat"><b id="statSize">–</b><span>总大小</span></div>
   </div>
 
-  <!-- 站点卡片 -->
-  <div id="siteCards" class="cards"></div>
-  <div id="sitesEmpty" class="empty" hidden>还没有页面，去 <a href="/">首页</a> 上传一个吧。</div>
+  <div class="rows" id="siteList" style="margin-top:16px"></div>
+  <div id="sitesEmpty" class="empty" hidden>还没有页面，去 <a href="/upload">上传站点</a>。</div>
 
   <div id="msg" class="result" hidden></div>
 </main>
 
+<script src="/_assets/app.js"></script>
 <script>
-const nav = document.getElementById('nav');
-const msg = document.getElementById('msg');
+MP.topbar({ active: 'upload' });
 
-function escapeHtml(text) {
-  return String(text).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[c]);
-}
+const msg = document.getElementById('msg');
 
 function fmtSize(n) {
   if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
@@ -52,59 +45,10 @@ function showMsg(ok, text) {
   msg.textContent = text;
 }
 
-// ---------------------------------------------------------------- 导航
-
-async function renderNav() {
-  nav.textContent = '';
-
-  let me = null;
-  try {
-    me = (await (await fetch('/api/me')).json()).user;
-  } catch { me = null; }
-
-  if (!me) {
-    location.href = '/login';
-    return null;
-  }
-
-  const label = document.createElement('span');
-  label.textContent = me.username || me.email;
-  nav.appendChild(label);
-
-  const home = document.createElement('a');
-  home.href = '/';
-  home.textContent = '上传页面';
-  nav.appendChild(home);
-
-  const accountLink = document.createElement('a');
-  accountLink.href = '/account';
-  accountLink.textContent = '个人中心';
-  nav.appendChild(accountLink);
-
-  if (me.isAdmin) {
-    const adminLink = document.createElement('a');
-    adminLink.href = '/admin';
-    adminLink.textContent = '管理后台';
-    nav.appendChild(adminLink);
-  }
-
-  const logout = document.createElement('button');
-  logout.type = 'button';
-  logout.className = 'ghost tiny';
-  logout.textContent = '退出';
-  logout.addEventListener('click', async () => {
-    await fetch('/api/auth/logout', { method: 'POST' });
-    location.href = '/login';
-  });
-  nav.appendChild(logout);
-
-  return me;
-}
-
-// ---------------------------------------------------------------- 站点卡片
+// ---------------------------------------------------------------- 站点列表
 
 function renderSites(sites) {
-  const wrap = document.getElementById('siteCards');
+  const wrap = document.getElementById('siteList');
   const empty = document.getElementById('sitesEmpty');
   wrap.textContent = '';
   empty.hidden = sites.length !== 0;
@@ -116,60 +60,63 @@ function renderSites(sites) {
     files += site.fileCount;
     size += site.totalSize;
 
-    const card = document.createElement('div');
-    card.className = 'card';
+    const row = document.createElement('div');
+    row.className = 'rowItem';
 
-    const title = document.createElement('h3');
-    title.textContent = site.title ? site.title : '/' + site.name;
-    card.appendChild(title);
+    // 缩略图：渐变 + 标题首字
+    const thumb = document.createElement('div');
+    thumb.className = 'rthumb';
+    thumb.style.background = MP.grad(site);
+    thumb.textContent = MP.initial(site);
+    row.appendChild(thumb);
 
-    const badges = document.createElement('div');
+    const grow = document.createElement('div');
+    grow.className = 'grow';
+
+    const t = document.createElement('div');
+    t.className = 't';
+    const a = document.createElement('a');
+    a.href = '/view/' + encodeURIComponent(site.name);
+    a.textContent = site.title || '/' + site.name;
+    t.appendChild(a);
+    t.appendChild(document.createTextNode(' '));
+
     if (site.tag) {
       const tagTag = document.createElement('span');
       tagTag.className = 'badge tag';
       tagTag.textContent = site.tagLabel;
-      badges.appendChild(tagTag);
-      badges.appendChild(document.createTextNode(' '));
+      t.appendChild(tagTag);
+      t.appendChild(document.createTextNode(' '));
     }
     const statusTag = document.createElement('span');
     statusTag.className = 'badge' + (site.status === 'active' ? ' ok' : ' bad');
     statusTag.textContent = site.status === 'active' ? '正常' : '已下线';
-    badges.appendChild(statusTag);
-    badges.appendChild(document.createTextNode(' '));
-    const kindTag = document.createElement('span');
-    kindTag.className = 'badge';
-    kindTag.textContent = site.kind === 'multi'
-      ? '多页 · ' + site.fileCount + ' 个文件'
-      : '单页';
-    badges.appendChild(kindTag);
-    card.appendChild(badges);
+    t.appendChild(statusTag);
+    grow.appendChild(t);
 
-    if (site.description) {
-      const desc = document.createElement('div');
-      desc.className = 'desc';
-      desc.textContent = site.description;
-      card.appendChild(desc);
-    }
+    const d = document.createElement('div');
+    d.className = 'd';
+    d.textContent = (site.kind === 'multi' ? '多页 · ' + site.fileCount + ' 个文件' : '单页')
+      + ' · ' + fmtSize(site.totalSize)
+      + ' · 更新于 ' + new Date(site.updatedAt).toLocaleString('zh-CN');
+    grow.appendChild(d);
 
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    meta.textContent = fmtSize(site.totalSize) + ' · 更新于 '
-      + new Date(site.updatedAt).toLocaleString('zh-CN');
-    card.appendChild(meta);
+    row.appendChild(grow);
 
     const actions = document.createElement('div');
-    actions.className = 'actions';
+    actions.className = 'row';
+    actions.style.cssText = 'gap:8px;flex:none';
 
     const view = document.createElement('a');
     view.href = '/' + site.name;
     view.target = '_blank';
     view.rel = 'noopener';
-    view.textContent = '访问';
+    view.innerHTML = '<button type="button" class="ghost tiny">访问</button>';
     actions.appendChild(view);
 
     const edit = document.createElement('a');
     edit.href = '/edit/' + site.name;
-    edit.textContent = '编辑';
+    edit.innerHTML = '<button type="button" class="ghost tiny">编辑</button>';
     actions.appendChild(edit);
 
     const del = document.createElement('button');
@@ -188,9 +135,9 @@ function renderSites(sites) {
       }
     });
     actions.appendChild(del);
+    row.appendChild(actions);
 
-    card.appendChild(actions);
-    wrap.appendChild(card);
+    wrap.appendChild(row);
   });
 
   document.getElementById('statSites').textContent = sites.length;
@@ -208,10 +155,10 @@ async function loadSites() {
 
 // ---------------------------------------------------------------- 启动
 
-(async () => {
-  const me = await renderNav();
-  if (me) loadSites();
-})();
+MP.me().then((me) => {
+  if (!me) { location.href = '/login'; return; }
+  loadSites();
+});
 </script>
 </body>
 </html>

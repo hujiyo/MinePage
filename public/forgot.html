@@ -7,45 +7,54 @@
 <link rel="stylesheet" href="/_assets/style.css">
 </head>
 <body>
-<main class="narrow">
-  <h1 class="center">找回密码</h1>
-  <p class="sub center">输入注册邮箱，用收到的验证码设置新密码。</p>
+<main class="page narrow">
+  <div style="display:flex;justify-content:center;margin:6px 0 22px">
+    <a class="tlogo" href="/" id="brand"></a>
+  </div>
 
-  <form id="form" novalidate>
-    <label class="field">
-      <span class="label">注册邮箱</span>
-      <input id="email" type="email" autocomplete="email" placeholder="you@example.com">
-    </label>
+  <div class="panel">
+    <h1 class="center" style="margin-bottom:4px">找回密码</h1>
+    <p class="sub center">输入注册邮箱，用收到的验证码设置新密码。</p>
 
-    <label class="field">
-      <span class="label">邮箱验证码</span>
-      <div class="code-row">
-        <input id="code" inputmode="numeric" autocomplete="one-time-code"
-               maxlength="6" placeholder="6 位数字">
-        <button type="button" class="ghost" id="sendCode">发送验证码</button>
-      </div>
-      <span class="hint" id="codeHint"></span>
-    </label>
+    <form id="form" novalidate>
+      <label class="field">
+        <span class="label">注册邮箱</span>
+        <input id="email" type="email" autocomplete="email" placeholder="you@example.com">
+      </label>
 
-    <label class="field">
-      <span class="label">新密码</span>
-      <input id="password" type="password" autocomplete="new-password">
-      <span class="hint">至少 6 位</span>
-    </label>
+      <label class="field">
+        <span class="label">邮箱验证码</span>
+        <div class="code-row">
+          <input id="code" inputmode="numeric" autocomplete="one-time-code"
+                 maxlength="6" placeholder="6 位数字">
+          <button type="button" class="ghost" id="sendCode">发送验证码</button>
+        </div>
+        <span class="hint" id="codeHint"></span>
+      </label>
 
-    <button type="submit" class="block" id="submit">重置密码</button>
-  </form>
+      <label class="field">
+        <span class="label">新密码</span>
+        <input id="password" type="password" autocomplete="new-password">
+        <span class="hint">至少 6 位</span>
+      </label>
 
-  <div id="done" class="result ok" hidden>
-    密码已经改好，其他登录过的设备都会被退出。 <a href="/login">去用新密码登录</a>
+      <button type="submit" class="block" id="submit">重置密码</button>
+    </form>
+
+    <div id="done" class="result ok" hidden>
+      密码已经改好，其他登录过的设备都会被退出。 <a href="/login">去用新密码登录</a>
+    </div>
   </div>
 
   <div id="msg" class="result" hidden></div>
 
-  <p class="hint center" style="margin-top: 26px;"><a href="/login">返回登录</a></p>
+  <p class="hint center" style="margin-top:22px"><a href="/login">返回登录</a></p>
 </main>
 
+<script src="/_assets/app.js"></script>
 <script>
+document.getElementById('brand').innerHTML = MP.icon('logo') + 'MinePage';
+
 const form = document.getElementById('form');
 const done = document.getElementById('done');
 const msg = document.getElementById('msg');
