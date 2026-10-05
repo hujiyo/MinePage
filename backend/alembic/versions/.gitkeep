@@ -1,0 +1,6 @@
+# 这个目录放迁移脚本。
+# 首次建表：
+#   alembic revision --autogenerate -m "初始建表：12 张表"
+#   alembic upgrade head
+#
+# 注意 .gitkeep 只是占位，让空目录能进 git。

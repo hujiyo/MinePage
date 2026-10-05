@@ -138,12 +138,14 @@ navLinks.forEach((a) => {
 
 const msg = document.getElementById('msg');
 
+/** 把字节数格式化成 B / KB / MB；入参是后端给的 totalSize（站点主文件 + 附属文件）。 */
 function fmtSize(n) {
   if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
   if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
   return n + ' B';
 }
 
+/** 在列表下方显示一条结果提示；不会自动消失，下一次操作的结果直接把它覆盖掉。 */
 function showMsg(ok, text) {
   msg.hidden = false;
   msg.className = 'result ' + (ok ? 'ok' : 'err');
@@ -152,6 +154,12 @@ function showMsg(ok, text) {
 
 // ---------------------------------------------------------------- 站点列表
 
+/**
+ * 用 GET /api/sites 返回的站点数组重建列表，并顺便累加出顶部三个统计数字。
+ * 每行带访问链接、编辑链接和删除按钮；删除走 DELETE /api/sites/:name，成功后重新 loadSites()。
+ * 注意：删除按钮里的 await 没有 try/catch，网络失败或响应不是 JSON（res.json() 抛错）都会变成
+ * 没人处理的 Promise 异常 —— 界面既没有提示、列表也不会变化，用户只会觉得「点了没反应」。
+ */
 function renderSites(sites) {
   const wrap = document.getElementById('siteList');
   const empty = document.getElementById('sitesEmpty');
@@ -251,6 +259,11 @@ function renderSites(sites) {
   document.getElementById('navCount').textContent = sites.length ? sites.length : '';
 }
 
+/**
+ * 拉当前账号的站点列表（GET /api/sites）并交给 renderSites。
+ * 失败被刻意吞掉：catch 是空的，顶部统计保持 '–' 占位、页面不报错；data.ok 为 false 时
+ * 同样什么都不做，所以这个页面在接口出错时看起来只是「还没有页面」。
+ */
 async function loadSites() {
   try {
     const res = await fetch('/api/sites');

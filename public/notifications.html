@@ -61,6 +61,7 @@ const tabsBox = document.getElementById('tabs');
 const listBox = document.getElementById('list');
 const emptyBox = document.getElementById('empty');
 
+/** 把毫秒时间戳转成「刚刚 / N 分钟前 / N 小时前 / N 天前」，超过 30 天就直接显示日期。 */
 function fmtTime(ts) {
   const diff = (Date.now() - ts) / 1000;
   if (diff < 60) return '刚刚';
@@ -71,12 +72,17 @@ function fmtTime(ts) {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
 
+/**
+ * 判断一条通知是否属于当前选中的标签。
+ * 'interact' 是前端自己造的伪标签，对应 like 和 favorite 两种类型，后端没有这个值。
+ */
 function match(it) {
   if (tab === 'all') return true;
   if (tab === 'interact') return it.type === 'like' || it.type === 'favorite';
   return it.type === tab;
 }
 
+/** 重建顶部标签行；点某个标签会改 tab、重画标签高亮，并立刻重画列表。 */
 function renderTabs() {
   tabsBox.textContent = '';
   TABS.forEach((t) => {
@@ -88,6 +94,11 @@ function renderTabs() {
   });
 }
 
+/**
+ * 造一条通知的 DOM：头像取 actor 首字，非系统通知会把 actor（用户名存在时）和页面名做成链接，
+ * 有 snippet 才多一行摘要。返回的元素没有挂进 DOM，由 render() 负责 append。
+ * 注意：actor 是必填的（要取 actor[0]），缺了会直接抛错。
+ */
 function renderItem(it) {
   const el = document.createElement('div');
   el.className = 'rowItem' + (it.unread ? ' unread' : '');
@@ -145,6 +156,12 @@ function renderItem(it) {
   return el;
 }
 
+/**
+ * 按当前标签过滤后重画列表，并切换空态提示与列表容器的显隐。
+ * 数据源是页内那个演示数组 items，**不发任何请求**：后端其实已经有 GET /api/notifications
+ * （见文件顶部的 TODO）。页面右上角那个「全部标为已读」也一样，只改内存、不调
+ * POST /api/notifications/seen，所以刷新后未读高亮必然复原。
+ */
 function render() {
   listBox.textContent = '';
   const list = items.filter(match);

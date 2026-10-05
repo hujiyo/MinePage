@@ -56,6 +56,11 @@ const headBox = document.getElementById('chatHead');
 const bodyBox = document.getElementById('chatBody');
 const input = document.getElementById('chatInput');
 
+/**
+ * 重建左侧会话列表（当前会话加高亮），每行的预览取该会话最后一条消息的时间和内容。
+ * 数据来自页内常量 CONVS 的演示数据，**不发请求**；没有任何已读 / 未读、排序逻辑。
+ * 注意：预览直接读 msgs[msgs.length - 1]，空会话会在渲染时抛错。
+ */
 function renderConvs() {
   convBox.textContent = '';
   CONVS.forEach((c, i) => {
@@ -71,6 +76,11 @@ function renderConvs() {
   });
 }
 
+/**
+ * 把当前会话的消息渲染进右侧聊天区，并把滚动条拖到底部。
+ * 自己发的气泡靠 m.from === 'me' 判断，头像首字取自 MP.ME.name（app.js 里的演示用户，
+ * 不是真实登录态）；对方名字旁挂一个 /u/:username 的个人主页链接。
+ */
 function renderChat() {
   const c = CONVS[cur];
   headBox.innerHTML = MP.esc(c.user.name)

@@ -1,0 +1,135 @@
+[project]
+name = "minepage-backend"
+version = "0.1.0"
+description = "MinePage 后端（Python 重写版）"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.6",
+    # 生产用 PostgreSQL；本地开发默认 SQLite，不需要它也能跑
+    "psycopg[binary]>=3.2",
+    # 多文件站点上传是 multipart/form-data
+    "python-multipart>=0.0.18",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.28",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "import-linter>=2.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# ---------------------------------------------------------------- 代码规范
+# 这三样是"用工具代替读规范"：队友不用读文档，推不上去就行。
+# 每一条都对着原 Node 版实际出过的问题。
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes：未定义名、未使用导入
+    "I",         # isort：导入顺序
+    "N",         # pep8-naming
+    "UP",        # pyupgrade
+    "B",         # bugbear：可变默认参数之类
+    "SIM",       # simplify
+    "ANN",       # 类型注解（课程要"代码规范"，这条撑得住）
+    "D",         # docstring
+]
+ignore = [
+    "D203",    # 与 D211 冲突，二选一
+    "D213",    # 与 D212 冲突，二选一
+    # 下面是**确认过的误报或刻意的选择**，不是"嫌烦就关掉"：
+    "D415",    # 句末标点：文档是中文，结尾写「。」而不是「.」，ruff 不认中文标点
+    "B008",    # 默认参数里别调函数：但 FastAPI 的 Depends(...) 就必须写在默认参数里
+    "N818",    # 异常名要带 Error 后缀：NotFound / Forbidden 更贴合 HTTP 语义，刻意不改
+    "ANN401",  # 禁用 Any：少数地方（主键、extra 字典）确实需要 Any
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试不强制类型注解和 docstring；用例名刻意用中文（可读性优先），所以放开 N802
+"tests/*" = ["ANN", "D", "N802"]
+"alembic/*" = ["ANN", "D", "I"]
+# DTO 层的字段名是**契约**：前端读的是 `isAdmin` / `createdAt` / `unreadMessages`，
+# 必须驼峰。所以这里放开 N815（"类作用域里不该混用 camelCase"）——
+# 不是嫌烦关掉，是这条规则在这个目录里必然与契约冲突。
+# 数据库列名是蛇形，中间靠 `schemas/user.py` 的 `UserOut.of()` 转换。
+"app/schemas/*" = ["N815"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = "alembic.*"
+ignore_errors = true
+
+# ---------------------------------------------------------------- 测试
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# ⚠️ `--basetemp` 不是可选项，理由见 backend/README.md 的「临时目录为什么必须显式指定」：
+# 本机有一个环境限制 —— 从工作区启动的进程写不了 `%TEMP%`（PermissionError），
+# 于是 Python 的 `tempfile.gettempdir()` 会**回退到 CWD**，
+# pytest 就会把 `pytest-of-<用户>/pytest-N/<测试名>/` 建在 backend/ 下（实测 33 个目录）。
+# 显式指到项目内，既不再污染，也能一眼看到、随手删。
+addopts = "-q --basetemp=.pytest-tmp"
+
+# ---------------------------------------------------------------- 分层约束
+# 强制依赖方向：api → services → repositories → models。违反即报错。
+# 这是针对原 Node 版"没有机制拦错"的补课。
+#
+# ⚠️ `allow_indirect_imports = true` 是**必须的**，不是放水：
+# 默认的 forbidden 契约会把"传递依赖"也算违规，于是
+#   app.api.social → app.core.deps → app.repositories.site_repository
+# 会被判违规。但 Controller 通过 deps（依赖注入的装配点）间接拿到 Repository
+# **正是依赖注入该有的样子**（Java 里 @Autowired 也是这么传的）。
+# 规则的本意是"Controller 里不许自己写 SQL"，所以只该查**直接**导入 ——
+# 与 tests/test_layering.py 的 AST 检查口径保持一致。
+
+[tool.importlinter]
+root_packages = ["app"]
+
+[[tool.importlinter.contracts]]
+name = "接口层不许直接碰持久层与实体层（Controller 不写 SQL）"
+type = "forbidden"
+source_modules = ["app.api"]
+forbidden_modules = ["app.repositories", "app.models"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "实体层不许依赖上面任何一层"
+type = "forbidden"
+source_modules = ["app.models"]
+forbidden_modules = ["app.repositories", "app.services", "app.api"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "持久层不许依赖业务层与接口层"
+type = "forbidden"
+source_modules = ["app.repositories"]
+forbidden_modules = ["app.services", "app.api"]
+allow_indirect_imports = true

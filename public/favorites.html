@@ -43,7 +43,7 @@ MP.topbar();
 const FOLDERS = [
   { name: '默认收藏夹', sites: MP.topSites(6) },
   { name: '设计灵感', sites: MP.SITES.filter((s) => s.tag === 'portfolio' || s.tag === 'blog') },
-  { name: '前端学习', sites: MP.SITES.filter((s) => s.tag === 'oss' || s.tag === 'blog') },
+  { name: '前端学习', sites: MP.SITES.filter((s) => s.tag === 'opensource' || s.tag === 'blog') },
   { name: '稍后再看', sites: MP.SITES.slice(0, 3) },
 ];
 
@@ -54,6 +54,14 @@ const cardsBox = document.getElementById('cards');
 const folderName = document.getElementById('folderName');
 const folderCount = document.getElementById('folderCount');
 
+/**
+ * 重建左侧收藏夹列表（当前收藏夹加高亮），预览显示每个夹子里前三位作者名。
+ * 数据来自页内常量 FOLDERS，而 FOLDERS 又是 app.js 演示数据（MP.SITES / MP.topSites）
+ * 现算出来的：**一次请求都没发**（见文件顶部的 TODO），所以这里的名字、数量跟当前账号
+ * 真实的收藏无关，任何登录用户看到的都是同一份内容。
+ * 另注：后端 GET /api/favorites 只回一份平铺的收藏站点（服务端注释写着「前端按收藏夹分组」），
+ * 收藏夹目前没有服务端模型，想接真实数据还得先定下分组存在哪儿。
+ */
 function renderFolders() {
   foldersBox.textContent = '';
   FOLDERS.forEach((f, i) => {
@@ -68,6 +76,10 @@ function renderFolders() {
   });
 }
 
+/**
+ * 刷新右侧「当前收藏夹」的标题、条数和卡片区；卡片交给 app.js 的 MP.renderCards 渲染。
+ * 副作用：会清空并重写 cardsBox，传入的站点数组为空时那里会出现一句空态文案。
+ */
 function renderSites() {
   const f = FOLDERS[cur];
   folderName.textContent = f.name;

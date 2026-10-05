@@ -102,18 +102,31 @@ document.getElementById('siteName').textContent = siteName ? '/' + siteName : ''
 let site = null;        // 站点详情
 let editingPath = null; // 多页站里正在编辑的文件路径
 
+/**
+ * 把 & < > " ' 转成 HTML 实体，供拼 innerHTML 时包住服务端返回的 message、文件名和标签。
+ * 和 app.js 的 MP.esc 几乎一样，区别是本函数不兜 null / undefined（会转出 "undefined" 字样）；
+ * 本页调用点传入的都是已知字符串。
+ */
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   })[c]);
 }
 
+/**
+ * 把字节数格式化成给人看的 B / KB / MB（KB、MB 保留一位小数）。
+ * 只用于页头摘要、文件列表和提示里的展示，入参单位必须是字节。
+ */
 function fmtSize(n) {
   if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
   if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
   return n + ' B';
 }
 
+/**
+ * 在页面底部显示一条结果（ok 决定绿色 / 红色配色），每次调用覆盖上一条。
+ * html 按 HTML 插入，调用方拼文件名和 message 时要自己先 escapeHtml。
+ */
 function showMsg(ok, html) {
   const msg = document.getElementById('msg');
   msg.hidden = false;
@@ -123,6 +136,14 @@ function showMsg(ok, html) {
 
 // ---------------------------------------------------------------- 加载站点
 
+/**
+ * 页面启动入口：GET /api/sites/:name（真实接口）取站点详情，填页头摘要、站点设置表单，
+ * 再按 kind 决定显示「单页 HTML 编辑器」还是「多页文件列表」。
+ * 地址里没有站名时只提示、不发请求；接口返回 !ok 时也只提示，此时全局 site 仍是 null
+ * ——会写 site 的几个按钮（保存设置 / 保存单页 HTML / 上传文件）都在各自 hidden 的区块里，
+ * 只有本函数成功时才会显示出来，所以点不到、不会踩到 null。
+ * 本函数没有 try/catch，网络异常会变成未处理的 rejection，页面停在空白面板上。
+ */
 async function loadSite() {
   if (!siteName) {
     showMsg(false, '地址不对，缺少站点名。去 <a href="/account">个人中心</a> 挑一个站点。');
@@ -164,6 +185,11 @@ async function loadSite() {
 
 // ---------------------------------------------------------------- 站点设置
 
+/**
+ * 用服务端随详情一起返回的标签表（data.tags，即 lib/sites.js 的 SITE_TAGS）重建「内容标签」下拉框，
+ * 最前面固定加一个值为空串的「未设置」——空串就是清除标签，服务端允许。
+ * 每次调用都清空重建，不保留旧选中值（选中值紧接着由 fillMetaValues 回填）。
+ */
 function fillMetaForm(tags) {
   const select = document.getElementById('metaTag');
   select.textContent = '';
@@ -181,6 +207,10 @@ function fillMetaForm(tags) {
   });
 }
 
+/**
+ * 把站点详情里的 title / description / tag 回填到「站点设置」表单，没有的值就填空串。
+ * 只写值、不做校验：标签白名单在服务端（isValidSiteTag），存不进库的标签不会出现在下拉框里。
+ */
 function fillMetaValues(s) {
   document.getElementById('metaTitle').value = s.title || '';
   document.getElementById('metaDesc').value = s.description || '';
@@ -246,6 +276,12 @@ document.getElementById('htmlSave').addEventListener('click', async (e) => {
 
 // ---------------------------------------------------------------- 多页：文件列表
 
+/**
+ * GET /api/sites/:name/files（真实接口）拉多页站的文件列表，重建成表格：
+ * 每行是路径 / 大小 / 更新时间，加上现挂的「编辑」和「删除」按钮。
+ * 列表为空时插一行 colSpan=4 的「还没有文件」占位；删除要先 confirm，成功后重新调本函数刷新。
+ * 没有 try/catch，网络异常会变成未处理的 rejection。
+ */
 async function loadFiles() {
   const res = await fetch('/api/sites/' + encodeURIComponent(siteName) + '/files');
   const data = await res.json();
@@ -322,11 +358,21 @@ async function loadFiles() {
 
 // ---------------------------------------------------------------- 多页：文本文件编辑
 
+/**
+ * 关闭多页站的文件编辑器：把 editingPath 置回 null 并隐藏面板。
+ * 置 null 是关键——「保存文件」按钮会先看 editingPath，为 null 时直接返回，
+ * 不会把编辑器里的内容误写回上一个文件。
+ */
 function closeFileEditor() {
   editingPath = null;
   document.getElementById('fileEditorSection').hidden = true;
 }
 
+/**
+ * 打开多页站某个文件的在线编辑器：GET /api/sites/:name/files/content（真实接口）取内容填进 textarea，
+ * 并把面板滚进视野。路径读不到、或服务端标记 data.binary 时只提示、不改状态（编辑器不打开）。
+ * 只有成功后才写全局 editingPath ——「保存文件」用它拼 URL，所以它等价于「当前在编辑哪个文件」。
+ */
 async function openFileEditor(filePath) {
   const res = await fetch(
     '/api/sites/' + encodeURIComponent(siteName) + '/files/content?path='
