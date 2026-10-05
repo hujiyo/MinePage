@@ -1,6 +1,6 @@
 """依赖图必须与代码同步。
 
-生成器在 `tools/gen_dep_graph.py`，产物是 `docs/dependencies.md`。
+生成器在 `tools/gen_dep_graph.py`，产物是 `docs/03-dependencies.md`。
 这里重跑一遍生成逻辑，和已提交的文件逐字节比对 ——
 **改了代码不同步更新图，测试就红。**
 
@@ -42,14 +42,14 @@ def generator() -> ModuleType:
 
 
 def test_依赖图与代码同步(generator: ModuleType) -> None:
-    """`docs/dependencies.md` 必须是当前代码的真实反映。"""
+    """`docs/03-dependencies.md` 必须是当前代码的真实反映。"""
     output: Path = generator.OUTPUT
-    assert output.exists(), "缺少 docs/dependencies.md —— 请跑 tools/gen_dep_graph.py"
+    assert output.exists(), "缺少 docs/03-dependencies.md —— 请跑 tools/gen_dep_graph.py"
 
     expected = generator.build()
     actual = output.read_text(encoding="utf-8")
     assert actual == expected, (
-        "docs/dependencies.md 与代码不同步（多半是刚加了 import 或新文件）。\n"
+        "docs/03-dependencies.md 与代码不同步（多半是刚加了 import 或新文件）。\n"
         "重新生成：.venv/Scripts/python.exe tools/gen_dep_graph.py"
     )
 
@@ -65,7 +65,7 @@ def test_没有未登记的跨层依赖(generator: ModuleType) -> None:
     content = generator.build()
     assert "⚠️ 违规的层依赖" not in content, (
         "出现了未登记的跨层依赖。要么改代码，要么在 tools/gen_dep_graph.py 的 "
-        "EXEMPT 里登记理由（详见 docs/dependencies.md）。"
+        "EXEMPT 里登记理由（详见 docs/03-dependencies.md）。"
     )
 
 

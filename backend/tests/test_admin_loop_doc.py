@@ -1,4 +1,4 @@
-"""保证 `docs/admin-loop.md` 的闭环图**不跟代码漂移**。
+"""保证 `docs/04-admin-loop.md` 的闭环图**不跟代码漂移**。
 
 ## 为什么需要这个测试
 
@@ -27,9 +27,9 @@ import pytest
 from app.core.config import Settings
 from app.main import create_app
 
-DOC_PATH = Path(__file__).resolve().parent.parent / "docs" / "admin-loop.md"
+DOC_PATH = Path(__file__).resolve().parent.parent / "docs" / "04-admin-loop.md"
 
-#: 图里那段的标记。`docs/admin-loop.md` 用它圈出权威清单。
+#: 图里那段的标记。`docs/04-admin-loop.md` 用它圈出权威清单。
 BEGIN = "<!-- ADMIN_ENDPOINTS:BEGIN"
 END = "<!-- ADMIN_ENDPOINTS:END -->"
 

@@ -66,9 +66,13 @@ backend/
 │   ├── services/            业务层
 │   └── api/                 接口层（56 个接口）
 ├── tools/                   开发工具
-│   └── gen_dep_graph.py     生成 docs/dependencies.md（依赖链图）
-├── docs/
-│   └── dependencies.md      ★ 目录依赖链（**自动生成**）
+│   └── gen_dep_graph.py     生成 docs/03-dependencies.md（依赖链图）
+├── docs/                    ★ 全部图与规范都在这里
+│   ├── README.md            索引 + 画图规范（先看这个）
+│   ├── 01-architecture.md   架构：分层与组织方式
+│   ├── 02-flows.md          链路：13 条数据流，按阶段画
+│   ├── 03-dependencies.md   依赖链（**自动生成，别手改**）
+│   └── 04-admin-loop.md     管理权限闭环 + 排查对照表
 ├── alembic/                 建表迁移
 ├── tests/                   pytest
 ├── docker-compose.yml       一键启动：app + postgres（课程要求 ⑥）
@@ -76,11 +80,23 @@ backend/
 └── pyproject.toml           依赖 + ruff/mypy/pytest/import-linter 配置
 ```
 
-### 先看依赖链
+### 先看图
 
-**`docs/dependencies.md`** 回答"哪个目录依赖哪个目录、改一个文件会影响谁"。
-它是 `tools/gen_dep_graph.py` **从代码里真实解析 import 生成的**（不是手画），
-`tests/test_dep_graph.py` 保证它不会过期。
+`docs/` 下共 **19 张 mermaid 图**，各回答不同的问题，别指望一份图回答所有：
+
+| 问题 | 看哪份 |
+|---|---|
+| 代码分成哪几层、层与层怎么连 | [`docs/01-architecture.md`](docs/01-architecture.md) |
+| 一个请求从浏览器到数据库经过哪些环节 | [`docs/02-flows.md`](docs/02-flows.md) |
+| 改这个文件会影响谁 / 这个文件依赖谁 | [`docs/03-dependencies.md`](docs/03-dependencies.md) |
+| 某个管理动作为什么没生效 | [`docs/04-admin-loop.md`](docs/04-admin-loop.md) |
+| 接口的**字段名**是什么 | [`../docs/rewrite/rewrite-contract.md`](../docs/rewrite/rewrite-contract.md) |
+
+画图规范（4 段式链路、状态标记、断点一节）见 [`docs/README.md`](docs/README.md)。
+
+`docs/03-dependencies.md` 是 `tools/gen_dep_graph.py` **从代码里真实解析 import 生成的**
+（不是手画），`tests/test_dep_graph.py` 保证它不会过期。
+`docs/04-admin-loop.md` 的接口清单由 `tests/test_admin_loop_doc.py` 校验，**不会跟代码漂移**。
 
 ```powershell
 cd backend
@@ -127,7 +143,7 @@ cd backend
 **已完成**：身份链路（8 条）+ 账号设置（3 条）+ 站点与文件（11 条）+ 上传（1 条）
 + 发现流（1 条）+ **管理后台（5 条）** + 页面路由（16 条 + `/_assets` + 用户站点兜底）。
 
-**管理闭环**见 [`docs/admin-loop.md`](docs/admin-loop.md) —— 那张 mermaid 图是排查用的，
+**管理闭环**见 [`docs/04-admin-loop.md`](docs/04-admin-loop.md) —— 那张 mermaid 图是排查用的，
 而且有 `tests/test_admin_loop_doc.py` 保证它不跟代码漂移。
 
 **下一步**：站点链路（`/api/sites*` 15 条 + `/api/upload`）—— `index` / `site` / `sites`
@@ -196,7 +212,7 @@ cd backend
 | 3 | 代码规范 | `ruff check --fix` 能修一部分，剩下的手改 |
 | 4 | 代码格式 | `ruff format` |
 | 5 | 类型检查 | 手改（mypy strict 不留情） |
-| 6 | 分层依赖 | 看 `docs/dependencies.md` 的「已知例外」，**不许偷偷放宽 `ALLOWED`** |
+| 6 | 分层依赖 | 看 `docs/03-dependencies.md` 的「已知例外」，**不许偷偷放宽 `ALLOWED`** |
 
 > **⚠️ 改了任何 import 或新增/删除文件，就必须重生依赖图。**
 > 不只是"接口变了"才要 —— 加个 service、改个 import 都会让图变。

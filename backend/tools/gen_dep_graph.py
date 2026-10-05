@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-r"""从代码里真实解析 import，生成 `backend/docs/dependencies.md`（含 mermaid 图）。
+r"""从代码里真实解析 import，生成 `backend/docs/03-dependencies.md`（含 mermaid 图）。
 
 ## 为什么用生成而不是手画
 
@@ -23,7 +23,7 @@ r"""从代码里真实解析 import，生成 `backend/docs/dependencies.md`（�
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe tools/gen_dep_graph.py              # 写入 docs/dependencies.md
+.\.venv\Scripts\python.exe tools/gen_dep_graph.py              # 写入 docs/03-dependencies.md
 .\.venv\Scripts\python.exe tools/gen_dep_graph.py --check      # 只检查是否同步（CI/测试用）
 ```
 """
@@ -38,7 +38,7 @@ from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parent.parent
 APP = BACKEND / "app"
-OUTPUT = BACKEND / "docs" / "dependencies.md"
+OUTPUT = BACKEND / "docs" / "03-dependencies.md"
 
 #: 层的显示顺序与中文名。顺序即"依赖从高到低"，图里也按这个顺序排 subgraph。
 #: `app` 指 `app/` 根下的文件（`main.py` / `__init__.py`）—— 它是**装配入口**，
@@ -282,7 +282,7 @@ def module_table(deps: list[Dep], edges: dict[str, set[str]]) -> str:
 
 
 def build() -> str:
-    """生成 `docs/dependencies.md` 的完整内容。
+    """生成 `docs/03-dependencies.md` 的完整内容。
 
     纯函数：不写文件。所以测试可以直接调它拿"应该是什么"，
     再和已提交的文件比对 —— 这就是"图会不会过期"的那条检查。
@@ -391,7 +391,7 @@ def build() -> str:
 def main() -> int:
     """命令行入口。
 
-    `--check` 只比对不写入（给测试和 CI 用），默认写入 `docs/dependencies.md`。
+    `--check` 只比对不写入（给测试和 CI 用），默认写入 `docs/03-dependencies.md`。
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="只检查是否与已提交的一致，不写入")
