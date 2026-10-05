@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api import auth, discover, health, me, pages, sites, social
+from app.api import admin, auth, discover, health, me, pages, sites, social
 from app.core.routing import CommitBeforeResponseRoute
 
 api_router = APIRouter(route_class=CommitBeforeResponseRoute)
@@ -28,6 +28,7 @@ api_router.include_router(auth.router)
 api_router.include_router(me.router)
 api_router.include_router(sites.router)
 api_router.include_router(discover.router)
+api_router.include_router(admin.router)
 
 # 2) 平台页面 + /_assets/ + 用户站点兜底（**必须最后**）
 api_router.include_router(pages.router)
