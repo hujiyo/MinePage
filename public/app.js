@@ -297,7 +297,7 @@
       { key: 'dynamic', href: '/notifications', ic: 'bell', label: '动态', dot: me.dynamic },
       { key: 'favorites', href: '/favorites', ic: 'folder', label: '收藏' },
       { key: 'history', href: '/history', ic: 'history', label: '历史' },
-      { key: 'upload', href: '/sites', ic: 'grid', label: '创作中心' },
+      { key: 'create', href: '/sites', ic: 'grid', label: '创作' },
     ].map((a) => '<a class="tact" href="' + a.href + '" title="' + a.label + '">'
       + icon(a.ic) + '<span>' + a.label + '</span>'
       + (a.dot ? '<i class="dot">' + a.dot + '</i>' : '') + '</a>').join('');
@@ -319,7 +319,6 @@
       +     '</div>'
       +   '</div>'
       +   '<div class="tacts">' + acts + '</div>'
-      +   '<a class="tupload" href="/upload">' + icon('upload') + '<span>投稿</span></a>'
       +   '<div class="tuser" id="tuser">'
       +     '<div class="avatar sm" title="' + esc(me.name) + '">' + esc(me.name[0]) + '</div>'
       +     '<div class="tmenu">'
@@ -327,7 +326,7 @@
       +       '<hr>'
       +       '<a href="/u/' + encodeURIComponent(me.username) + '">' + icon('user') + '我的主页</a>'
       +       '<a href="/account">' + icon('settings') + '账号设置</a>'
-      +       '<a href="/sites">' + icon('grid') + '页面管理</a>'
+      +       '<a href="/sites">' + icon('grid') + '创作</a>'
       +       (me.isAdmin ? '<a href="/admin">' + icon('shield') + '管理后台</a>' : '')
       +       '<hr>'
       +       '<a href="/login" id="tLogout">' + icon('logout') + '退出登录</a>'
