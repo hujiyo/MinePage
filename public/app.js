@@ -593,6 +593,10 @@
       + '<span class="coverChar">' + esc(initial(site)) + '</span>'
       + '<span class="vviews">' + icon('view') + fmtNum(site.views) + '</span>'
       + '<span class="vkind">' + (pages > 1 ? pages + ' 页' : '单页') + '</span>';
+    // ⚠️ 已知缺陷：封面是普通 div，**点它没有任何反应**。
+    // 整张卡片里只有下面的 `.vtitle` 是可点的链接，用户点封面/空白处会以为卡片坏了。
+    // 修法（本节未做）：把封面包进 <a href="/view/:名字">，或给卡片挂一个
+    // 「点到 a/button 以外的区域就跳转」的委托监听。详见 backend/docs/02-flows.md。
     card.appendChild(cover);
 
     const body = document.createElement('div');
@@ -630,6 +634,13 @@
     card.appendChild(body);
 
     // 快捷赞 / 藏
+    //
+    // ⚠️ **这两个按钮目前是假的**：只 toggle 一个 `.on` class，不发任何请求，刷新即复原。
+    // 点赞的真接口是有的（`POST/DELETE /api/sites/:名字/like`），`view.html` 里已经接上了
+    // （那边验过：200 + 计数变化 + 刷新后仍在）。这里没接的原因是**卡片拿不到"我点过没有"** ——
+    // `/api/discover` 不返回 `liked`（原版也不返回），接了会出现"我明明赞过、按钮却是灭的"。
+    // 正确修法：给 discover 的响应加一个 `liked` 字段（对登录用户），再照 view.html 的写法接。
+    // 详见 backend/docs/02-flows.md 的 D1 与分类总表下面那张问题表。
     const ops = document.createElement('div');
     ops.className = 'vops';
     const like = document.createElement('button');
@@ -640,12 +651,11 @@
     fav.type = 'button';
     fav.className = 'op';
     fav.innerHTML = icon('fav') + ' ' + fmtNum(site.favorites);
-    // TODO 后端对接：POST/DELETE /api/sites/:name/like | /favorite
-    [['like', like], ['fav', fav]].forEach(([kind, btn]) => {
+    [like, fav].forEach((btn) => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         e.preventDefault();
-        btn.classList.toggle('on');
+        MP.toast('卡片上的快捷按钮还没接上后端（观看页里的点赞已经能用）');
       });
     });
     ops.appendChild(like);
