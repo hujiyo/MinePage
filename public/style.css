@@ -630,9 +630,6 @@ section { margin-top: 32px; }
   border: 1px solid #fff;
 }
 
-.tupload { flex: none; display: flex; align-items: center; gap: 6px; }
-.tupload svg { width: 16px; height: 16px; }
-
 .tuser { position: relative; flex: none; display: flex; align-items: center; cursor: pointer; }
 .tuser .avatar { box-shadow: 0 0 0 1px var(--border); }
 .tmenu {
@@ -709,7 +706,7 @@ section { margin-top: 32px; }
   flex: none;
 }
 
-/* 列表行左侧缩略图（历史 / 创作中心） */
+/* 列表行左侧缩略图（历史 / 创作） */
 .rthumb {
   width: 112px;
   aspect-ratio: 16 / 9;
@@ -825,6 +822,45 @@ section { margin-top: 32px; }
   margin-top: 16px;
 }
 .homeSide { position: sticky; top: 76px; display: flex; flex-direction: column; gap: 16px; }
+
+/* ============================================================
+   创作页：左侧标签页 + 右侧面板
+   ============================================================ */
+
+.workGrid {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+  margin-top: 16px;
+}
+.workNav {
+  position: sticky;
+  top: 76px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.workNav a {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: var(--muted2);
+  font-size: 14px;
+  cursor: pointer;
+}
+.workNav a:hover { background: var(--panel2); color: var(--pink); }
+.workNav a.on { background: var(--pink-soft); color: var(--pink); font-weight: 600; }
+.workNav a .wic { display: flex; align-items: center; }
+.workNav a .wic svg { width: 15px; height: 15px; }
+.workNav a .cnt { margin-left: auto; font-size: 12px; color: var(--muted); }
+.workNav a.on .cnt { color: var(--pink); }
 
 /* ============================================================
    创作者空间头部
@@ -1115,6 +1151,11 @@ body.nav-collapsed .topbar { transform: translateY(-100%); }
 @media (max-width: 1000px) {
   .homeGrid { grid-template-columns: 1fr; }
   .homeSide { position: static; }
+  /* 创作页：窄屏改成横向标签条 */
+  .workGrid { grid-template-columns: 1fr; }
+  .workNav { position: static; flex-direction: row; overflow-x: auto; }
+  .workNav a { white-space: nowrap; }
+  .workNav a .cnt { margin-left: 2px; }
   .msgLayout { grid-template-columns: 1fr; }
   .msgList { display: flex; overflow-x: auto; }
   .msgList .msgItem { min-width: 200px; border-bottom: 0; border-right: 1px solid var(--panel2); }
@@ -1124,18 +1165,16 @@ body.nav-collapsed .topbar { transform: translateY(-100%); }
   .tact span { display: none; }
   .tact { padding: 6px 9px; }
   .tinner { gap: 10px; padding: 0 12px; }
-  .tupload span { display: none; }
   .banner { aspect-ratio: 16 / 8; }
 }
 @media (max-width: 640px) {
   :root { --topbar-h: 54px; }
-  /* 顶栏：只留 logo 图标 + 搜索 + 消息/动态 + 投稿 + 头像，避免横向溢出 */
+  /* 顶栏：只留 logo 图标 + 搜索 + 消息/动态 + 头像，避免横向溢出 */
   .tinner { gap: 8px; padding: 0 10px; }
   .tname { display: none; }
   .tsearch { min-width: 0; max-width: none; }
   .tsForm input { padding: 8px 10px; }
   .tacts .tact:nth-child(n + 3) { display: none; }
-  .tupload { padding: 6px 10px; }
   .page { padding: 12px 12px 40px; }
   .page.wide { max-width: none; }
   .cards { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }

@@ -360,7 +360,7 @@
       { key: 'dynamic', href: '/notifications', ic: 'bell', label: '动态', dot: session ? session.unread : 0 },
       { key: 'favorites', href: '/favorites', ic: 'folder', label: '收藏' },
       { key: 'history', href: '/history', ic: 'history', label: '历史' },
-      { key: 'upload', href: '/sites', ic: 'grid', label: '创作中心' },
+      { key: 'create', href: '/sites', ic: 'grid', label: '创作' },
     ];
     return acts.map((a) => '<a class="tact" href="' + a.href + '" title="' + a.label + '">'
       + icon(a.ic) + '<span>' + a.label + '</span>'
@@ -395,7 +395,7 @@
       +     '</div>'
       +   '</div>'
       +   '<div class="tacts" id="tacts">' + tactsInner(null) + '</div>'
-      +   '<a class="tupload" href="/upload">' + icon('upload') + '<span>投稿</span></a>'
+      // 独立「投稿」入口已去掉：投稿并入创作页的「投稿」标签（/sites?tab=upload）
       +   '<div class="tuser" id="tuser">' + userAreaInner(null) + '</div>'
       + '</div>';
   }

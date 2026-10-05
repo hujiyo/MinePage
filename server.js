@@ -334,13 +334,14 @@ async function handleRoot(req, res) {
   await sendPage(res, 'discover.html');
 }
 
-/** 上传页（原来的首页）。上传必须登录，所以页面本身就挡掉未登录访问。 */
+/**
+ * 老投稿页：投稿已并入「创作」页的「投稿」标签，这里只做跳转。
+ *
+ * 不再单独挡未登录 —— 跳过去的 `/sites` 自己要求登录，
+ * 未登录用户最终仍会被送到登录页，效果与在这里挡一次相同。
+ */
 async function handleUploadPage(req, res) {
-  if (!currentUser(req)) {
-    sendRedirect(res, '/login');
-    return;
-  }
-  await sendPage(res, 'index.html');
+  sendRedirect(res, '/sites?tab=upload');
 }
 
 /** 登录页；已登录用户直接跳回首页。 */
