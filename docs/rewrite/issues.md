@@ -1,6 +1,7 @@
 # MinePage 当前问题清单
 
-基线：`b2d6bf0`。本文件是本地未跟踪文件（`tests/` 由 `.git/info/exclude` 排除）。
+基线：`b2d6bf0`（旧 Node 版）。**本文件已进版本控制** ——
+原先它只放在本地的 `tests/` 里，重写时提升到了 `docs/rewrite/`，和 `new-findings.md` 放在一起。
 架构背景见 [architecture.md](architecture.md)，链路见 [flows.md](flows.md)，已跑实的缺陷见 [findings.md](findings.md)。
 
 **共 53 条：P0 三条、P1 二十条、P2 三十条。**

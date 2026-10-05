@@ -2,7 +2,7 @@
 
 > 目的：换语言重写后端时，**让现有 15 个页面一行都不用改**。
 > 所以契约不是"应该是什么"，而是"现在是什么"。
-> 由 `tests/scripts/api-contract.mjs` 生成，改动路由后重新生成。
+> 由同目录的 `api-contract.mjs` 生成（`node docs/rewrite/api-contract.mjs`），改动路由后重新生成。
 
 接口共 **56** 条。
 

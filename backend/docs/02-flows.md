@@ -80,7 +80,7 @@ flowchart TD
     class A1,A2,A3,B1,B2,B3,C1,C2,C3,C4,C5,D1,D2 ok
 ```
 
-**断点**：无。两个已知隐患记在本地清单 `tests/new-findings.md` 的 N7（种子口令低于平台下限）、N8（先写库后发信，SMTP 挂了要等满 60 秒冷却）。该文件不进 git，故不做链接。
+**断点**：无。两个已知隐患记在 [`../../docs/rewrite/new-findings.md`](../../docs/rewrite/new-findings.md) 的 N7（种子口令低于平台下限）、N8（先写库后发信，SMTP 挂了要等满 60 秒冷却）。
 
 ---
 

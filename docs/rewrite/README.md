@@ -60,12 +60,21 @@ node docs/rewrite/api-contract.mjs --json docs/rewrite/rewrite-contract.json
 ## 和 `tests/` 的关系
 
 仓库根的 `tests/` 是**开发工具目录，不进 git**（`.git/info/exclude` 里锚定成 `/tests/`）。
-这里的三份产物是从它那儿挑出来、**为了进 git 给队友和老师看**的副本。
 
-`tests/` 里还留着的东西（仍然是本地工具，不进 git）：
+这三份产物**原来只放在 `tests/` 里**，重写时提升到了这个目录 ——
+它们现在是**正式版本本身**，不是副本。`tests/` 下原先那三份同名文件已删除，
+避免同一个东西在两个地方各有一份、结论还不一样。
 
-- `scripts/run-all.mjs` + 84 条 Node 回归用例 —— **前端"不能坏"的验收基线**
+`tests/` 里还留着的（仍然是本地工具，不进 git）：
+
+- `scripts/*.mjs` —— E2E / 一致性 / 链路覆盖率等检查脚本
+  （`run-all.mjs` 那套 84 条 Node 回归用例的打靶对象是旧 `server.js`，
+  前端接上 Python 之后它已经不是验收基线了）
 - `tools/node_modules/` —— mermaid-cli / jsdom / puppeteer，随时能重装
 - `rendered/` —— 渲染出来的图，随时能重新生成
 
-**那套 Node 回归先留到 Python 后端把前端接上再清理** —— 现在删了就没法证明"前端一行不改"。
+> **重写之后，"前端不能坏"的验收基线换了目标。**
+> 以前是"同一套前端对着 Node 后端跑 84 条用例"，
+> 现在是"前端对着 Python 后端跑 E2E"（`e2e-upload-py.mjs` / `e2e-admin-py.mjs` /
+> `ui-lightup.mjs` / `verify_upload_chain.py`）。
+> 旧 `server.js` 留在仓库里，是为了这套契约**还能重建**，不是因为它还在服役。
