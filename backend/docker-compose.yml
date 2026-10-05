@@ -1,0 +1,55 @@
+# 一键启动：app + PostgreSQL
+# 对应课程要求 ⑥「一键启动（Docker-Compose 或安装包），智能体依赖自包含」。
+#
+# 用法：
+#   docker compose up --build        启动
+#   docker compose exec app alembic upgrade head    建表（首次）
+#   浏览器开 http://127.0.0.1:3000
+#
+# 注意：前端 public/ 不在这个目录里，它挂在仓库根；compose 把它只读挂载进来，
+# 因为后端要同时负责发那 15 个 HTML，两边必须同源。
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: minepage
+      POSTGRES_USER: minepage
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-minepage}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # app 要等它真的能接受连接再起，否则首次启动会连不上
+      test: ["CMD-SHELL", "pg_isready -U minepage -d minepage"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://minepage:${POSTGRES_PASSWORD:-minepage}@db:5432/minepage
+      HOST: 0.0.0.0
+      PORT: 3000
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-123}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@minepage.local}
+    ports:
+      - "3000:3000"
+    volumes:
+      # 前端静态文件只读挂进来 —— 前端一行不改，这是重写的验收标准
+      - ../public:/srv/public:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

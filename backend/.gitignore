@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 二进制/可执行文件 —— **一律不进版本控制**。
+# .venv/ 已经挡住了虚拟环境里的 294 个 .exe/.dll/.pyd，但那是"间接"挡住的：
+# 一旦有人在仓库里就地编译（C 扩展的 .pyd）或 PyInstaller 把产物输出到仓库，
+# 就会漏进去。二进制文件进 git 的代价是仓库永久变大、而且 diff 毫无意义。
+*.exe
+*.dll
+*.pyd
+*.so
+*.dylib
+*.msi
+build/
+dist/
+
+# 本地数据库（开发用 SQLite）
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# 环境变量（含数据库密码、SMTP 密码）
+.env
+
+# 用户上传的站点内容（如果落到本地磁盘）
+uploads/
+
+# pip 的临时构建目录。
+# ⚠️ 实测踩过一次：`pip install -e .` 跑完，backend/ 下多出 69 个 `pip-*` 目录、
+# 315 个文件、40 MB（里面还有 hatchling 的完整源码），差点被提交进去。
+# 根因见 README「临时目录为什么必须显式指定」—— 不是权限问题，是 tempfile 回退到 CWD。
+# 发现 backend/ 下有一堆 pip-* 就可以直接删。
+pip-*/
+
+# pytest 的临时目录（`tmp_path` 夹具的落点）。
+# pyproject.toml 里已经用 `--basetemp=.pytest-tmp` 显式指到项目内，
+# 这两条是兜底：万一有人用别的方式跑 pytest（不带 addopts），也不会污染 git。
+.pytest-tmp/
+pytest-of-*/
+
+# import-linter 的缓存目录
+.import_linter_cache/
