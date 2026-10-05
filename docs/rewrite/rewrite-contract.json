@@ -1,0 +1,652 @@
+[
+  {
+    "method": "GET",
+    "path": "/api/me",
+    "auth": "公开(读登录态)",
+    "handler": "handleMe",
+    "reqKeys": [],
+    "resKeys": [
+      "unread",
+      "unreadMessages",
+      "user"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/discover",
+    "auth": "公开",
+    "handler": "handleDiscover",
+    "reqKeys": [],
+    "resKeys": [
+      "total"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/u/:名字/profile",
+    "auth": "公开(读登录态)",
+    "handler": "handleCreatorProfile",
+    "reqKeys": [],
+    "resKeys": [
+      "user",
+      "stats",
+      "isFollowing",
+      "isOwn",
+      "sites",
+      "tagLabel"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/notifications",
+    "auth": "登录",
+    "handler": "handleNotificationsList",
+    "reqKeys": [],
+    "resKeys": [
+      "items"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/notifications/seen",
+    "auth": "登录",
+    "handler": "handleNotificationsSeen",
+    "reqKeys": [],
+    "resKeys": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/register",
+    "auth": "公开",
+    "handler": "handleRegister",
+    "reqKeys": [
+      "email",
+      "password",
+      "code"
+    ],
+    "resKeys": [
+      "user"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/login",
+    "auth": "公开",
+    "handler": "handleLogin",
+    "reqKeys": [
+      "login",
+      "password"
+    ],
+    "resKeys": [
+      "user"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/logout",
+    "auth": "公开",
+    "handler": "handleLogout",
+    "reqKeys": [],
+    "resKeys": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/send-code",
+    "auth": "公开/登录",
+    "handler": "handleSendCode",
+    "reqKeys": [
+      "purpose",
+      "email"
+    ],
+    "resKeys": [
+      "dev"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/password",
+    "auth": "登录",
+    "handler": "handleChangePassword",
+    "reqKeys": [
+      "currentPassword",
+      "code",
+      "newPassword",
+      "username"
+    ],
+    "resKeys": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/forgot-password",
+    "auth": "公开",
+    "handler": "handleForgotPassword",
+    "reqKeys": [
+      "email"
+    ],
+    "resKeys": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/reset-password",
+    "auth": "公开",
+    "handler": "handleResetPassword",
+    "reqKeys": [
+      "email",
+      "code",
+      "password"
+    ],
+    "resKeys": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/account/username",
+    "auth": "登录",
+    "handler": "handleAccountUsername",
+    "reqKeys": [
+      "username"
+    ],
+    "resKeys": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/account/password",
+    "auth": "登录",
+    "handler": "handleAccountPassword",
+    "reqKeys": [
+      "currentPassword",
+      "newPassword"
+    ],
+    "resKeys": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/account/bio",
+    "auth": "登录",
+    "handler": "handleAccountBio",
+    "reqKeys": [
+      "bio"
+    ],
+    "resKeys": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/sites",
+    "auth": "登录",
+    "handler": "handleMySites",
+    "reqKeys": [],
+    "resKeys": []
+  },
+  {
+    "method": "POST",
+    "path": "/api/upload",
+    "auth": "登录",
+    "handler": "handleUpload",
+    "reqKeys": [
+      "name",
+      "html"
+    ],
+    "resKeys": [
+      "name",
+      "size",
+      "url"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/sites/:名字",
+    "auth": "登录+属主",
+    "handler": "handleSiteDetail",
+    "reqKeys": [],
+    "resKeys": [
+      "site",
+      "id",
+      "name",
+      "status",
+      "kind",
+      "size",
+      "html",
+      "title",
+      "description",
+      "tag",
+      "tagLabel",
+      "createdAt",
+      "updatedAt",
+      "tags",
+      "fileCount"
+    ]
+  },
+  {
+    "method": "PUT",
+    "path": "/api/sites/:名字",
+    "auth": "登录+属主",
+    "handler": "handleSiteSaveHtml",
+    "reqKeys": [
+      "html"
+    ],
+    "resKeys": []
+  },
+  {
+    "method": "PUT",
+    "path": "/api/sites/:名字/meta",
+    "auth": "登录+属主",
+    "handler": "handleSiteSaveMeta",
+    "reqKeys": [
+      "title",
+      "description",
+      "tag"
+    ],
+    "resKeys": [
+      "tagLabel",
+      "title",
+      "description",
+      "tag"
+    ]
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/sites/:名字",
+    "auth": "登录+属主",
+    "handler": "handleSiteDelete",
+    "reqKeys": [],
+    "resKeys": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/sites/:名字/files",
+    "auth": "登录",
+    "handler": "handleSiteFilesList",
+    "reqKeys": [],
+    "resKeys": [
+      "total",
+      "files"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/sites/:名字/files",
+    "auth": "登录",
+    "handler": "handleSiteFileUpload",
+    "reqKeys": [],
+    "resKeys": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/sites/:名字/files/content",
+    "auth": "登录+属主",
+    "handler": "handleSiteFileContent",
+    "reqKeys": [],
+    "resKeys": [
+      "path",
+      "size",
+      "content",
+      "binary"
+    ]
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/sites/:名字/files",
+    "auth": "登录+属主",
+    "handler": "handleSiteFileDelete",
+    "reqKeys": [],
+    "resKeys": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/sites/:名字/stats",
+    "auth": "公开(读登录态)",
+    "handler": "handleSiteStats",
+    "reqKeys": [],
+    "resKeys": [
+      "stats",
+      "site",
+      "name",
+      "title",
+      "description",
+      "tag",
+      "tagLabel",
+      "ownerId",
+      "status",
+      "author",
+      "id",
+      "username"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/sites/:名字/like",
+    "auth": "登录",
+    "handler": "handleSiteLike",
+    "reqKeys": [],
+    "resKeys": [
+      "liked",
+      "likes"
+    ]
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/sites/:名字/like",
+    "auth": "登录",
+    "handler": "handleSiteUnlike",
+    "reqKeys": [],
+    "resKeys": [
+      "liked",
+      "likes"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/sites/:名字/comments",
+    "auth": "公开",
+    "handler": "handleSiteCommentsList",
+    "reqKeys": [
+      "replyTo"
+    ],
+    "resKeys": [
+      "total",
+      "comments"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/sites/:名字/comments",
+    "auth": "登录",
+    "handler": "handleSiteCommentAdd",
+    "reqKeys": [
+      "content",
+      "replyTo"
+    ],
+    "resKeys": [
+      "comment",
+      "createdAt",
+      "author",
+      "id",
+      "name",
+      "username",
+      "total",
+      "replyTo",
+      "content"
+    ]
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/sites/:名字/comments/:id",
+    "auth": "登录",
+    "handler": "handleSiteCommentDelete",
+    "reqKeys": [
+      "folder"
+    ],
+    "resKeys": [
+      "total"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/sites/:名字/favorite",
+    "auth": "登录",
+    "handler": "handleSiteFavorite",
+    "reqKeys": [
+      "folder"
+    ],
+    "resKeys": [
+      "favorited",
+      "favorites"
+    ]
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/sites/:名字/favorite",
+    "auth": "登录",
+    "handler": "handleSiteUnfavorite",
+    "reqKeys": [],
+    "resKeys": [
+      "favorited",
+      "favorites"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/users/:id/follow",
+    "auth": "登录",
+    "handler": "handleUserFollow",
+    "reqKeys": [],
+    "resKeys": [
+      "following",
+      "followers"
+    ]
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/users/:id/follow",
+    "auth": "登录",
+    "handler": "handleUserUnfollow",
+    "reqKeys": [],
+    "resKeys": [
+      "following",
+      "followers"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/users/:id/social",
+    "auth": "公开(读登录态)",
+    "handler": "handleUserSocial",
+    "reqKeys": [],
+    "resKeys": [
+      "followers",
+      "following",
+      "isFollowing"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/users/:id/follow-list",
+    "auth": "公开(读登录态)",
+    "handler": "handleFollowList",
+    "reqKeys": [],
+    "resKeys": [
+      "type"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/users/search",
+    "auth": "公开",
+    "handler": "handleUserSearch",
+    "reqKeys": [],
+    "resKeys": [
+      "users"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/history",
+    "auth": "登录",
+    "handler": "handleHistoryList",
+    "reqKeys": [],
+    "resKeys": [
+      "sites"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/history",
+    "auth": "登录",
+    "handler": "handleHistoryRecord",
+    "reqKeys": [
+      "site"
+    ],
+    "resKeys": []
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/history",
+    "auth": "登录",
+    "handler": "handleHistoryClear",
+    "reqKeys": [],
+    "resKeys": []
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/history/:名字",
+    "auth": "登录",
+    "handler": "handleHistoryDelete",
+    "reqKeys": [],
+    "resKeys": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/favorites",
+    "auth": "登录",
+    "handler": "handleFavoritesList",
+    "reqKeys": [],
+    "resKeys": [
+      "sites"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/messages",
+    "auth": "登录",
+    "handler": "handleConversations",
+    "reqKeys": [],
+    "resKeys": [
+      "conversations"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/messages/:id",
+    "auth": "登录",
+    "handler": "handleMessagesWith",
+    "reqKeys": [],
+    "resKeys": [
+      "user",
+      "id",
+      "name",
+      "username",
+      "bio",
+      "messages"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/messages/:id",
+    "auth": "登录",
+    "handler": "handleMessageSend",
+    "reqKeys": [
+      "content"
+    ],
+    "resKeys": [
+      "id",
+      "at"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/users",
+    "auth": "管理员",
+    "handler": "handleAdminUsers",
+    "reqKeys": [
+      "status"
+    ],
+    "resKeys": [
+      "total",
+      "users"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/users/:id/status",
+    "auth": "管理员",
+    "handler": "handleAdminUserStatus",
+    "reqKeys": [
+      "status"
+    ],
+    "resKeys": [
+      "id"
+    ]
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/sites",
+    "auth": "管理员",
+    "handler": "handleAdminSites",
+    "reqKeys": [
+      "status"
+    ],
+    "resKeys": [
+      "total",
+      "sites"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/sites/:id/status",
+    "auth": "管理员",
+    "handler": "handleAdminSiteStatus",
+    "reqKeys": [
+      "status"
+    ],
+    "resKeys": [
+      "id"
+    ]
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/admin/sites/:id",
+    "auth": "管理员",
+    "handler": "handleAdminDeleteSite",
+    "reqKeys": [],
+    "resKeys": [
+      "id"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/mcp",
+    "auth": "密钥",
+    "handler": "handleMcpPost",
+    "reqKeys": [],
+    "resKeys": []
+  },
+  {
+    "method": "POST",
+    "path": "/mcp/:key",
+    "auth": "密钥",
+    "handler": "handleMcpPostWithKey",
+    "reqKeys": [],
+    "resKeys": []
+  },
+  {
+    "method": "GET",
+    "path": "/api/mcp/tokens",
+    "auth": "登录",
+    "handler": "handleMcpTokenList",
+    "reqKeys": [],
+    "resKeys": [
+      "tokens"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/mcp/tokens",
+    "auth": "登录",
+    "handler": "handleMcpTokenCreate",
+    "reqKeys": [
+      "label"
+    ],
+    "resKeys": [
+      "token"
+    ]
+  },
+  {
+    "method": "POST",
+    "path": "/api/mcp/tokens/:id/revoke",
+    "auth": "登录",
+    "handler": "handleMcpTokenRevoke",
+    "reqKeys": [],
+    "resKeys": [
+      "id"
+    ]
+  }
+]
