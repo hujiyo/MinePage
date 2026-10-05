@@ -52,9 +52,18 @@
 <script src="/_assets/app.js"></script>
 <script>
 // /view/:站名  ——  全屏看对方的网页，社区功能收进底部吸附栏
+//
+// 数据来源（**已接真实后端**）：
+//   GET /api/sites/:name/stats   公开接口，一次拿全互动数字 + 站点与作者信息
+//   GET /:站名                    iframe 直接嵌真实站点（后端带沙箱 CSP）
+//   POST/DELETE /api/sites/:name/like   点赞（要登录）
+//
+// **还没接的**（后端没实现，所以这里明确提示而不是假装能用）：
+//   评论（3 条接口）· 收藏（2 条）· 关注（2 条）
 MP.topbar({ collapse: true });
 
 const SITE = decodeURIComponent(location.pathname.replace(/^\/view\//, '').replace(/\/+$/, ''));
+const enc = encodeURIComponent;
 
 const viewer = document.getElementById('viewer');
 const missing = document.getElementById('missing');
@@ -69,25 +78,19 @@ const cList = document.getElementById('cList');
 const cEmpty = document.getElementById('cEmpty');
 
 let site = null;
+let me = null;          // 真实登录态（未登录为 null）—— 不再用演示身份 MP.ME
 let following = false;
 let liked = false;
 let favored = false;
 let coined = false;
 
-// TODO 后端对接：替换为 fetch('/api/sites/:name/stats') 的互动数据
-const stats = { likes: 0, favorites: 0, coins: 0, comments: 0 };
-let comments = [];   // 评论列表（含一二级回复）
+// 互动数字。`likes` / `favorites` / `comments` 来自后端；
+// **`coins` 后端没有这个概念**，它一直是纯前端装饰（原版按 likes/4 算），这里保留。
+let stats = { views: 0, likes: 0, favorites: 0, comments: 0, coins: 0 };
 
-// TODO 后端对接：替换为 fetch('/api/sites/:name/comments')
-const DEMO_COMMENTS = [
-  { id: 1, author: { name: '小林', username: 'lin' }, content: '配色很舒服，滚动动效也不卡，请问用了什么方案？', createdAt: Date.now() - 3600e3, likes: 12 },
-  { id: 2, author: { name: '演示用户', username: 'demo' }, content: '纯 CSS + IntersectionObserver，没用框架，所以体积很小。', createdAt: Date.now() - 3000e3, replyTo: 1, likes: 6 },
-  { id: 3, author: { name: 'Aurora', username: 'aurora' }, content: '首页头部的留白可以再收一点，移动端会更紧凑。', createdAt: Date.now() - 7200e3, likes: 20 },
-  { id: 4, author: { name: 'Momo', username: 'momo' }, content: '已经收藏，准备照着改改自己的主页。', createdAt: Date.now() - 86400e3, likes: 3 },
-];
-
-// TODO 后端对接：站名不存在时应跳 404 提示
-site = MP.SITES.find((s) => s.name === SITE) || null;
+// 评论列表。后端还没实现评论接口，所以**这里是空的，不是演示数据** ——
+// 之前那版塞了 4 条 DEMO_COMMENTS（"小林""演示用户"），会让人以为评论是真的。
+let comments = [];
 
 /**
  * 把毫秒时间戳转成评论用的相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前。
@@ -104,37 +107,26 @@ function fmtTime(ts) {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
 
+/** 后端返回的是 ISO 字符串，页面里全按毫秒时间戳在算，这里转一道。 */
+function toMs(iso) {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : Date.now();
+}
+
 /* ---------------------------------------------------------------- 播放区 */
 
 /**
- * 填充观看页正文：站点标题、互动数字和 iframe 里的内容，并准备本页用的评论数组。
- * 只在启动分支里 site 非空时调用一次，函数内部直接读全局 site，自己不做判空。
- * 数据全是演示数据：stats 取自 MP.SITES 的字段，comments 是 DEMO_COMMENTS 的副本
- * （之后的增删只改这份副本，刷新即复原）；iframe 也没有加载真实站点，而是用 srcdoc
- * 拼一个渐变预览占位（见函数内的 TODO）。
- * 副作用：改 document.title、全局 stats / comments，以及 #frame 的 srcdoc。
+ * 把 iframe 指到**真实站点**。
+ *
+ * 之前这里用 `srcdoc` 拼了一个渐变占位，所以"点卡片进去"看到的从来不是真站点。
+ * 现在直接嵌 `/站名` —— 后端会带上沙箱 CSP（`sandbox allow-scripts ...`，
+ * **不含 allow-same-origin**），用户脚本逃不出那个框。
+ *
+ * 副作用：改 document.title 与 #frame 的 src。
  */
 function renderFrame() {
   document.title = (site.title || site.name) + ' · MinePage';
-  stats.likes = site.likes;
-  stats.favorites = site.favorites;
-  stats.coins = Math.floor(site.likes / 4);
-  stats.comments = site.comments;
-  comments = DEMO_COMMENTS.slice();
-
-  // 前端阶段站点 slug 不存在，主体用 srcdoc 生成预览占位
-  // TODO 后端对接：frame.src = '/' + encodeURIComponent(SITE) + '/';
-  document.getElementById('frame').srcdoc = '<!DOCTYPE html><html><head><meta charset="utf-8"><style>'
-    + 'html,body{margin:0;height:100%;font-family:system-ui,-apple-system,sans-serif;'
-    + 'display:flex;align-items:center;justify-content:center;color:#fff;'
-    + 'background:' + MP.grad(site) + '}'
-    + '.w{text-align:center;padding:24px;max-width:620px}'
-    + '.w b{font-size:28px;display:block;margin-bottom:12px}'
-    + '.w p{opacity:.92;font-size:15px;line-height:1.8;margin:0}'
-    + '.w i{display:inline-block;margin-top:22px;font-size:12px;opacity:.8;'
-    + 'border:1px solid rgba(255,255,255,.5);padding:5px 14px;border-radius:99px;font-style:normal}'
-    + '</style></head><body><div class="w"><b>' + MP.esc(site.title || site.name)
-    + '</b><p>' + MP.esc(site.description || '') + '</p><i>演示预览 · 由 MinePage 沙箱渲染</i></div></body></html>';
+  document.getElementById('frame').src = '/' + enc(site.name) + '/';
 }
 
 /* ---------------------------------------------------------------- 底部吸附栏 */
@@ -174,10 +166,43 @@ function makeItem(ic, text, opt) {
   return el;
 }
 
+/**
+ * 点赞 / 取消点赞 —— **接的是真实接口**。
+ *
+ * 契约：`POST /api/sites/:name/like` → `{ok, liked: true, likes: N}`；
+ *      `DELETE` 同路径 → `{ok, liked: false, likes: N}`。
+ *
+ * 三种失败要分开处理：
+ *   401 未登录 → 弹登录弹窗（不跳页面）
+ *   451 站点已下线 → 提示"暂停互动"，**注意取消点赞不会 451**（后端刻意不校验状态）
+ *   其它 → 把后端的 message 原样提示（后端文案是给用户看的）
+ */
+async function toggleLike() {
+  const res = await fetch('/api/sites/' + enc(SITE) + '/like', {
+    method: liked ? 'DELETE' : 'POST',
+    headers: { Accept: 'application/json' },
+  });
+  const data = await res.json().catch(() => null);
+
+  if (res.status === 401) {
+    MP.toast('登录后才能点赞');
+    MP.auth.openLogin({});
+    return;
+  }
+  if (!res.ok || !data || !data.ok) {
+    MP.toast((data && data.message) || '操作失败，稍后再试');
+    return;
+  }
+
+  liked = data.liked;
+  stats.likes = data.likes;
+  renderBar();
+}
+
 /** 重新渲染底部吸附栏（互动状态变化时调用）。 */
 function renderBar() {
   if (!site) return;
-  const a = site.author;
+  const a = site.author || { name: '未知作者', username: null };
 
   snapbar.textContent = '';
 
@@ -189,15 +214,19 @@ function renderBar() {
   }));
   gLeft.appendChild(makeItem('like', '赞 ' + MP.fmtNum(stats.likes), {
     on: liked,
-    click: () => { liked = !liked; stats.likes += liked ? 1 : -1; renderBar(); },
+    click: toggleLike,
   }));
+  // 投币：**后端没有这个概念**，纯前端装饰（原版按 likes/4 算）。点了只改本地。
   gLeft.appendChild(makeItem('coin', '投币 ' + MP.fmtNum(stats.coins), {
     on: coined,
+    title: '投币是纯前端装饰，后端没有这个数据',
     click: () => { coined = !coined; stats.coins += coined ? 1 : -1; renderBar(); },
   }));
+  // 收藏：后端还没实现（POST/DELETE /api/sites/:name/favorite 缺失）
   gLeft.appendChild(makeItem('fav', '收藏 ' + MP.fmtNum(stats.favorites), {
     on: favored,
-    click: () => { favored = !favored; stats.favorites += favored ? 1 : -1; renderBar(); },
+    title: '收藏功能还没接上后端',
+    click: () => MP.toast('收藏功能还没接上后端（下一步做）'),
   }));
 
   // 中间：收起小三角形（点击整条栏收起，只在左下角留一个小三角形）
@@ -221,24 +250,36 @@ function renderBar() {
   commentBtn = btnComment;
   gRight.appendChild(btnComment);
 
-  const avEl = document.createElement('a');
-  avEl.className = 'snapItem';
-  avEl.href = '/u/' + encodeURIComponent(a.username);
-  avEl.title = a.name + ' 的主页';
-  avEl.innerHTML = '<span class="avatar xs">' + MP.esc(a.name[0]) + '</span>'
+  // 作者头像：**没设用户名时 /u/ 是死链**，所以退回成不可点的节点。
+  //
+  // ⚠️ `MP.initial()` 收的是**站点对象**（它读 `site.title || site.name`），
+  // 传字符串会取不到首字母、**恒返回 `?`** —— 所以这里显式包一层 `{ name: ... }`。
+  // （这个 bug 是真实浏览器测出来的：底栏头像显示成了 `?`。）
+  const avatarHtml = '<span class="avatar xs">' + MP.esc(MP.initial({ name: a.name })) + '</span>'
     + '<span class="sText">' + MP.esc(a.name) + '</span>';
-  gRight.appendChild(avEl);
+  if (a.username) {
+    const avEl = document.createElement('a');
+    avEl.className = 'snapItem';
+    avEl.href = '/u/' + enc(a.username);
+    avEl.title = a.name + ' 的主页';
+    avEl.innerHTML = avatarHtml;
+    gRight.appendChild(avEl);
+  } else {
+    const avEl = document.createElement('span');
+    avEl.className = 'snapItem';
+    avEl.title = a.name + '（没设用户名，没有主页）';
+    avEl.innerHTML = avatarHtml;
+    gRight.appendChild(avEl);
+  }
 
-  const isOwn = a.username === MP.ME.username;
+  // 「是不是自己的站」用**真实登录态**判断（之前用的是演示身份 MP.ME）
+  const isOwn = !!me && !!a.username && a.username === me.username;
   if (!isOwn) {
+    // 关注：后端还没实现（POST/DELETE /api/users/:id/follow 缺失）
     gRight.appendChild(makeItem(following ? 'check' : 'plus', following ? '已关注' : '关注', {
       on: following,
-      // TODO 后端对接：POST/DELETE /api/users/:id/follow
-      click: () => {
-        following = !following;
-        renderBar();
-        MP.toast(following ? '已关注 ' + a.name : '已取消关注');
-      },
+      title: '关注功能还没接上后端',
+      click: () => MP.toast('关注功能还没接上后端（下一步做）'),
     }));
   }
   gRight.appendChild(makeItem('message', '私信', { href: '/messages' }));
@@ -248,7 +289,6 @@ function renderBar() {
   snapbar.appendChild(gRight);
   snapbar.hidden = false;
   applySnap();
-  // TODO 后端对接：赞 / 投币 / 收藏改为请求 /api/sites/:name/like | /coin | /favorite
 }
 
 /* ---------------------------------------------------------------- 评论面板 */
@@ -318,10 +358,11 @@ window.addEventListener('resize', () => {
 /**
  * 造一个指向作者主页的链接节点（/u/:用户名，用户名经 encodeURIComponent），返回未挂载的 <a>。
  * 展示名用 textContent 写入，交给浏览器转义即可；不查资料、不发请求。
+ * 作者没设用户名时 /u/ 是死链，这时返回不可点的 <span>。
  */
 function authorNode(author) {
-  const a = document.createElement('a');
-  a.href = '/u/' + encodeURIComponent(author.username);
+  const a = document.createElement(author.username ? 'a' : 'span');
+  if (author.username) a.href = '/u/' + enc(author.username);
   a.textContent = author.name;
   return a;
 }
@@ -330,9 +371,11 @@ function authorNode(author) {
  * 渲染一条评论节点（作者链接、回复对象、时间、正文、点赞 / 回复 / 删除按钮），返回未挂载的节点。
  * isTop 为真时才算顶层评论：额外挂「回复」按钮，并把 rootOf 归到它名下的回复递归渲染进 .replies；
  * 回复本身不再带回复按钮，层级因此最多两层。
- * 点赞只改本地 c.likes 和按钮文字，删除按钮是否出现按 c.author.username === MP.ME.username
- * （写死的演示身份，不是真实登录态）判断，两者都不发请求（见函数内 TODO）。
- * 删除会提示确认，然后把这条和它的直接回复一起从 comments 里摘掉并整体重绘。
+ *
+ * **删除按钮对谁可见**：用真实登录态判断（作者本人或管理员），
+ * 之前这里比的是演示身份 `MP.ME.username`，任何人都看不到删除按钮。
+ *
+ * 注意：点赞 / 回复 / 删除**都还没接后端**（评论接口缺失），点了只会提示。
  */
 function renderComment(c, isTop) {
   const div = document.createElement('div');
@@ -373,10 +416,7 @@ function renderComment(c, isTop) {
   const likeBtn = document.createElement('button');
   likeBtn.type = 'button';
   likeBtn.textContent = '赞 ' + (c.likes || 0);
-  likeBtn.addEventListener('click', () => {
-    c.likes = (c.likes || 0) + 1;
-    likeBtn.textContent = '赞 ' + c.likes;
-  });
+  likeBtn.addEventListener('click', () => MP.toast('评论点赞还没接上后端'));
   ops.appendChild(likeBtn);
 
   // 回复按钮：只挂在顶层评论上（回复的回复归到同一父评论）
@@ -388,21 +428,16 @@ function renderComment(c, isTop) {
     ops.appendChild(replyBtn);
   }
 
-  // 删除：作者本人或管理员
-  if (c.author.username === MP.ME.username || MP.ME.isAdmin) {
+  // 删除：作者本人或管理员。**判断用真实登录态**。
+  const canDelete = !!me && (c.author.username === me.username || me.isAdmin);
+  if (canDelete) {
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
     delBtn.className = 'del';
     delBtn.textContent = '删除';
-    delBtn.addEventListener('click', () => {
-      if (!confirm('确定删除这条评论吗？')) return;
-      comments = comments.filter((x) => x.id !== c.id && x.replyTo !== c.id);
-      renderComments();
-      MP.toast('已删除');
-    });
+    delBtn.addEventListener('click', () => MP.toast('删除评论还没接上后端'));
     ops.appendChild(delBtn);
   }
-  // TODO 后端对接：删除与点赞改为请求 /api/sites/:name/comments/:id
 
   if (ops.children.length > 0) div.appendChild(ops);
 
@@ -465,19 +500,8 @@ function toggleReplyBox(commentDiv, parent) {
 
   box.addEventListener('submit', (e) => {
     e.preventDefault();
-    const content = ta.value.trim();
-    if (content === '') return;
-    // TODO 后端对接：POST /api/sites/:name/comments（带 replyTo）
-    comments.push({
-      id: Date.now(),
-      author: { name: MP.ME.name, username: MP.ME.username },
-      content,
-      createdAt: Date.now(),
-      replyTo: parent.id,
-      likes: 0,
-    });
-    renderComments();
-    MP.toast('回复已发布');
+    // 后端没有 POST /api/sites/:name/comments，所以**不往列表里塞假数据**，只提示。
+    MP.toast('评论功能还没接上后端（下一步做）');
   });
 
   commentDiv.appendChild(box);
@@ -498,7 +522,6 @@ function renderComments() {
   tops.forEach((c) => cList.appendChild(renderComment(c, true)));
 
   // 底部栏上的评论数同步（可见文字 + 悬浮提示）
-  stats.comments = comments.length;
   if (commentBtn) {
     commentBtn.title = '评论 ' + MP.fmtNum(stats.comments);
     const text = commentBtn.querySelector('.sText');
@@ -508,37 +531,83 @@ function renderComments() {
 
 cForm.addEventListener('submit', (e) => {
   e.preventDefault();
-  const content = cInput.value.trim();
-  if (content === '') return;
-  // TODO 后端对接：POST /api/sites/:name/comments
-  comments.push({
-    id: Date.now(),
-    author: { name: MP.ME.name, username: MP.ME.username },
-    content,
-    createdAt: Date.now(),
-    likes: 0,
-  });
-  cInput.value = '';
-  renderComments();
-  MP.toast('评论已发布');
+  // 同回复：后端接口还没实现，**不假装发布成功**。
+  MP.toast('评论功能还没接上后端（下一步做）');
 });
 
 /* ---------------------------------------------------------------- 启动 */
 
-if (!site) {
-  viewer.hidden = true;
-  snapbar.hidden = true;
-  sheet.hidden = true;
-  missing.hidden = false;
-} else {
-  const a = site.author;
+/**
+ * 拉真实数据并点亮页面。
+ *
+ * 失败分支要说清原因：404「没有这个站点」与 451「已被管理员下线」
+ * 是两回事，后端的 message 已经写好了，直接用。
+ */
+async function boot() {
+  let data = null;
+  let status = 0;
+  try {
+    const res = await fetch('/api/sites/' + enc(SITE) + '/stats', {
+      headers: { Accept: 'application/json' },
+    });
+    status = res.status;
+    data = await res.json().catch(() => null);
+  } catch {
+    status = 0;
+  }
+
+  if (!data || !data.ok) {
+    viewer.hidden = true;
+    snapbar.hidden = true;
+    sheet.hidden = true;
+    missing.hidden = false;
+    // 提示文案怎么选：
+    //   **404** 时后端的 message 就是「没有这个站点」，和上面的 `<h1>` 一字不差，
+    //         直接用会显示两行同样的字 —— 所以那种情况保留 HTML 里原有的说明。
+    //   **451**（被管理员下线）的 message 有信息量，换成它。
+    //   **连不上服务器**（status 0）单独说，否则用户会以为是站名打错了。
+    const p = missing.querySelector('.sub');
+    if (p) {
+      if (status === 451 && data && data.message) p.textContent = data.message;
+      else if (status === 0) p.textContent = '连不上服务器，稍后再试。';
+    }
+    return;
+  }
+
+  site = data.site;
+  const s = data.stats || {};
+  stats = {
+    views: s.views || 0,
+    likes: s.likes || 0,
+    favorites: s.favorites || 0,
+    comments: s.comments || 0,
+    coins: Math.floor((s.likes || 0) / 4),   // 后端没有投币概念，按老规则派生
+  };
+  liked = !!s.liked;
+  favored = !!s.favorited;
+
+  // 真实登录态 —— 后面判"是不是自己的站/评论"要用它
+  me = await MP.me();
+
+  const a = site.author || null;
   document.title = (site.title || site.name) + ' · MinePage';
-  document.getElementById('toAuthor').innerHTML =
-    '作者 <a href="/u/' + encodeURIComponent(a.username) + '">' + MP.esc(a.name) + '</a>';
+  if (a) {
+    document.getElementById('toAuthor').innerHTML = a.username
+      ? '作者 <a href="/u/' + enc(a.username) + '">' + MP.esc(a.name) + '</a>'
+      : '作者 ' + MP.esc(a.name);
+  } else {
+    document.getElementById('toAuthor').textContent = '';
+  }
+
+  // 评论：后端没有接口，所以明确说清"这里是空的"，而不是放几条演示评论
+  cEmpty.textContent = '评论功能还没接上后端，所以这里暂时是空的。';
+
   renderFrame();
   renderBar();
   renderComments();
 }
+
+boot();
 </script>
 </body>
 </html>
