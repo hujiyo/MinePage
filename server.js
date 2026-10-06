@@ -210,7 +210,9 @@ function readJsonBody(req, limit = MAX_BODY_BYTES) {
       if (size > limit) {
         settled = true;
         reject(Object.assign(new Error('内容太大了'), { code: 'TOO_LARGE' }));
-        req.destroy();
+        // 把剩下的请求体读完再丢掉，别在这里 destroy：
+        // 掐掉连接会让客户端看到 ECONNRESET，而不是我们想回的 413「文件太大」。
+        req.resume();
         return;
       }
       chunks.push(chunk);
@@ -246,7 +248,8 @@ function readRawBody(req, limit = MAX_BODY_BYTES) {
       if (size > limit) {
         settled = true;
         reject(Object.assign(new Error('内容太大了'), { code: 'TOO_LARGE' }));
-        req.destroy();
+        // 同上：读干丢弃，保证调用方能把这声 413 送出去
+        req.resume();
         return;
       }
       chunks.push(chunk);
