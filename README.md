@@ -13,7 +13,11 @@ node server.js
 
 打开 http://127.0.0.1:3000
 
-唯一的外部依赖是 `nodemailer`（发验证码邮件）；数据库用的是 Node 自带的 `node:sqlite`。
+外部依赖只有两个：`nodemailer`（发验证码邮件）和 `mysql2`（数据库驱动）。
+存储用 **MySQL 8**，启动时自动建表（幂等），库和账号要提前建好，
+连接参数走环境变量：`MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` /
+`MYSQL_PASSWORD` / `MYSQL_DATABASE`（默认连 `127.0.0.1:3306` 的 `minepage` 库）。
+连不上会直接启动失败并把原因打到控制台。
 
 **邮件配置**：默认不配置 SMTP 时走开发模式，验证码打印在服务器控制台。
 要真发信，设这些环境变量：`SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS`
@@ -22,14 +26,12 @@ node server.js
 首次启动会自动创建管理员账号并在控制台打印，默认是 `admin` / `123`。
 只在数据库里没有管理员时创建一次，之后改过密码也不会被覆盖回去。
 
-> 启动时那行 `ExperimentalWarning: SQLite ...` 是 Node 对内置 SQLite 模块的提示，无害。
-
 ## 结构
 
 ```
 server.js                     HTTP 服务：路由表 + 各接口处理
 lib/config.js                 端口、上限、名字规则、保留字、会话参数
-lib/db.js                     SQLite 连接与建表（幂等）
+lib/db.js                     MySQL 连接池、建表（幂等）、老库补列
 lib/auth.js                   scrypt 密码哈希、会话 token、Cookie 读写
 lib/users.js                  用户与会话的数据操作、管理员种子
 lib/sites.js                  站点的数据操作
@@ -42,6 +44,7 @@ lib/mcp/tokens.js             MCP 密钥：铸造 / 列表 / 吊销 / 鉴权（�
 lib/mcp/tools.js              MCP 工具注册表（唯一真源）+ 10 个 backend
 lib/mcp/server.js             MCP 的 JSON-RPC 分发，零依赖手写
 scripts/mcp-smoke.mjs         MCP 冒烟测试（68 项，见下）
+scripts/api-smoke.mjs         全站接口冒烟测试（129 项，自己拉起临时服务，见下）
 public/index.html             上传页（/upload）
 public/discover.html          社区首页（/）
 public/user.html              创作者主页（/u/:用户名）
@@ -142,15 +145,29 @@ claude mcp add --transport http minepage http://127.0.0.1:3000/mcp \
 | `write_file` / `delete_file` / `list_files` / `read_file` | 多页站的文件增删改查 |
 | `delete_site` | 删整个站点 |
 
-**回归脚本**（另起一个端口和库，别拿常驻服务跑）：
+**回归脚本**（都用独立的冒烟库 `MYSQL_DATABASE=minepage_smoke`，别拿生产库跑）：
 
 ```
-$env:PORT=3100; $env:DB_FILE='data/mcp-smoke.db'; node server.js
+# 起一个测试服务（冒烟库，种子管理员 admin/123）
+$env:PORT=3100; $env:MYSQL_DATABASE='minepage_smoke'; node server.js
+
 node scripts/mcp-smoke.mjs                        # 主流程 51 项
-node scripts/mcp-smoke.mjs --isolation smoke-friend   # 跨账号隔离 8 项（换个账号跑）
+node scripts/mcp-smoke.mjs --isolation smoke-friend   # 跨账号隔离 8 项（$env:SMOKE_LOGIN 换个账号跑）
 node scripts/mcp-smoke.mjs --revoke-check         # 吊销 4 项
-node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项
+node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项（需要库里有个 b@smoke.local）
 ```
+
+全站接口回归不用自己起服务，脚本会拉一个临时服务，开跑前自动清空
+冒烟库的表，跑完自己收拾：
+
+```
+node scripts/api-smoke.mjs          # 129 项：注册/登录/站点/文件/社交/权限/后台/改密
+node scripts/api-smoke.mjs --json   # 末尾多打印一段 JSON，换库前后可以拿来对比
+```
+
+验证码在开发模式下打印到服务端控制台，脚本就是从子进程输出里捞的，
+所以这个脚本**必须在开发模式（不配 SMTP_HOST）下跑**。
+想拿它打已有服务就设 `BASE_URL`，此时管理员凭据从 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 读。
 
 ## 三条不能忘的约束
 
@@ -166,7 +183,11 @@ node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项
 |---|---|---|
 | `PORT` | `3000` | 监听端口 |
 | `HOST` | `127.0.0.1` | 监听地址 |
-| `DB_FILE` | `data/minepage.db` | 数据库位置（相对项目根目录） |
+| `MYSQL_HOST` | `127.0.0.1` | MySQL 地址 |
+| `MYSQL_PORT` | `3306` | MySQL 端口 |
+| `MYSQL_USER` | `minepage` | 数据库账号 |
+| `MYSQL_PASSWORD` | 空 | 数据库密码 |
+| `MYSQL_DATABASE` | `minepage` | 库名；跑回归脚本时指向 `minepage_smoke` |
 | `ADMIN_USERNAME` | `admin` | 管理员用户名 |
 | `ADMIN_PASSWORD` | `123` | 管理员密码，首次创建时生效 |
 | `ADMIN_EMAIL` | `admin@minepage.local` | 管理员邮箱 |
@@ -175,6 +196,6 @@ node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项
 
 ## 还没做
 
-- 自动化测试（目前靠手动跑脚本验证全链路）
+- 自动化测试只盖到接口层（`npm run smoke`），页面上的 JS 交互还没覆盖
 - lint / 格式化配置
 - 限流与配额（验证码有 60 秒重发冷却，其他接口还没有）

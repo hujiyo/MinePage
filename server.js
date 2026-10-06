@@ -18,6 +18,9 @@ import {
   SITE_DESC_MAX,
   BIO_MAX,
   COMMENT_MAX,
+  MYSQL_HOST,
+  MYSQL_PORT,
+  MYSQL_DATABASE,
 } from './lib/config.js';
 import { checkName } from './lib/names.js';
 import { absoluteUrlForSite } from './lib/addressing.js';
@@ -191,8 +194,8 @@ function sessionToken(req) {
 }
 
 /** 取当前登录用户。封禁中的账号按未登录处理。 */
-function currentUser(req) {
-  const row = findSessionUser(sessionToken(req));
+async function currentUser(req) {
+  const row = await findSessionUser(sessionToken(req));
   if (!row) return null;
   if (row.status !== 'active') return null;
   return publicUser(row);
@@ -210,7 +213,9 @@ function readJsonBody(req, limit = MAX_BODY_BYTES) {
       if (size > limit) {
         settled = true;
         reject(Object.assign(new Error('内容太大了'), { code: 'TOO_LARGE' }));
-        req.destroy();
+        // 把剩下的请求体读完再丢掉，别在这里 destroy：
+        // 掐掉连接会让客户端看到 ECONNRESET，而不是我们想回的 413「文件太大」。
+        req.resume();
         return;
       }
       chunks.push(chunk);
@@ -246,7 +251,8 @@ function readRawBody(req, limit = MAX_BODY_BYTES) {
       if (size > limit) {
         settled = true;
         reject(Object.assign(new Error('内容太大了'), { code: 'TOO_LARGE' }));
-        req.destroy();
+        // 同上：读干丢弃，保证调用方能把这声 413 送出去
+        req.resume();
         return;
       }
       chunks.push(chunk);
@@ -286,8 +292,8 @@ async function readFileBody(req, res, limit) {
   }
 }
 
-function requireLogin(req, res) {
-  const user = currentUser(req);
+async function requireLogin(req, res) {
+  const user = await currentUser(req);
   if (!user) {
     sendJson(res, 401, { ok: false, message: '请先登录' });
     return null;
@@ -295,8 +301,8 @@ function requireLogin(req, res) {
   return user;
 }
 
-function requireAdmin(req, res) {
-  const user = requireLogin(req, res);
+async function requireAdmin(req, res) {
+  const user = await requireLogin(req, res);
   if (!user) return null;
   if (!user.isAdmin) {
     sendJson(res, 403, { ok: false, message: '需要管理员权限' });
@@ -318,7 +324,7 @@ async function handleUploadPage(req, res) {
 }
 
 async function handleLoginPage(req, res) {
-  if (currentUser(req)) {
+  if (await currentUser(req)) {
     sendRedirect(res, '/');
     return;
   }
@@ -326,7 +332,7 @@ async function handleLoginPage(req, res) {
 }
 
 async function handleAdminPage(req, res) {
-  const user = currentUser(req);
+  const user = await currentUser(req);
   if (!user) {
     sendRedirect(res, '/login');
     return;
@@ -339,7 +345,7 @@ async function handleAdminPage(req, res) {
 }
 
 async function handleSettingsPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
@@ -347,7 +353,7 @@ async function handleSettingsPage(req, res) {
 }
 
 async function handleForgotPage(req, res) {
-  if (currentUser(req)) {
+  if (await currentUser(req)) {
     sendRedirect(res, '/');
     return;
   }
@@ -355,7 +361,7 @@ async function handleForgotPage(req, res) {
 }
 
 async function handleAccountPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
@@ -364,7 +370,7 @@ async function handleAccountPage(req, res) {
 
 /** 页面管理页：站点列表 / 访问 / 编辑 / 删除。 */
 async function handleSitesPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
@@ -373,7 +379,7 @@ async function handleSitesPage(req, res) {
 
 /** 站点管理编辑页（单页编辑 / 多页文件管理，也是未来智能体辅助编辑的挂载点）。 */
 async function handleSiteEditPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
@@ -403,13 +409,13 @@ async function handleAsset(req, res, [file]) {
 // ---------------------------------------------------------------- 账号接口
 
 async function handleMe(req, res) {
-  const user = currentUser(req);
+  const user = await currentUser(req);
   // 登录用户附带未读通知数 / 未读私信数，导航条不用额外请求
   sendJson(res, 200, {
     ok: true,
     user,
-    unread: user ? countUnread(user.id) : 0,
-    unreadMessages: user ? countUnreadMessages(user.id) : 0,
+    unread: user ? await countUnread(user.id) : 0,
+    unreadMessages: user ? await countUnreadMessages(user.id) : 0,
   });
 }
 
@@ -417,7 +423,7 @@ async function handleLogin(req, res) {
   const body = await readBody(req, res);
   if (!body) return;
 
-  const user = authenticate(String(body.login ?? '').trim(), String(body.password ?? ''));
+  const user = await authenticate(String(body.login ?? '').trim(), String(body.password ?? ''));
 
   if (!user) {
     sendJson(res, 401, { ok: false, message: '账号或密码不对' });
@@ -428,14 +434,14 @@ async function handleLogin(req, res) {
     return;
   }
 
-  const token = createSession(user.id);
+  const token = await createSession(user.id);
   setSessionCookie(res, token, SESSION_TTL_DAYS * 86400);
 
   sendJson(res, 200, { ok: true, user: publicUser(user) });
 }
 
 async function handleLogout(req, res) {
-  deleteSession(sessionToken(req));
+  await deleteSession(sessionToken(req));
   setSessionCookie(res, '', 0);
   sendJson(res, 200, { ok: true });
 }
@@ -464,7 +470,7 @@ async function handleSendCode(req, res) {
     }
 
     if (purpose === 'register') {
-      if (findUserByLogin(email)) {
+      if (await findUserByLogin(email)) {
         sendJson(res, 409, { ok: false, message: '这个邮箱已经注册过了' });
         return;
       }
@@ -478,14 +484,14 @@ async function handleSendCode(req, res) {
     }
 
     // reset：不管邮箱存不存在，回复都一样，避免被人拿来探测哪些邮箱注册过
-    const user = findUserByLogin(email);
+    const user = await findUserByLogin(email);
     if (user) await issueCode(email, purpose);
     sendJson(res, 200, { ok: true });
     return;
   }
 
   if (purpose === 'change') {
-    const user = requireLogin(req, res);
+    const user = await requireLogin(req, res);
     if (!user) return;
 
     const result = await issueCode(user.email, purpose);
@@ -521,19 +527,19 @@ async function handleRegister(req, res) {
     sendJson(res, 400, { ok: false, message: '请输入 6 位邮箱验证码' });
     return;
   }
-  if (findUserByLogin(email)) {
+  if (await findUserByLogin(email)) {
     sendJson(res, 409, { ok: false, message: '这个邮箱已经注册过了' });
     return;
   }
 
-  const verified = consumeCode(email, 'register', code);
+  const verified = await consumeCode(email, 'register', code);
   if (!verified.ok) {
     sendJson(res, 400, { ok: false, message: verified.message });
     return;
   }
 
-  const user = createUser({ email, password });
-  const token = createSession(user.id);
+  const user = await createUser({ email, password });
+  const token = await createSession(user.id);
   setSessionCookie(res, token, SESSION_TTL_DAYS * 86400);
 
   sendJson(res, 201, { ok: true, user: publicUser(user) });
@@ -550,7 +556,7 @@ async function handleForgotPassword(req, res) {
     return;
   }
 
-  if (findUserByLogin(email)) {
+  if (await findUserByLogin(email)) {
     await issueCode(email, 'reset');
   }
 
@@ -575,20 +581,20 @@ async function handleResetPassword(req, res) {
     return;
   }
 
-  const user = findUserByLogin(email);
+  const user = await findUserByLogin(email);
   if (!user) {
     sendJson(res, 400, { ok: false, message: '验证码不对或已过期' });
     return;
   }
 
-  const verified = consumeCode(email, 'reset', code);
+  const verified = await consumeCode(email, 'reset', code);
   if (!verified.ok) {
     sendJson(res, 400, { ok: false, message: verified.message });
     return;
   }
 
-  updateUserPassword(user.id, password);
-  deleteOtherSessions(user.id);
+  await updateUserPassword(user.id, password);
+  await deleteOtherSessions(user.id);
   sendJson(res, 200, { ok: true });
 }
 
@@ -597,7 +603,7 @@ async function handleResetPassword(req, res) {
  * 成功后踢掉其他设备的会话，保留当前这一个。
  */
 async function handleChangePassword(req, res) {
-  const session = currentUser(req);
+  const session = await currentUser(req);
   if (!session) {
     sendJson(res, 401, { ok: false, message: '请先登录' });
     return;
@@ -619,7 +625,7 @@ async function handleChangePassword(req, res) {
     return;
   }
 
-  const row = findUserById(session.id);
+  const row = await findUserById(session.id);
   if (!row || !verifyPassword(currentPassword, row.password_hash)) {
     sendJson(res, 400, { ok: false, message: '当前密码不对' });
     return;
@@ -629,28 +635,28 @@ async function handleChangePassword(req, res) {
     sendJson(res, 400, { ok: false, message: '请输入 6 位邮箱验证码' });
     return;
   }
-  const verified = consumeCode(row.email, 'change', code);
+  const verified = await consumeCode(row.email, 'change', code);
   if (!verified.ok) {
     sendJson(res, 400, { ok: false, message: verified.message });
     return;
   }
 
-  updateUserPassword(row.id, newPassword);
-  deleteOtherSessions(row.id, sessionToken(req));
+  await updateUserPassword(row.id, newPassword);
+  await deleteOtherSessions(row.id, sessionToken(req));
   sendJson(res, 200, { ok: true });
 }
 
 // ---------------------------------------------------------------- 账号自助设置接口
 
 async function handleAccountUsername(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const body = await readBody(req, res);
   if (!body) return;
 
   try {
-    const username = setUsername(user.id, body.username ?? null);
+    const username = await setUsername(user.id, body.username ?? null);
     sendJson(res, 200, { ok: true, username });
   } catch (err) {
     if (err.code === 'BAD_NAME') {
@@ -666,14 +672,14 @@ async function handleAccountUsername(req, res) {
 }
 
 async function handleAccountPassword(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const body = await readBody(req, res);
   if (!body) return;
 
   try {
-    changePassword(user.id, body.currentPassword, body.newPassword);
+    await changePassword(user.id, body.currentPassword, body.newPassword);
     sendJson(res, 200, { ok: true });
   } catch (err) {
     if (err.code === 'WRONG_PASSWORD' || err.code === 'PASSWORD_TOO_SHORT') {
@@ -686,14 +692,14 @@ async function handleAccountPassword(req, res) {
 
 /** 保存个人简介（个人中心的「想说的话」）。 */
 async function handleAccountBio(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const body = await readBody(req, res);
   if (!body) return;
 
   try {
-    const bio = setBio(user.id, body.bio ?? null);
+    const bio = await setBio(user.id, body.bio ?? null);
     sendJson(res, 200, { ok: true, bio });
   } catch (err) {
     if (err.code === 'BIO_TOO_LONG') {
@@ -707,10 +713,10 @@ async function handleAccountBio(req, res) {
 // ---------------------------------------------------------------- 站点接口
 
 async function handleMySites(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const sites = listSitesByOwner(user.id).map((s) => ({
+  const sites = (await listSitesByOwner(user.id)).map((s) => ({
     id: s.id,
     name: s.name,
     title: s.title,
@@ -729,7 +735,7 @@ async function handleMySites(req, res) {
 }
 
 async function handleUpload(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const body = await readBody(req, res);
@@ -752,7 +758,7 @@ async function handleUpload(req, res) {
   }
 
   try {
-    const site = createSite({ name: checked.name, html, ownerId: user.id });
+    const site = await createSite({ name: checked.name, html, ownerId: user.id });
     sendJson(res, 201, {
       ok: true,
       name: site.name,
@@ -773,7 +779,7 @@ async function handleUpload(req, res) {
 
 /** 上传/覆盖站点里的一个文件。站点不存在时自动创建（入口页待补 index.html）。 */
 async function handleSiteFileUpload(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const checked = checkName(name);
@@ -792,11 +798,11 @@ async function handleSiteFileUpload(req, res, [name]) {
     return;
   }
 
-  let site = findSiteHeaderByName(checked.name);
+  let site = await findSiteHeaderByName(checked.name);
   if (!site) {
     try {
-      createSite({ name: checked.name, html: '', ownerId: user.id });
-      site = findSiteHeaderByName(checked.name);
+      await createSite({ name: checked.name, html: '', ownerId: user.id });
+      site = await findSiteHeaderByName(checked.name);
     } catch (err) {
       if (err.code === 'NAME_TAKEN') {
         sendJson(res, 409, { ok: false, message: err.message });
@@ -819,22 +825,22 @@ async function handleSiteFileUpload(req, res, [name]) {
     return;
   }
 
-  const isNew = getSiteFile(site.id, filePath) === null;
-  if (isNew && countSiteFiles(site.id) >= MAX_FILES_PER_SITE) {
+  const isNew = await getSiteFile(site.id, filePath) === null;
+  if (isNew && await countSiteFiles(site.id) >= MAX_FILES_PER_SITE) {
     sendJson(res, 409, { ok: false, message: `站点文件太多啦，上限 ${MAX_FILES_PER_SITE} 个` });
     return;
   }
 
-  const saved = upsertSiteFile(site.id, filePath, content);
+  const saved = await upsertSiteFile(site.id, filePath, content);
   sendJson(res, isNew ? 201 : 200, { ok: true, path: saved.path, size: saved.size });
 }
 
 /** 列出站点里的全部文件（不含内容）。站点的主人或管理员可看。 */
 async function handleSiteFilesList(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = findSiteHeaderByName(name);
+  const site = await findSiteHeaderByName(name);
   if (!site) {
     sendJson(res, 404, { ok: false, message: '没有这个站点' });
     return;
@@ -846,16 +852,16 @@ async function handleSiteFilesList(req, res, [name]) {
 
   sendJson(res, 200, {
     ok: true,
-    total: countSiteFiles(site.id),
-    files: listSiteFiles(site.id),
+    total: await countSiteFiles(site.id),
+    files: await listSiteFiles(site.id),
   });
 }
 
 // ---------------------------------------------------------------- 站点管理接口（个人中心 / 编辑页用）
 
 /** 取一个站点（含 html），归属或管理员才放行；失败时已回响应并返回 null。 */
-function ownSiteOrRespond(req, res, user, name) {
-  const site = findSiteByName(name);
+async function ownSiteOrRespond(req, res, user, name) {
+  const site = await findSiteByName(name);
   if (!site) {
     sendJson(res, 404, { ok: false, message: '没有这个站点' });
     return null;
@@ -869,13 +875,13 @@ function ownSiteOrRespond(req, res, user, name) {
 
 /** 站点详情：单页站带 html，多页站带文件数。 */
 async function handleSiteDetail(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, name);
   if (!site) return;
 
-  const fileCount = countSiteFiles(site.id);
+  const fileCount = await countSiteFiles(site.id);
   sendJson(res, 200, {
     ok: true,
     site: {
@@ -899,10 +905,10 @@ async function handleSiteDetail(req, res, [name]) {
 
 /** 保存站点元信息（标题 / 简介 / 内容标签，编辑页「站点设置」用）。 */
 async function handleSiteSaveMeta(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, name);
   if (!site) return;
 
   const body = await readBody(req, res);
@@ -925,19 +931,19 @@ async function handleSiteSaveMeta(req, res, [name]) {
     return;
   }
 
-  updateSiteMeta(site.id, { title, description, tag });
+  await updateSiteMeta(site.id, { title, description, tag });
   sendJson(res, 200, { ok: true, title, description, tag, tagLabel: siteTagLabel(tag) });
 }
 
 /** 保存单页站的 HTML（编辑页的「保存」按钮）。 */
 async function handleSiteSaveHtml(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, name);
   if (!site) return;
 
-  if (countSiteFiles(site.id) > 0) {
+  if (await countSiteFiles(site.id) > 0) {
     sendJson(res, 400, {
       ok: false,
       message: '这是多页站点，请到下方文件列表里编辑单个文件',
@@ -958,28 +964,28 @@ async function handleSiteSaveHtml(req, res, [name]) {
     return;
   }
 
-  const size = updateSiteHtml(site.id, html);
+  const size = await updateSiteHtml(site.id, html);
   sendJson(res, 200, { ok: true, size });
 }
 
 /** 删除整个站点（site_files 由外键级联清掉）。 */
 async function handleSiteDelete(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, name);
   if (!site) return;
 
-  deleteSite(site.id);
+  await deleteSite(site.id);
   sendJson(res, 200, { ok: true });
 }
 
 /** 取一个站点文件的内容（文本文件才能在编辑页里编辑）。 */
 async function handleSiteFileContent(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, name);
   if (!site) return;
 
   const filePath = new URL(req.url, 'http://internal').searchParams.get('path');
@@ -988,7 +994,7 @@ async function handleSiteFileContent(req, res, [name]) {
     return;
   }
 
-  const content = getSiteFile(site.id, filePath);
+  const content = await getSiteFile(site.id, filePath);
   if (!content) {
     sendJson(res, 404, { ok: false, message: '站点里没有这个文件' });
     return;
@@ -1009,10 +1015,10 @@ async function handleSiteFileContent(req, res, [name]) {
 
 /** 删除站点里的一个文件。 */
 async function handleSiteFileDelete(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, name);
   if (!site) return;
 
   const filePath = new URL(req.url, 'http://internal').searchParams.get('path');
@@ -1021,7 +1027,7 @@ async function handleSiteFileDelete(req, res, [name]) {
     return;
   }
 
-  const changes = removeSiteFile(site.id, filePath);
+  const changes = await removeSiteFile(site.id, filePath);
   if (changes === 0) {
     sendJson(res, 404, { ok: false, message: '站点里没有这个文件' });
     return;
@@ -1033,8 +1039,8 @@ async function handleSiteFileDelete(req, res, [name]) {
 // ---------------------------------------------------------------- 社区互动接口（阶段 1 数据层）
 
 /** 按名字取站点头部，不存在时已回 404 并返回 null。 */
-function siteHeaderOrRespond(res, name) {
-  const site = findSiteHeaderByName(name);
+async function siteHeaderOrRespond(res, name) {
+  const site = await findSiteHeaderByName(name);
   if (!site) {
     sendJson(res, 404, { ok: false, message: '没有这个站点' });
     return null;
@@ -1053,15 +1059,15 @@ function activeSiteOrRespond(res, site) {
 
 /** 互动数字汇总。公开接口，登录后附带「我是否赞过 / 藏过」。 */
 async function handleSiteStats(req, res, [name]) {
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site) return;
 
-  const viewer = currentUser(req);
+  const viewer = await currentUser(req);
   // 附带站点与作者信息，观看包装页一次请求全拿到
-  const authorRow = findUserById(site.owner_id);
+  const authorRow = await findUserById(site.owner_id);
   sendJson(res, 200, {
     ok: true,
-    stats: siteStats(site.id, viewer?.id ?? null),
+    stats: await siteStats(site.id, viewer?.id ?? null),
     site: {
       name: site.name,
       title: site.title || site.name,
@@ -1082,39 +1088,39 @@ async function handleSiteStats(req, res, [name]) {
 }
 
 async function handleSiteLike(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site || !activeSiteOrRespond(res, site)) return;
 
-  likeSite(site.id, user.id);
-  sendJson(res, 200, { ok: true, liked: true, likes: countLikes(site.id) });
+  await likeSite(site.id, user.id);
+  sendJson(res, 200, { ok: true, liked: true, likes: await countLikes(site.id) });
 }
 
 async function handleSiteUnlike(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site) return;
 
-  unlikeSite(site.id, user.id);
-  sendJson(res, 200, { ok: true, liked: false, likes: countLikes(site.id) });
+  await unlikeSite(site.id, user.id);
+  sendJson(res, 200, { ok: true, liked: false, likes: await countLikes(site.id) });
 }
 
 async function handleSiteCommentsList(req, res, [name]) {
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site) return;
 
-  sendJson(res, 200, { ok: true, total: countComments(site.id), comments: listComments(site.id) });
+  sendJson(res, 200, { ok: true, total: await countComments(site.id), comments: await listComments(site.id) });
 }
 
 async function handleSiteCommentAdd(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site || !activeSiteOrRespond(res, site)) return;
 
   const body = await readBody(req, res);
@@ -1133,7 +1139,7 @@ async function handleSiteCommentAdd(req, res, [name]) {
   // 一级回复：被回复的评论必须存在且属于同一站点
   let replyTo = null;
   if (body.replyTo !== undefined && body.replyTo !== null) {
-    const parent = getComment(Number(body.replyTo));
+    const parent = await getComment(Number(body.replyTo));
     if (!parent || parent.site_id !== site.id) {
       sendJson(res, 400, { ok: false, message: '要回复的评论不存在' });
       return;
@@ -1141,7 +1147,7 @@ async function handleSiteCommentAdd(req, res, [name]) {
     replyTo = parent.id;
   }
 
-  const id = addComment({ siteId: site.id, userId: user.id, replyTo, content });
+  const id = await addComment({ siteId: site.id, userId: user.id, replyTo, content });
   sendJson(res, 201, {
     ok: true,
     comment: {
@@ -1151,19 +1157,19 @@ async function handleSiteCommentAdd(req, res, [name]) {
       createdAt: new Date().toISOString(),
       author: { id: user.id, name: user.username ?? user.email.split('@')[0], username: user.username ?? null },
     },
-    total: countComments(site.id),
+    total: await countComments(site.id),
   });
 }
 
 /** 删评论：作者本人或管理员。删掉的评论若有回复，回复一并级联删除。 */
 async function handleSiteCommentDelete(req, res, [name, id]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site) return;
 
-  const comment = getComment(Number(id));
+  const comment = await getComment(Number(id));
   if (!comment || comment.site_id !== site.id) {
     sendJson(res, 404, { ok: false, message: '没有这条评论' });
     return;
@@ -1173,15 +1179,15 @@ async function handleSiteCommentDelete(req, res, [name, id]) {
     return;
   }
 
-  deleteComment(comment.id);
-  sendJson(res, 200, { ok: true, total: countComments(site.id) });
+  await deleteComment(comment.id);
+  sendJson(res, 200, { ok: true, total: await countComments(site.id) });
 }
 
 async function handleSiteFavorite(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site || !activeSiteOrRespond(res, site)) return;
 
   const body = await readBody(req, res);
@@ -1194,24 +1200,24 @@ async function handleSiteFavorite(req, res, [name]) {
     return;
   }
 
-  favoriteSite(site.id, user.id, folder);
-  sendJson(res, 200, { ok: true, favorited: true, favorites: countFavorites(site.id) });
+  await favoriteSite(site.id, user.id, folder);
+  sendJson(res, 200, { ok: true, favorited: true, favorites: await countFavorites(site.id) });
 }
 
 async function handleSiteUnfavorite(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site) return;
 
-  unfavoriteSite(site.id, user.id);
-  sendJson(res, 200, { ok: true, favorited: false, favorites: countFavorites(site.id) });
+  await unfavoriteSite(site.id, user.id);
+  sendJson(res, 200, { ok: true, favorited: false, favorites: await countFavorites(site.id) });
 }
 
 /** 关注 / 取关一个用户（按用户 id）。不能关注自己。 */
 async function handleUserFollow(req, res, [id]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const targetId = Number(id);
@@ -1219,49 +1225,49 @@ async function handleUserFollow(req, res, [id]) {
     sendJson(res, 400, { ok: false, message: '不能关注自己' });
     return;
   }
-  if (!findUserById(targetId)) {
+  if (!(await findUserById(targetId))) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
     return;
   }
 
-  followUser(user.id, targetId);
-  sendJson(res, 200, { ok: true, following: true, followers: socialProfile(targetId).followers });
+  await followUser(user.id, targetId);
+  sendJson(res, 200, { ok: true, following: true, followers: (await socialProfile(targetId)).followers });
 }
 
 async function handleUserUnfollow(req, res, [id]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const targetId = Number(id);
-  if (unfollowUser(user.id, targetId) === 0 && !findUserById(targetId)) {
+  if ((await unfollowUser(user.id, targetId)) === 0 && !(await findUserById(targetId))) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
     return;
   }
 
-  sendJson(res, 200, { ok: true, following: false, followers: socialProfile(targetId).followers });
+  sendJson(res, 200, { ok: true, following: false, followers: (await socialProfile(targetId)).followers });
 }
 
 /** 粉丝数 / 关注数 / 我是否已关注。公开接口。 */
 async function handleUserSocial(req, res, [id]) {
-  const target = findUserById(Number(id));
+  const target = await findUserById(Number(id));
   if (!target) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
     return;
   }
 
-  const viewer = currentUser(req);
-  const profile = socialProfile(target.id);
+  const viewer = await currentUser(req);
+  const profile = await socialProfile(target.id);
   sendJson(res, 200, {
     ok: true,
     followers: profile.followers,
     following: profile.following,
-    isFollowing: isFollowing(viewer?.id ?? null, target.id),
+    isFollowing: await isFollowing(viewer?.id ?? null, target.id),
   });
 }
 
 /** 某用户的粉丝 / 关注列表。?type=followers|following，默认 followers。公开接口。 */
 async function handleFollowList(req, res, [id]) {
-  const target = findUserById(Number(id));
+  const target = await findUserById(Number(id));
   if (!target) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
     return;
@@ -1269,8 +1275,8 @@ async function handleFollowList(req, res, [id]) {
 
   const url = new URL(req.url, 'http://localhost');
   const type = url.searchParams.get('type') === 'following' ? 'following' : 'followers';
-  const viewer = currentUser(req);
-  const users = listFollows(target.id, type, viewer?.id ?? null);
+  const viewer = await currentUser(req);
+  const users = await listFollows(target.id, type, viewer?.id ?? null);
   sendJson(res, 200, { ok: true, type, users });
 }
 
@@ -1285,7 +1291,7 @@ async function handleDiscover(req, res) {
   const tag = SITE_TAGS.some((t) => t.key === tagParam) ? tagParam : '';
   const sort = String(url.searchParams.get('sort') ?? '');
 
-  const sites = discoverSites({ q, tag, sort }).map((s) => ({
+  const sites = (await discoverSites({ q, tag, sort })).map((s) => ({
     ...s,
     tagLabel: tagLabelOf(s.tag),
   }));
@@ -1302,18 +1308,18 @@ async function handleUserPage(req, res) {
 
 /** 创作者主页数据：资料 + 社交数字 + TA 的公开站点列表。 */
 async function handleCreatorProfile(req, res, [username]) {
-  const page = creatorPage(username);
+  const page = await creatorPage(username);
   if (!page) {
     sendJson(res, 404, { ok: false, message: '没有这个创作者' });
     return;
   }
 
-  const viewer = currentUser(req);
+  const viewer = await currentUser(req);
   sendJson(res, 200, {
     ok: true,
     user: page.user,
     stats: page.stats,
-    isFollowing: isFollowing(viewer?.id ?? null, page.user.id),
+    isFollowing: await isFollowing(viewer?.id ?? null, page.user.id),
     isOwn: viewer?.id === page.user.id,
     sites: page.sites.map((s) => ({ ...s, tagLabel: tagLabelOf(s.tag) })),
   });
@@ -1333,7 +1339,7 @@ async function handleNotificationsPage(req, res) {
 
 /** 我的收藏页。 */
 async function handleFavoritesPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
@@ -1342,7 +1348,7 @@ async function handleFavoritesPage(req, res) {
 
 /** 浏览历史页。 */
 async function handleHistoryPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
@@ -1351,7 +1357,7 @@ async function handleHistoryPage(req, res) {
 
 /** 私信页。 */
 async function handleMessagesPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
@@ -1360,21 +1366,21 @@ async function handleMessagesPage(req, res) {
 
 /** 通知列表：谁赞 / 评 / 藏 / 关注了我。 */
 async function handleNotificationsList(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   sendJson(res, 200, {
     ok: true,
-    items: listNotifications(user.id),
+    items: await listNotifications(user.id),
   });
 }
 
 /** 标记通知已读：把已读时间戳推进到当前时刻。 */
 async function handleNotificationsSeen(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  markNotificationsSeen(user.id);
+  await markNotificationsSeen(user.id);
   sendJson(res, 200, { ok: true });
 }
 
@@ -1385,75 +1391,75 @@ const withTagLabel = (sites) => sites.map((s) => ({ ...s, tagLabel: tagLabelOf(s
 
 /** 我的浏览历史列表。 */
 async function handleHistoryList(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  sendJson(res, 200, { ok: true, sites: withTagLabel(listHistory(user.id)) });
+  sendJson(res, 200, { ok: true, sites: withTagLabel(await listHistory(user.id)) });
 }
 
 /** 记录浏览历史（观看页打开时调用）。 */
 async function handleHistoryRecord(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const body = await readBody(req, res);
   if (!body) return;
 
-  const site = findSiteHeaderByName(String(body.site ?? ''));
+  const site = await findSiteHeaderByName(String(body.site ?? ''));
   if (!site) {
     sendJson(res, 404, { ok: false, message: '没有这个站点' });
     return;
   }
 
-  recordView(user.id, site.id);
+  await recordView(user.id, site.id);
   sendJson(res, 200, { ok: true });
 }
 
 /** 删除单条浏览历史。 */
 async function handleHistoryDelete(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = findSiteHeaderByName(name);
-  if (site) removeHistory(user.id, site.id);
+  const site = await findSiteHeaderByName(name);
+  if (site) await removeHistory(user.id, site.id);
   sendJson(res, 200, { ok: true });
 }
 
 /** 清空浏览历史。 */
 async function handleHistoryClear(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  clearHistory(user.id);
+  await clearHistory(user.id);
   sendJson(res, 200, { ok: true });
 }
 
 /** 我的收藏列表（平铺，前端按收藏夹分组）。 */
 async function handleFavoritesList(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  sendJson(res, 200, { ok: true, sites: withTagLabel(listFavorites(user.id)) });
+  sendJson(res, 200, { ok: true, sites: withTagLabel(await listFavorites(user.id)) });
 }
 
 /** 用户搜索（搜索下拉的「用户」分区用）。 */
 async function handleUserSearch(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const q = String(url.searchParams.get('q') ?? '').slice(0, 50);
-  sendJson(res, 200, { ok: true, users: searchUsers(q) });
+  sendJson(res, 200, { ok: true, users: await searchUsers(q) });
 }
 
 /** 私信会话列表。 */
 async function handleConversations(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  sendJson(res, 200, { ok: true, conversations: listConversations(user.id) });
+  sendJson(res, 200, { ok: true, conversations: await listConversations(user.id) });
 }
 
 /** 与某人的消息往来，顺手把对方发来的标为已读。 */
 async function handleMessagesWith(req, res, [id]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const otherId = Number(id);
@@ -1461,14 +1467,14 @@ async function handleMessagesWith(req, res, [id]) {
     sendJson(res, 400, { ok: false, message: '不能和自己私信' });
     return;
   }
-  const other = findUserById(otherId);
+  const other = await findUserById(otherId);
   if (!other) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
     return;
   }
 
-  const messages = listMessagesWith(user.id, otherId);
-  markConversationRead(user.id, otherId);
+  const messages = await listMessagesWith(user.id, otherId);
+  await markConversationRead(user.id, otherId);
   sendJson(res, 200, {
     ok: true,
     user: {
@@ -1483,7 +1489,7 @@ async function handleMessagesWith(req, res, [id]) {
 
 /** 发私信。 */
 async function handleMessageSend(req, res, [id]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const otherId = Number(id);
@@ -1491,7 +1497,7 @@ async function handleMessageSend(req, res, [id]) {
     sendJson(res, 400, { ok: false, message: '不能和自己私信' });
     return;
   }
-  const other = findUserById(otherId);
+  const other = await findUserById(otherId);
   if (!other) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
     return;
@@ -1514,7 +1520,7 @@ async function handleMessageSend(req, res, [id]) {
     return;
   }
 
-  const mid = sendMessage(user.id, otherId, content);
+  const mid = await sendMessage(user.id, otherId, content);
   sendJson(res, 201, { ok: true, id: mid, at: new Date().toISOString() });
 }
 
@@ -1534,21 +1540,21 @@ async function handleMcpPostWithKey(req, res, [key]) {
 
 /** 密钥管理：走登录态，和 MCP 运行时那条 API key 路径互不相交。 */
 async function handleMcpTokenList(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  sendJson(res, 200, { ok: true, tokens: listMcpTokens(user.id) });
+  sendJson(res, 200, { ok: true, tokens: await listMcpTokens(user.id) });
 }
 
 async function handleMcpTokenCreate(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const body = await readBody(req, res);
   if (!body) return;
 
   try {
-    const { token, record } = createMcpToken(user.id, body.label);
+    const { token, record } = await createMcpToken(user.id, body.label);
     // 明文只在这里出现一次，库里存的是 sha256
     sendJson(res, 201, { ok: true, token, record });
   } catch (err) {
@@ -1565,10 +1571,10 @@ async function handleMcpTokenCreate(req, res) {
 }
 
 async function handleMcpTokenRevoke(req, res, [id]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  if (revokeMcpToken(user.id, id) === 0) {
+  if (await revokeMcpToken(user.id, id) === 0) {
     sendJson(res, 404, { ok: false, message: '没有这把密钥' });
     return;
   }
@@ -1579,17 +1585,17 @@ async function handleMcpTokenRevoke(req, res, [id]) {
 // ---------------------------------------------------------------- 管理接口
 
 async function handleAdminUsers(req, res) {
-  if (!requireAdmin(req, res)) return;
+  if (!(await requireAdmin(req, res))) return;
 
   sendJson(res, 200, {
     ok: true,
-    total: countUsers(),
-    users: listUsers().map(publicUser),
+    total: await countUsers(),
+    users: (await listUsers()).map(publicUser),
   });
 }
 
 async function handleAdminUserStatus(req, res, [id]) {
-  const admin = requireAdmin(req, res);
+  const admin = await requireAdmin(req, res);
   if (!admin) return;
 
   const targetId = Number(id);
@@ -1602,7 +1608,7 @@ async function handleAdminUserStatus(req, res, [id]) {
   if (!body) return;
 
   const status = body.status === 'banned' ? 'banned' : 'active';
-  const changes = setUserStatus(targetId, status);
+  const changes = await setUserStatus(targetId, status);
 
   if (changes === 0) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
@@ -1613,23 +1619,23 @@ async function handleAdminUserStatus(req, res, [id]) {
 }
 
 async function handleAdminSites(req, res) {
-  if (!requireAdmin(req, res)) return;
+  if (!(await requireAdmin(req, res))) return;
 
   sendJson(res, 200, {
     ok: true,
-    total: countSites(),
-    sites: listAllSites(),
+    total: await countSites(),
+    sites: await listAllSites(),
   });
 }
 
 async function handleAdminSiteStatus(req, res, [id]) {
-  if (!requireAdmin(req, res)) return;
+  if (!(await requireAdmin(req, res))) return;
 
   const body = await readBody(req, res);
   if (!body) return;
 
   const status = body.status === 'offline' ? 'offline' : 'active';
-  const changes = setSiteStatus(Number(id), status);
+  const changes = await setSiteStatus(Number(id), status);
 
   if (changes === 0) {
     sendJson(res, 404, { ok: false, message: '没有这个页面' });
@@ -1640,9 +1646,9 @@ async function handleAdminSiteStatus(req, res, [id]) {
 }
 
 async function handleAdminDeleteSite(req, res, [id]) {
-  if (!requireAdmin(req, res)) return;
+  if (!(await requireAdmin(req, res))) return;
 
-  const changes = deleteSite(Number(id));
+  const changes = await deleteSite(Number(id));
   if (changes === 0) {
     sendJson(res, 404, { ok: false, message: '没有这个页面' });
     return;
@@ -1668,8 +1674,8 @@ function serveSiteFile(res, filePath, content) {
   res.end(content);
 }
 
-function handleSite(req, res, [name, rest = '']) {
-  const site = findSiteHeaderByName(name);
+async function handleSite(req, res, [name, rest = '']) {
+  const site = await findSiteHeaderByName(name);
 
   if (!site) {
     sendHtml(res, 404, messagePage('404', `没有找到 "${name}" 这个页面。`));
@@ -1683,19 +1689,19 @@ function handleSite(req, res, [name, rest = '']) {
   // /站点名 和 /站点名/ 都算入口页；其余去掉开头的 / 得到站点内路径
   const filePath = !rest || rest === '/' ? 'index.html' : rest.slice(1);
 
-  const content = getSiteFile(site.id, filePath);
+  const content = await getSiteFile(site.id, filePath);
   if (content) {
     // 浏览量简单版：只有入口页 +1，站内 css / js 等子资源不算
-    if (filePath === 'index.html') incrementViews(site.id);
+    if (filePath === 'index.html') await incrementViews(site.id);
     serveSiteFile(res, filePath, content);
     return;
   }
 
   // 老的「单 HTML 文件」站点：内容存在 sites.html 里，只兜入口页
   if (filePath === 'index.html') {
-    const legacy = findSiteByName(name);
+    const legacy = await findSiteByName(name);
     if (legacy && legacy.html && legacy.html.trim() !== '') {
-      incrementViews(site.id);
+      await incrementViews(site.id);
       sendHtml(res, 200, legacy.html, {
         'Content-Security-Policy': SANDBOX_CSP,
         'Cache-Control': 'no-cache',
@@ -1829,7 +1835,7 @@ async function handleRequest(req, res) {
   if (req.method === 'GET') {
     const m = pathname.match(/^\/([a-z0-9-]+)(\/.*)?$/);
     if (m) {
-      handleSite(req, res, [m[1], m[2] ?? '']);
+      await handleSite(req, res, [m[1], m[2] ?? '']);
       return;
     }
   }
@@ -1890,16 +1896,17 @@ function shutdown(signal) {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-server.listen(PORT, HOST, () => {
-  const removed = deleteExpiredSessions();
-  if (removed > 0) console.log(`清理了 ${removed} 条过期会话`);
+server.listen(PORT, HOST, async () => {
+  try {
+    const removed = await deleteExpiredSessions();
+    if (removed > 0) console.log(`清理了 ${removed} 条过期会话`);
 
-  const created = ensureAdminAccount();
+    const created = await ensureAdminAccount();
 
-  console.log(`\nMinePage 跑起来了 → http://${HOST}:${PORT}`);
+    console.log(`\nMinePage 跑起来了 → http://${HOST}:${PORT}`);
 
-  if (created) {
-    console.log(`
+    if (created) {
+      console.log(`
 ┌──────────────────────────────────────────────┐
    已创建默认管理员账号（只在数据库为空时创建一次）
 
@@ -1910,5 +1917,10 @@ server.listen(PORT, HOST, () => {
    ! 这是开发用的默认密码，上线前必须改掉。
    登录地址 http://${HOST}:${PORT}/login
 └──────────────────────────────────────────────┘`);
+    }
+  } catch (err) {
+    console.error(`\n启动失败：数据库连不上或初始化出错（${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DATABASE}）`);
+    console.error(err?.message ?? err);
+    process.exit(1);
   }
 });
