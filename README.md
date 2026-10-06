@@ -42,6 +42,7 @@ lib/mcp/tokens.js             MCP 密钥：铸造 / 列表 / 吊销 / 鉴权（�
 lib/mcp/tools.js              MCP 工具注册表（唯一真源）+ 10 个 backend
 lib/mcp/server.js             MCP 的 JSON-RPC 分发，零依赖手写
 scripts/mcp-smoke.mjs         MCP 冒烟测试（68 项，见下）
+scripts/api-smoke.mjs         全站接口冒烟测试（129 项，自己拉起临时服务，见下）
 public/index.html             上传页（/upload）
 public/discover.html          社区首页（/）
 public/user.html              创作者主页（/u/:用户名）
@@ -152,6 +153,17 @@ node scripts/mcp-smoke.mjs --revoke-check         # 吊销 4 项
 node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项
 ```
 
+全站接口回归不用自己起服务，脚本会拉一个临时服务 + 临时库，跑完自己收拾：
+
+```
+node scripts/api-smoke.mjs          # 129 项：注册/登录/站点/文件/社交/权限/后台/改密
+node scripts/api-smoke.mjs --json   # 末尾多打印一段 JSON，换库前后可以拿来对比
+```
+
+验证码在开发模式下打印到服务端控制台，脚本就是从子进程输出里捞的，
+所以这个脚本**必须在开发模式（不配 SMTP_HOST）下跑**。
+想拿它打已有服务就设 `BASE_URL`，此时管理员凭据从 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 读。
+
 ## 三条不能忘的约束
 
 - 用户页面的响应必须带 `Content-Security-Policy: sandbox ...`，
@@ -175,6 +187,6 @@ node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项
 
 ## 还没做
 
-- 自动化测试（目前靠手动跑脚本验证全链路）
+- 自动化测试只盖到接口层（`npm run smoke`），页面上的 JS 交互还没覆盖
 - lint / 格式化配置
 - 限流与配额（验证码有 60 秒重发冷却，其他接口还没有）
