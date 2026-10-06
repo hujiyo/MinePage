@@ -1,16 +1,16 @@
 // 全站接口冒烟测试（不含 MCP 协议层，那部分在 mcp-smoke.mjs）。
 //
-// 自己拉起一个临时服务来跑，默认用临时 SQLite 库，不碰你的开发库和线上库：
+// 自己拉起一个临时服务来跑，用独立的冒烟库（MYSQL_DATABASE 指定，默认 minepage_smoke），
+// 开跑前会清空库里的表，不碰生产库：
 //
-//   node scripts/api-smoke.mjs                  # 临时 SQLite 库
-//   node scripts/api-smoke.mjs --json           # 末尾多打印一段 JSON，便于两者对比
+//   node scripts/api-smoke.mjs                  # 需要能连上 MySQL（读 MYSQL_* 环境变量）
+//   node scripts/api-smoke.mjs --json           # 末尾多打印一段 JSON，便于两种库对比
 //   BASE_URL=http://127.0.0.1:3100 node scripts/api-smoke.mjs   # 只跑测试，不拉服务
 //
-// 换 MySQL 之后，同一套脚本要能跑出同样的结果，这就是「行为没变」的证据。
 // 服务端的发信在开发模式下会把验证码打印到控制台，脚本从子进程输出里捞。
 
 import { spawn } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import mysql from 'mysql2/promise';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -93,7 +93,7 @@ async function login(loginValue, passwordValue) {
 let child = null;
 let output = '';
 let codeCursor = 0;
-let tmpDb = '';
+let smokeDb = process.env.MYSQL_DATABASE ?? 'minepage_smoke';
 
 async function boot() {
   if (process.env.BASE_URL) {
@@ -101,22 +101,36 @@ async function boot() {
     return;
   }
 
-  // 相对项目根目录（DB_FILE 就是按根目录解析的），data/ 已被 .gitignore 排除
-  tmpDb = path.join('data', `smoke-${process.pid}.db`);
-  for (const f of [tmpDb, `${tmpDb}-wal`, `${tmpDb}-shm`]) rmSync(path.resolve(ROOT, f), { force: true });
+  // 清空冒烟库：把表全删掉，让服务端自己重建。关掉外键检查省得按顺序删。
+  const conn = await mysql.createConnection({
+    database: smokeDb,
+    host: process.env.MYSQL_HOST ?? '127.0.0.1',
+    password: process.env.MYSQL_PASSWORD ?? '',
+    port: Number(process.env.MYSQL_PORT ?? 3306),
+    user: process.env.MYSQL_USER ?? 'minepage',
+  });
+  const [tables] = await conn.query('SHOW TABLES');
+  if (tables.length > 0) {
+    await conn.query('SET FOREIGN_KEY_CHECKS = 0');
+    for (const row of tables) {
+      const table = Object.values(row)[0];
+      await conn.query(`DROP TABLE IF EXISTS \`${table}\``);
+    }
+    await conn.query('SET FOREIGN_KEY_CHECKS = 1');
+  }
+  await conn.end();
 
   const env = {
     ...process.env,
     ADMIN_EMAIL,
     ADMIN_PASSWORD,
     ADMIN_USERNAME: ADMIN_LOGIN,
-    DB_FILE: tmpDb,
     HOST: '127.0.0.1',
     PORT: String(PORT),
     SMTP_HOST: '',
   };
 
-  console.log(`拉起临时服务：PORT=${PORT} DB=${tmpDb}\n`);
+  console.log(`拉起临时服务：PORT=${PORT} 库=${smokeDb}\n`);
   child = spawn(process.execPath, ['server.js'], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data', (d) => {
     output += d.toString();
@@ -147,16 +161,8 @@ async function shutdown() {
   if (child && child.exitCode === null) {
     const exited = new Promise((resolve) => child.once('exit', resolve));
     child.kill();
-    // Windows 上进程没退干净时删文件会 EPERM，等一下再删
+    // Windows 上进程没退干净时句柄还占着，等一下再收尾
     await Promise.race([exited, sleep(3000)]);
-  }
-  for (const f of [tmpDb, `${tmpDb}-wal`, `${tmpDb}-shm`]) {
-    if (!f) continue;
-    try {
-      rmSync(path.resolve(ROOT, f), { force: true });
-    } catch {
-      /* 删不掉就算了，反正 data/ 不进版本库 */
-    }
   }
 }
 

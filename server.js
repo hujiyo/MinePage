@@ -18,6 +18,9 @@ import {
   SITE_DESC_MAX,
   BIO_MAX,
   COMMENT_MAX,
+  MYSQL_HOST,
+  MYSQL_PORT,
+  MYSQL_DATABASE,
 } from './lib/config.js';
 import { checkName } from './lib/names.js';
 import { absoluteUrlForSite } from './lib/addressing.js';
@@ -1894,15 +1897,16 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 server.listen(PORT, HOST, async () => {
-  const removed = await deleteExpiredSessions();
-  if (removed > 0) console.log(`清理了 ${removed} 条过期会话`);
+  try {
+    const removed = await deleteExpiredSessions();
+    if (removed > 0) console.log(`清理了 ${removed} 条过期会话`);
 
-  const created = await ensureAdminAccount();
+    const created = await ensureAdminAccount();
 
-  console.log(`\nMinePage 跑起来了 → http://${HOST}:${PORT}`);
+    console.log(`\nMinePage 跑起来了 → http://${HOST}:${PORT}`);
 
-  if (created) {
-    console.log(`
+    if (created) {
+      console.log(`
 ┌──────────────────────────────────────────────┐
    已创建默认管理员账号（只在数据库为空时创建一次）
 
@@ -1913,5 +1917,10 @@ server.listen(PORT, HOST, async () => {
    ! 这是开发用的默认密码，上线前必须改掉。
    登录地址 http://${HOST}:${PORT}/login
 └──────────────────────────────────────────────┘`);
+    }
+  } catch (err) {
+    console.error(`\n启动失败：数据库连不上或初始化出错（${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DATABASE}）`);
+    console.error(err?.message ?? err);
+    process.exit(1);
   }
 });

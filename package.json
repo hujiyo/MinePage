@@ -13,6 +13,7 @@
     "smoke": "node scripts/api-smoke.mjs"
   },
   "dependencies": {
+    "mysql2": "^3.24.5",
     "nodemailer": "^10.0.13"
   }
 }
