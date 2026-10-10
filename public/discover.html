@@ -18,6 +18,7 @@
       </div>
       <div class="chips" id="chips" style="margin-bottom:14px"></div>
       <div class="cards" id="cards"></div>
+      <div class="pager" id="pager"></div>
     </div>
 
     <aside class="homeSide">
@@ -53,84 +54,15 @@ const params = new URLSearchParams(location.search);
 const q = (params.get('q') || '').trim();
 const sortRank = params.get('sort') === 'rank';
 let tag = '';
+let page = 1;
+const SITE_PAGE_SIZE = 10; // 发现流每页卡片数（封面是整站 iframe，页大了首屏会很慢）
 
-const bannerArea = document.getElementById('bannerArea');
 const chipsBox = document.getElementById('chips');
 const cardsBox = document.getElementById('cards');
+const pagerBox = document.getElementById('pager');
 const feedTitle = document.getElementById('feedTitle');
 const rankBox = document.getElementById('rank');
 const hotBox = document.getElementById('hot');
-
-// ---------------------------------------------------------------- 轮播
-
-/**
- * 在首页顶部挂一张自动轮播的 banner：4.5s 换一张，鼠标移入暂停、移出继续，点整张进 /view/:site。
- * 带搜索词（?q=）时直接不渲染，把版面让给搜索结果。
- * 目前启动处是注释掉的（见文件末尾的说明）：MP.BANNERS 是写死的运营配置，指向的站点在真实库里
- * 都不存在，图片也来自外部地址。
- * 副作用：往 bannerArea 追加节点，并留下一个 4.5s 的 setInterval（页面卸载前不会主动清理）。
- */
-function mountBanner() {
-  if (q) return; // 搜索结果页不显示轮播，把版面让给结果
-  const list = MP.BANNERS;
-  const el = document.createElement('div');
-  el.className = 'banner';
-  let idx = 0;
-  let timer = null;
-
-  /**
-   * 按当前下标 idx 重画 banner 的图片、文案、左右箭头和圆点。
-   * 整块用 innerHTML 重建，所以箭头和圆点的事件必须每次重新绑定——这正是它们写在本函数里、
-   * 而不是在 mountBanner 里绑一次的原因。
-   */
-  function paint() {
-    const b = list[idx];
-    el.innerHTML =
-      '<img src="' + b.img + '" alt="' + MP.esc(b.title) + '">'
-      + '<div class="binfo"><b>' + MP.esc(b.title) + '</b><span>' + MP.esc(b.sub) + '</span></div>'
-      + '<button type="button" class="bnav prev" title="上一张">' + MP.icon('left') + '</button>'
-      + '<button type="button" class="bnav next" title="下一张">' + MP.icon('right') + '</button>'
-      + '<div class="bdots">' + list.map((_, i) =>
-          '<i class="' + (i === idx ? 'on' : '') + '" data-i="' + i + '"></i>').join('') + '</div>';
-
-    el.querySelector('.prev').addEventListener('click', () => go(idx - 1));
-    el.querySelector('.next').addEventListener('click', () => go(idx + 1));
-    el.querySelectorAll('.bdots i').forEach((d) => {
-      d.addEventListener('click', () => go(Number(d.dataset.i)));
-    });
-  }
-
-  /**
-   * 切到指定下标的 banner：先对 list.length 取模实现首尾回环（传 idx-1 / idx+1 即可左右翻，
-   * 越界的负数也会被纠正），再重画并重置自动轮播计时器。
-   */
-  function go(i) {
-    idx = (i + list.length) % list.length;
-    paint();
-    restart();
-  }
-
-  /**
-   * 重置自动轮播计时器：先 clearInterval 再重新 setInterval，间隔固定 4.5s。
-   * 悬停暂停只是 clearInterval（不把 timer 置空），所以移出时调本函数恢复即可；
-   * 重复调用是安全的，不会叠出两个计时器。
-   */
-  function restart() {
-    clearInterval(timer);
-    timer = setInterval(() => { idx = (idx + 1) % list.length; paint(); }, 4500);
-  }
-  el.addEventListener('mouseenter', () => clearInterval(timer));
-  el.addEventListener('mouseleave', restart);
-  // 整体点击进观看页；导航键与圆点单独响应
-  el.addEventListener('click', (e) => {
-    if (e.target.closest('.bnav') || e.target.closest('.bdots')) return;
-    location.href = '/view/' + encodeURIComponent(list[idx].site);
-  });
-
-  paint();
-  restart();
-  bannerArea.appendChild(el);
-}
 
 // ---------------------------------------------------------------- 分类 chips
 
@@ -145,7 +77,7 @@ function renderChips() {
     const el = document.createElement('span');
     el.className = 'chip' + (t.key === tag ? ' active' : '');
     el.textContent = t.label;
-    el.addEventListener('click', () => { tag = t.key; renderChips(); reload(); });
+    el.addEventListener('click', () => { tag = t.key; page = 1; renderChips(); reload(); });
     chipsBox.appendChild(el);
   });
 }
@@ -153,33 +85,13 @@ function renderChips() {
 // ---------------------------------------------------------------- 侧栏
 
 /**
- * 渲染右侧栏两块列表：「热门榜单」点进观看页，「热搜」走 MP.goSearch（跳 /?q=）。
- * 数据源仍是 app.js 里的演示数据 MP.topSites(10) 与 MP.HOT，**不发请求**；
- * 主信息流 reload() 已经换成真实接口，侧栏这两块还没接后端，目前也没有 TODO 标记。
+ * 渲染右侧栏两块列表：「热门榜单」「热搜」。
+ * 演示数据已删除：热搜词需要服务端搜索日志聚合（后端暂无接口），
+ * 热门榜单后续可用 /api/discover?sort=views 取前 10 接上，前端均未接线，先给空态占位。
  */
 function renderSide() {
-  const tops = MP.topSites(10);
-  rankBox.textContent = '';
-  tops.forEach((s, i) => {
-    const row = document.createElement('div');
-    row.className = 'rankItem';
-    row.innerHTML = '<span class="no">' + (i + 1) + '</span>'
-      + '<span class="rw">' + MP.esc(s.title) + '</span>'
-      + '<span class="rv">' + MP.fmtNum(s.views) + '</span>';
-    row.addEventListener('click', () => { location.href = '/view/' + encodeURIComponent(s.name); });
-    rankBox.appendChild(row);
-  });
-
-  hotBox.textContent = '';
-  MP.HOT.slice(0, 8).forEach((h, i) => {
-    const row = document.createElement('div');
-    row.className = 'rankItem';
-    row.innerHTML = '<span class="no">' + (i + 1) + '</span>'
-      + '<span class="rw">' + MP.esc(h.word) + '</span>'
-      + '<span class="rv">' + MP.esc(h.val) + '</span>';
-    row.addEventListener('click', () => MP.goSearch(h.word));
-    hotBox.appendChild(row);
-  });
+  rankBox.innerHTML = '<div class="empty">暂无数据</div>';
+  hotBox.innerHTML = '<div class="empty">暂无热搜</div>';
 }
 
 // ---------------------------------------------------------------- 列表
@@ -205,28 +117,72 @@ async function reload() {
   if (q) query.set('q', q);
   if (tag && tag !== 'hot') query.set('tag', tag);
   if (sort) query.set('sort', sort);
+  query.set('page', String(page));
+  query.set('size', SITE_PAGE_SIZE);
 
   feedTitle.textContent = q ? '搜索：' + q : (tag === 'hot' ? '热门' : '推荐');
   cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">加载中…</div>';
+  pagerBox.textContent = '';
 
   try {
     const res = await fetch('/api/discover?' + query.toString(), { headers: { Accept: 'application/json' } });
     const data = await res.json();
     if (!data.ok) throw new Error(data.message || '加载失败');
     MP.renderCards(cardsBox, data.sites || []);
+    renderPager(data);
   } catch (err) {
     cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">'
       + '加载失败：' + MP.esc(err.message) + '，刷新试试。</div>';
   }
 }
 
-// 轮播位恢复正常渲染。
-// 注意：MP.BANNERS 是写死的运营配置（TODO 后端对接：轮播位来自运营配置），
-// 它指向 aurora-portfolio / mini-vue / opensource-landing 三个站点。
-// 这三个在**演示数据 MP.SITES 里存在**，所以现在点得开；
-// 等 view.html 接上真实接口之后它们就不存在了，届时轮播位需要换成真实的运营配置。
-// 图片来自外部第三方地址，不受我们控制，加载失败时会是个空框。
-mountBanner();
+/**
+ * 渲染底部翻页器。数据来自接口的 total / page / pages 字段。
+ * 只有一页时不渲染任何东西。页码窗口最多 7 个，超出用省略号——
+ * 467 个站按 10 条一页有 47 页，直接把页码铺出来会把页面撑爆。
+ */
+function renderPager(data) {
+  pagerBox.textContent = '';
+  const pages = data.pages || 1;
+  const cur = data.page || 1;
+  if (pages <= 1) return;
+
+  const slot = (label, to, opt) => {
+    const o = opt || {};
+    const el = document.createElement(o.disabled || o.active ? 'span' : 'button');
+    if (el.tagName === 'BUTTON') el.type = 'button';
+    el.className = 'pg' + (o.active ? ' active' : '') + (o.disabled ? ' disabled' : '');
+    el.textContent = label;
+    if (!o.disabled && !o.active && to != null) {
+      el.addEventListener('click', () => { page = to; reload(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+    }
+    pagerBox.appendChild(el);
+  };
+  const dots = () => {
+    const s = document.createElement('span');
+    s.className = 'pg dots';
+    s.textContent = '…';
+    pagerBox.appendChild(s);
+  };
+
+  slot('上一页', cur - 1, { disabled: cur <= 1 });
+
+  if (pages <= 7) {
+    for (let i = 1; i <= pages; i += 1) slot(String(i), i, { active: i === cur });
+  } else {
+    const start = Math.max(2, cur - 2);
+    const end = Math.min(pages - 1, cur + 2);
+    slot('1', 1, { active: cur === 1 });
+    if (start > 2) dots();
+    for (let i = start; i <= end; i += 1) slot(String(i), i, { active: i === cur });
+    if (end < pages - 1) dots();
+    slot(String(pages), pages, { active: cur === pages });
+  }
+
+  slot('下一页', cur + 1, { disabled: cur >= pages });
+}
+
+// 轮播位（bannerArea）已留空：Banner 属运营配置，后端暂无接口，等配置接口就绪后再挂载。
 renderChips();
 renderSide();
 reload();

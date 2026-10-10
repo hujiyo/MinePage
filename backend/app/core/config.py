@@ -97,9 +97,15 @@ class Limits:
     # 单个 HTML 上限。单页站上传与保存按它卡，超限回 413。
     MAX_HTML_BYTES: int = 2 * 1024 * 1024
     # 多文件站：单个文件上限。只卡单文件，不卡单站累计体积。
-    MAX_FILE_BYTES: int = 10 * 1024 * 1024
+    # 90 MB：模板库最大 mp4 是 85 MB（2026-10-08 与 Node 版同步上调）。
+    MAX_FILE_BYTES: int = 90 * 1024 * 1024
     # 单站文件数上限。只在「新增文件」时校验，覆盖已有路径不受影响。
-    MAX_FILES_PER_SITE: int = 200
+    # 5000：模板库最大单站 4299 个文件（与 Node 版同步）。
+    MAX_FILES_PER_SITE: int = 5000
+    # 单站总容量上限（issues B4）。服务层校验待接入，先与 Node 版对齐常量。
+    MAX_SITE_TOTAL_BYTES: int = 512 * 1024 * 1024
+    # zip 直传包体上限（Node 版已有 /zip 路由，Python 版待实现）。
+    MAX_ZIP_BYTES: int = 95 * 1024 * 1024
     # 普通 JSON 请求体上限 = HTML 上限 + 包装余量
     MAX_BODY_BYTES: int = MAX_HTML_BYTES + 64 * 1024
 

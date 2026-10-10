@@ -29,25 +29,8 @@
 <script>
 MP.topbar({ active: 'messages' });
 
-// TODO 后端对接：替换为 fetch('/api/messages')
-const CONVS = [
-  { user: { name: 'Aurora', username: 'aurora' }, msgs: [
-    { from: 'me', text: '你好，作品集的滚动动效是怎么做的？', at: '10:12' },
-    { from: 'them', text: '用的是 IntersectionObserver，触发时加一个 class 就好。', at: '10:15' },
-    { from: 'them', text: '需要的话我把 demo 传到社区里，你可以直接看源码。', at: '10:16' },
-  ] },
-  { user: { name: '林同学', username: 'lin' }, msgs: [
-    { from: 'them', text: '简历模板已经更新到第二版了，感谢之前的建议。', at: '昨天' },
-    { from: 'me', text: '看到了，技能雷达那块清楚多了。', at: '昨天' },
-  ] },
-  { user: { name: 'Byte', username: 'byte' }, msgs: [
-    { from: 'them', text: 'mini-vue 的依赖收集演示页上线了，欢迎来试。', at: '周一' },
-  ] },
-  { user: { name: 'Momo', username: 'momo' }, msgs: [
-    { from: 'me', text: '活动页的购票进度条能开源吗？', at: '上周' },
-    { from: 'them', text: '可以的，等我整理一下发出来。', at: '上周' },
-  ] },
-];
+// TODO 后端对接：替换为 fetch('/api/messages')；会话数据后端接口已有，前端尚未接线
+const CONVS = [];
 
 let cur = 0;
 
@@ -58,11 +41,14 @@ const input = document.getElementById('chatInput');
 
 /**
  * 重建左侧会话列表（当前会话加高亮），每行的预览取该会话最后一条消息的时间和内容。
- * 数据来自页内常量 CONVS 的演示数据，**不发请求**；没有任何已读 / 未读、排序逻辑。
- * 注意：预览直接读 msgs[msgs.length - 1]，空会话会在渲染时抛错。
+ * 数据尚未接线（接口已有），没有会话时显示空态文案。
  */
 function renderConvs() {
   convBox.textContent = '';
+  if (!CONVS.length) {
+    convBox.innerHTML = '<div class="empty">暂无会话</div>';
+    return;
+  }
   CONVS.forEach((c, i) => {
     const last = c.msgs[c.msgs.length - 1];
     const item = document.createElement('div');
@@ -78,11 +64,16 @@ function renderConvs() {
 
 /**
  * 把当前会话的消息渲染进右侧聊天区，并把滚动条拖到底部。
- * 自己发的气泡靠 m.from === 'me' 判断，头像首字取自 MP.ME.name（app.js 里的演示用户，
- * 不是真实登录态）；对方名字旁挂一个 /u/:username 的个人主页链接。
+ * 自己发的气泡靠 m.from === 'me' 判断，头像首字显示「我」；对方名字旁挂一个 /u/:username 的个人主页链接。
+ * 没有选中会话（CONVS 为空或 cur 越界）时聊天区显示空态。
  */
 function renderChat() {
   const c = CONVS[cur];
+  if (!c) {
+    headBox.textContent = '';
+    bodyBox.innerHTML = '<div class="empty">暂无消息，选择一个会话开始聊天</div>';
+    return;
+  }
   headBox.innerHTML = MP.esc(c.user.name)
     + '<small><a href="/u/' + encodeURIComponent(c.user.username) + '">查看主页</a></small>';
 
@@ -92,7 +83,7 @@ function renderChat() {
     wrap.className = 'bubble' + (m.from === 'me' ? ' me' : '');
     const av = document.createElement('span');
     av.className = 'avatar xs';
-    av.textContent = (m.from === 'me' ? MP.ME.name : c.user.name)[0];
+    av.textContent = (m.from === 'me' ? '我' : c.user.name)[0];
     const txt = document.createElement('div');
     txt.className = 'btxt';
     txt.textContent = m.text;
@@ -110,7 +101,7 @@ function renderChat() {
 document.getElementById('chatForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const text = input.value.trim();
-  if (!text) return;
+  if (!text || !CONVS[cur]) return;
   // TODO 后端对接：POST /api/messages/:username { content }
   CONVS[cur].msgs.push({ from: 'me', text, at: '刚刚' });
   input.value = '';

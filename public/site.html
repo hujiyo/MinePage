@@ -36,6 +36,19 @@
       <span class="hint">标记站点类型，之后社区按标签归类展示</span>
     </label>
     <button type="button" id="metaSave">保存设置</button>
+
+    <!-- 卡片封面：自定义图会覆盖「自动取首页第一张图」的默认封面 -->
+    <div class="field" style="margin-top:16px">
+      <span class="label">卡片封面</span>
+      <div class="row">
+        <img id="coverPreview" class="coverPreview" alt="封面预览" hidden>
+        <input id="coverFile" class="srFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif">
+        <button type="button" class="ghost" id="coverPick">选择图片</button>
+        <button type="button" id="coverSave" disabled>上传封面</button>
+        <button type="button" class="danger" id="coverRemove" hidden>移除封面</button>
+      </div>
+      <span class="hint">不设置时卡片自动取首页第一张图当封面；这里上传的图会覆盖自动封面。png / jpg / webp / gif，≤ 2 MB</span>
+    </div>
   </section>
 
   <!-- 单页站：直接编辑 HTML -->
@@ -174,6 +187,7 @@ async function loadSite() {
 
   fillMetaForm(data.tags);
   fillMetaValues(site);
+  renderCoverPreview();
   document.getElementById('metaSection').hidden = false;
 
   if (site.kind === 'single') {
@@ -245,6 +259,98 @@ document.getElementById('metaSave').addEventListener('click', async (e) => {
     showMsg(false, '网络出问题了：' + escapeHtml(err.message));
   } finally {
     button.disabled = false;
+  }
+});
+
+// ---------------------------------------------------------------- 卡片封面
+
+const coverFile = document.getElementById('coverFile');
+const coverPick = document.getElementById('coverPick');
+const coverSave = document.getElementById('coverSave');
+const coverRemove = document.getElementById('coverRemove');
+const coverPreview = document.getElementById('coverPreview');
+
+/**
+ * 按服务端真实状态刷新封面预览：有自定义封面就显示（URL 加时间戳防缓存），
+ * 同时亮出「移除封面」；没有就藏起预览图和移除按钮。
+ * 上传成功 / 移除成功 / 选择文件被取消时都会调它兜底回真实状态。
+ */
+function renderCoverPreview() {
+  if (site && site.hasCover) {
+    coverPreview.src = '/api/sites/' + encodeURIComponent(siteName) + '/cover?v=' + Date.now();
+    coverPreview.hidden = false;
+    coverRemove.hidden = false;
+  } else {
+    coverPreview.hidden = true;
+    coverPreview.removeAttribute('src');
+    coverRemove.hidden = true;
+  }
+}
+
+coverPick.addEventListener('click', () => coverFile.click());
+
+coverFile.addEventListener('change', () => {
+  const file = coverFile.files[0];
+  coverSave.disabled = !file;
+  if (file) {
+    // 还没上传先用本地 blob 预览效果
+    coverPreview.src = URL.createObjectURL(file);
+    coverPreview.hidden = false;
+  } else {
+    renderCoverPreview();
+  }
+});
+
+coverSave.addEventListener('click', async () => {
+  const file = coverFile.files[0];
+  if (!file) return;
+
+  coverSave.disabled = true;
+  let ok = false;
+  try {
+    // 原始字节直接 PUT，服务端按文件头嗅探类型，不信任 Content-Type
+    const res = await fetch('/api/sites/' + encodeURIComponent(siteName) + '/cover', {
+      method: 'PUT',
+      headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      body: await file.arrayBuffer(),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      ok = true;
+      site.hasCover = true;
+      coverFile.value = '';
+      showMsg(true, '封面已更新（' + fmtSize(data.size) + '），去广场或主页看卡片效果');
+    } else {
+      showMsg(false, escapeHtml(data.message || '上传失败'));
+    }
+  } catch (err) {
+    showMsg(false, '网络出问题了：' + escapeHtml(err.message));
+  } finally {
+    // 成功后没有待上传文件、保持禁用；失败允许直接重试
+    coverSave.disabled = ok;
+    renderCoverPreview();
+  }
+});
+
+coverRemove.addEventListener('click', async () => {
+  if (!confirm('确定移除自定义封面？移除后卡片用自动封面（首页第一张图）。')) return;
+  coverRemove.disabled = true;
+  try {
+    const res = await fetch('/api/sites/' + encodeURIComponent(siteName) + '/cover', {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+    if (data.ok) {
+      site.hasCover = false;
+      showMsg(true, '已移除自定义封面');
+    } else {
+      showMsg(false, escapeHtml(data.message || '移除失败'));
+    }
+  } catch (err) {
+    showMsg(false, '网络出问题了：' + escapeHtml(err.message));
+  } finally {
+    coverRemove.disabled = false;
+    renderCoverPreview();
   }
 });
 

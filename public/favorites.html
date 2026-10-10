@@ -18,9 +18,8 @@
     <div>
       <div class="msgList" id="folders"></div>
       <div class="panel" style="margin-top:12px">
-        <b style="display:block;margin-bottom:6px">新建收藏夹</b>
-        <p class="muted" style="font-size:12px;margin:0 0 10px">把喜欢的页面分门别类地收好。</p>
-        <button type="button" class="ghost block" id="newFolder">+ 新建收藏夹</button>
+        <b style="display:block;margin-bottom:6px">收藏夹</b>
+        <p class="muted" style="font-size:12px;margin:0 0 0">收藏夹按收藏时的名字自动归组，目前收藏统一进「默认收藏夹」。</p>
       </div>
     </div>
 
@@ -39,13 +38,12 @@
 <script>
 MP.topbar();
 
-// TODO 后端对接：替换为 fetch('/api/favorites')，收藏夹由用户自定义
-const FOLDERS = [
-  { name: '默认收藏夹', sites: MP.topSites(6) },
-  { name: '设计灵感', sites: MP.SITES.filter((s) => s.tag === 'portfolio' || s.tag === 'blog') },
-  { name: '前端学习', sites: MP.SITES.filter((s) => s.tag === 'opensource' || s.tag === 'blog') },
-  { name: '稍后再看', sites: MP.SITES.slice(0, 3) },
-];
+// 数据全部来自真实接口：
+//   GET    /api/favorites                 我的收藏（平铺，按收藏时间倒序，≤100 条）
+//   DELETE /api/sites/:站名/favorite       取消收藏
+// 收藏夹在后端**没有实体表** —— folder 只是收藏记录上的一个文本列（收藏那一刻带上的，
+// 观看页收藏时不传就是「默认收藏夹」），所以分组在前端做：按 folder 字符串归堆。
+const FOLDERS = [];
 
 let cur = 0;
 
@@ -54,16 +52,29 @@ const cardsBox = document.getElementById('cards');
 const folderName = document.getElementById('folderName');
 const folderCount = document.getElementById('folderCount');
 
+/** 把接口的平铺收藏列表按 folder 归组；收藏夹按「最近一次收藏」排序，夹内保持倒序。 */
+function buildFolders(sites) {
+  const map = new Map();
+  sites.forEach((s) => {
+    const name = s.folder || '默认收藏夹';
+    if (!map.has(name)) map.set(name, []);
+    map.get(name).push(s);
+  });
+  return Array.from(map.entries())
+    .map(([name, arr]) => ({ name, sites: arr, latest: arr[0].favoritedAt }))
+    .sort((a, b) => b.latest - a.latest);
+}
+
 /**
  * 重建左侧收藏夹列表（当前收藏夹加高亮），预览显示每个夹子里前三位作者名。
- * 数据来自页内常量 FOLDERS，而 FOLDERS 又是 app.js 演示数据（MP.SITES / MP.topSites）
- * 现算出来的：**一次请求都没发**（见文件顶部的 TODO），所以这里的名字、数量跟当前账号
- * 真实的收藏无关，任何登录用户看到的都是同一份内容。
- * 另注：后端 GET /api/favorites 只回一份平铺的收藏站点（服务端注释写着「前端按收藏夹分组」），
- * 收藏夹目前没有服务端模型，想接真实数据还得先定下分组存在哪儿。
+ * 列表为空（一个收藏都没有）时显示空态文案。
  */
 function renderFolders() {
   foldersBox.textContent = '';
+  if (!FOLDERS.length) {
+    foldersBox.innerHTML = '<div class="empty">还没有收藏</div>';
+    return;
+  }
   FOLDERS.forEach((f, i) => {
     const item = document.createElement('div');
     item.className = 'msgItem' + (i === cur ? ' on' : '');
@@ -78,21 +89,66 @@ function renderFolders() {
 
 /**
  * 刷新右侧「当前收藏夹」的标题、条数和卡片区；卡片交给 app.js 的 MP.renderCards 渲染。
- * 副作用：会清空并重写 cardsBox，传入的站点数组为空时那里会出现一句空态文案。
+ * 卡片渲染完再往每张卡的 .vops 里补一个「移除」按钮（renderCards 本身不支持扩展按钮），
+ * 点击调 DELETE /api/sites/:name/favorite，成功后整个列表重拉（收藏夹分组可能变化）。
  */
 function renderSites() {
   const f = FOLDERS[cur];
+  if (!f) {
+    folderName.textContent = '';
+    folderCount.textContent = '';
+    cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">还没有收藏的页面，去观看页点「收藏」吧</div>';
+    return;
+  }
   folderName.textContent = f.name;
   folderCount.textContent = '共 ' + f.sites.length + ' 个页面';
   MP.renderCards(cardsBox, f.sites);
+
+  const cards = cardsBox.querySelectorAll('.vcard');
+  f.sites.forEach((s, i) => {
+    const ops = cards[i] && cards[i].querySelector('.vops');
+    if (!ops) return;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'op';
+    btn.title = '取消收藏';
+    btn.textContent = '移除';
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const res = await fetch('/api/sites/' + encodeURIComponent(s.name) + '/favorite', { method: 'DELETE' });
+      const d = await res.json().catch(() => null);
+      if (!res.ok || !d || !d.ok) {
+        MP.toast((d && d.message) || '移除失败，稍后再试');
+        return;
+      }
+      MP.toast('已取消收藏「' + (s.title || s.name) + '」');
+      boot();   // 重拉：当前夹可能变空、其它夹计数也会变
+    });
+    ops.appendChild(btn);
+  });
 }
 
-document.getElementById('newFolder').addEventListener('click', () => {
-  MP.toast('新建收藏夹需要登录后使用');
-});
+/** 启动：拉收藏列表并分组。失败时左侧/右侧显示空态（页面要登录，401 不会走到这里）。 */
+async function boot() {
+  try {
+    const res = await fetch('/api/favorites', { headers: { Accept: 'application/json' } });
+    const data = await res.json().catch(() => null);
+    if (res.ok && data && data.ok) {
+      FOLDERS.length = 0;
+      buildFolders(data.sites || []).forEach((f) => FOLDERS.push(f));
+      if (cur >= FOLDERS.length) cur = 0;
+    } else {
+      MP.toast((data && data.message) || '加载失败，稍后再试');
+    }
+  } catch {
+    MP.toast('连不上服务器，稍后再试');
+  }
+  renderFolders();
+  renderSites();
+}
 
-renderFolders();
-renderSites();
+boot();
 </script>
 </body>
 </html>

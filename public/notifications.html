@@ -23,22 +23,8 @@
 <script>
 MP.topbar({ active: 'dynamic' });
 
-// TODO 后端对接：替换为 fetch('/api/notifications')
-let items = [
-  { type: 'comment', actor: '小林', actorUsername: 'lin', siteName: 'weekly-blog', siteTitle: '前端周刊笔记 · 第 42 期',
-    snippet: '渲染性能那一段很有帮助，能否再展开讲讲批量更新？', at: Date.now() - 8 * 60e3, unread: true },
-  { type: 'like', actor: 'Aurora', actorUsername: 'aurora', siteName: 'linkhub', siteTitle: '我的社交聚合页 · LinkHub',
-    at: Date.now() - 42 * 60e3, unread: true },
-  { type: 'favorite', actor: 'Byte', actorUsername: 'byte', siteName: 'ui-notes', siteTitle: '设计系统笔记 · 色彩与间距',
-    at: Date.now() - 3 * 3600e3, unread: true },
-  { type: 'follow', actor: 'Momo', actorUsername: 'momo', at: Date.now() - 26 * 3600e3 },
-  { type: 'like', actor: 'Ken', actorUsername: 'ken', siteName: 'grad-apply', siteTitle: '保研材料汇总页（简历+项目+成绩）',
-    at: Date.now() - 2 * 86400e3 },
-  { type: 'comment', actor: 'Momo', actorUsername: 'momo', siteName: 'weekly-blog', siteTitle: '前端周刊笔记 · 第 42 期',
-    snippet: '已经在团队周会上分享了，感谢整理！', at: Date.now() - 4 * 86400e3 },
-  { type: 'system', actor: 'MinePage 小助手',
-    snippet: '你投稿的「我的社交聚合页 · LinkHub」已通过审核，现在可以在首页被搜索到了。', at: Date.now() - 6 * 86400e3 },
-];
+// TODO 后端对接：替换为 fetch('/api/notifications')；通知接口后端已有（含已读上报），前端尚未接线
+let items = [];
 
 const TABS = [
   { key: 'all', label: '全部' },

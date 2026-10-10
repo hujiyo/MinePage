@@ -1,5 +1,6 @@
 import http from 'node:http';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -10,6 +11,8 @@ import {
   MAX_BODY_BYTES,
   MAX_FILE_BYTES,
   MAX_FILES_PER_SITE,
+  MAX_SITE_TOTAL_BYTES,
+  MAX_ZIP_BYTES,
   SESSION_COOKIE,
   SESSION_TTL_DAYS,
   COOKIE_SECURE,
@@ -18,6 +21,9 @@ import {
   SITE_DESC_MAX,
   BIO_MAX,
   COMMENT_MAX,
+  MYSQL_HOST,
+  MYSQL_PORT,
+  MYSQL_DATABASE,
 } from './lib/config.js';
 import { checkName } from './lib/names.js';
 import { absoluteUrlForSite } from './lib/addressing.js';
@@ -62,11 +68,13 @@ import {
   removeSiteFile,
   setSiteStatus,
   siteTagLabel,
+  totalSiteFileSize,
   updateSiteHtml,
   updateSiteMeta,
   upsertSiteFile,
   SITE_TAGS,
 } from './lib/sites.js';
+import { parseZip } from './lib/zip.js';
 import {
   addComment,
   countComments,
@@ -115,6 +123,32 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 const SANDBOX_CSP =
   'sandbox allow-scripts allow-forms allow-popups allow-downloads allow-top-navigation-by-user-activation';
 
+// 迷你封面滚动代理：注入到带 ?mpcover=1 的入口页。
+// 封面 iframe 是沙箱（opaque origin），父页面摸不到它的内部滚动，
+// 只能 postMessage 让页面自己滚 —— 等价于真实浏览器窗口往下翻，
+// 「100vh 全屏首屏」这类内容高度跟着视口走的站点也能正常预览下翻。
+// mpPeekSpeed：匀速下翻（px/s，到底循环）；mpPeekStop：停下回顶；mpPeekTo：滚到指定位置。
+// 一律 behavior:'instant'：模板常设 scroll-behavior:smooth，平滑滚动既拖慢步进又会卡在半路。
+const MPEEK_PROXY =
+  '<script>(function(){var s=0,sp=0,raf=0,last=0;' +
+  'function tick(t){if(!sp)return;var dt=Math.min((t-last)/1000,0.1);last=t;' +
+  'var max=document.documentElement.scrollHeight-window.innerHeight;' +
+  'if(max<=0){raf=requestAnimationFrame(tick);return;}' +
+  's+=sp*dt;if(s>=max)s=0;window.scrollTo({top:s,behavior:"instant"});raf=requestAnimationFrame(tick);}' +
+  'window.addEventListener("message",function(e){var d=e.data||{};' +
+  'if(d.mpPeekSpeed!=null){sp=d.mpPeekSpeed;last=performance.now();if(sp&&!raf)raf=requestAnimationFrame(tick);}' +
+  'else if(d.mpPeekStop){sp=0;if(raf)cancelAnimationFrame(raf);raf=0;window.scrollTo({top:0,behavior:"instant"});}' +
+  'else if(d.mpPeekTo!=null){window.scrollTo({top:d.mpPeekTo,behavior:"instant"});}});' +
+  'parent.postMessage({mpReady:1},"*");})();</script>';
+
+// 把代理脚本插到最后一个 </body> 前，找不到就追加到末尾；Buffer 进 Buffer 出，string 进 string 出
+function injectPeekProxy(html) {
+  const s = html.toString('utf8');
+  const i = s.toLowerCase().lastIndexOf('</body');
+  const out = i === -1 ? s + MPEEK_PROXY : s.slice(0, i) + MPEEK_PROXY + s.slice(i);
+  return Buffer.isBuffer(html) ? Buffer.from(out, 'utf8') : out;
+}
+
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.htm': 'text/html; charset=utf-8',
@@ -140,15 +174,10 @@ const MIME_TYPES = {
 
 // ---------------------------------------------------------------- 基础工具
 
-/**
- * 从请求的 Host 头拼出本站对外源（形如 http://host:port），生成站点绝对地址时用。
- * 注意 scheme 写死 http://：站点跑在 HTTPS 反向代理后面时会拼出 http 链接。
- */
 function originOf(req) {
   return `http://${req.headers.host ?? `${HOST}:${PORT}`}`;
 }
 
-/** 回一个 JSON 响应。固定 no-store，Content-Length 按 UTF-8 字节数算。 */
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
@@ -159,7 +188,6 @@ function sendJson(res, status, payload) {
   res.end(body);
 }
 
-/** 回一段 HTML，带 nosniff；extraHeaders 用来追加 CSP 之类的头，同名键会覆盖默认值。 */
 function sendHtml(res, status, html, extraHeaders = {}) {
   const body = Buffer.from(html, 'utf8');
   res.writeHead(status, {
@@ -171,16 +199,48 @@ function sendHtml(res, status, html, extraHeaders = {}) {
   res.end(body);
 }
 
-/** 302 跳转，固定带 no-store，避免浏览器把带登录态的跳转缓存住。 */
 function sendRedirect(res, location) {
   res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
   res.end();
 }
 
+// ---------------------------------------------------------------- 响应压缩（gzip）
+
+// 可压缩的文本类扩展名；图片/字体/视频已是二进制，压了更慢，不列。
+const GZIP_EXTS = new Set([
+  '.html', '.htm', '.css', '.js', '.mjs', '.json', '.svg', '.xml', '.txt', '.map', '.webmanifest',
+]);
+const GZIP_MIN_BYTES = 512; // 太小的响应不值得压（省不下多少还费 CPU）
+
+/** 请求头里是否声明接受 gzip。 */
+function acceptsGzip(req) {
+  return /\bgzip\b/i.test(String(req.headers['accept-encoding'] ?? ''));
+}
+
 /**
- * 读 public/ 下的静态页面文件下发。filename 由调用方硬编码，不来自用户输入。
- * 文件缺失时不抛异常，而是降级成一张 500 提示页，服务继续跑。
+ * 按需 gzip：客户端不接、非文本类型、体积太小三种情况都原样返回。
+ * 返回 { body, gzip }，调用方据此决定要不要写 Content-Encoding 与 Vary。
+ * 关键点：压缩做在应用里，本地/生产同一份代码都生效，不再依赖 nginx 的 gzip 配置。
  */
+function maybeGzip(req, input, ext) {
+  const buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input), 'utf8');
+  if (!GZIP_EXTS.has(ext) || buf.length < GZIP_MIN_BYTES || !acceptsGzip(req)) {
+    return { body: buf, gzip: false };
+  }
+  return { body: zlib.gzipSync(buf), gzip: true };
+}
+
+/** 按 gzip 结果补头并下发一条响应（Content-Length 用压缩后的真实长度）。 */
+function sendWithGzip(req, res, status, headers, input, ext) {
+  const { body, gzip } = maybeGzip(req, input, ext);
+  res.writeHead(status, {
+    ...headers,
+    ...(gzip ? { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' } : {}),
+    'Content-Length': body.length,
+  });
+  res.end(body);
+}
+
 async function sendPage(res, filename, status = 200) {
   try {
     const html = await fs.readFile(path.join(PUBLIC_DIR, filename), 'utf8');
@@ -190,7 +250,6 @@ async function sendPage(res, filename, status = 200) {
   }
 }
 
-/** 写会话 Cookie。maxAge 单位是秒，传 0 表示立即失效（登出用）。 */
 function setSessionCookie(res, token, maxAge) {
   res.setHeader(
     'Set-Cookie',
@@ -198,25 +257,18 @@ function setSessionCookie(res, token, maxAge) {
   );
 }
 
-/** 从 Cookie 头里取会话 token，没有就回 null。 */
 function sessionToken(req) {
   return parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? null;
 }
 
 /** 取当前登录用户。封禁中的账号按未登录处理。 */
-function currentUser(req) {
-  const row = findSessionUser(sessionToken(req));
+async function currentUser(req) {
+  const row = await findSessionUser(sessionToken(req));
   if (!row) return null;
   if (row.status !== 'active') return null;
   return publicUser(row);
 }
 
-/**
- * 收完请求体再 JSON.parse。
- * 超过 limit 会 reject { code: 'TOO_LARGE' } 并 destroy 掉请求，连接被直接掐断——
- * 调用方此时再回 413 不一定送得出去；不是合法 JSON 则 reject { code: 'BAD_JSON' }。
- * 裸函数，不负责回响应。
- */
 function readJsonBody(req, limit = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -229,7 +281,9 @@ function readJsonBody(req, limit = MAX_BODY_BYTES) {
       if (size > limit) {
         settled = true;
         reject(Object.assign(new Error('内容太大了'), { code: 'TOO_LARGE' }));
-        req.destroy();
+        // 把剩下的请求体读完再丢掉，别在这里 destroy：
+        // 掐掉连接会让客户端看到 ECONNRESET，而不是我们想回的 413「文件太大」。
+        req.resume();
         return;
       }
       chunks.push(chunk);
@@ -253,7 +307,6 @@ function readJsonBody(req, limit = MAX_BODY_BYTES) {
   });
 }
 
-/** 与 readJsonBody 同样的收流 / 限流逻辑，只是原样返回 Buffer（二进制文件上传用）。 */
 function readRawBody(req, limit = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -266,7 +319,8 @@ function readRawBody(req, limit = MAX_BODY_BYTES) {
       if (size > limit) {
         settled = true;
         reject(Object.assign(new Error('内容太大了'), { code: 'TOO_LARGE' }));
-        req.destroy();
+        // 同上：读干丢弃，保证调用方能把这声 413 送出去
+        req.resume();
         return;
       }
       chunks.push(chunk);
@@ -306,9 +360,8 @@ async function readFileBody(req, res, limit) {
   }
 }
 
-/** 登录守卫：未登录时已经替你回了 401 并返回 null，调用方写 `if (!user) return;` 即可。 */
-function requireLogin(req, res) {
-  const user = currentUser(req);
+async function requireLogin(req, res) {
+  const user = await currentUser(req);
   if (!user) {
     sendJson(res, 401, { ok: false, message: '请先登录' });
     return null;
@@ -316,9 +369,8 @@ function requireLogin(req, res) {
   return user;
 }
 
-/** 管理员守卫：未登录回 401、已登录但不是管理员回 403，两种情况都返回 null。 */
-function requireAdmin(req, res) {
-  const user = requireLogin(req, res);
+async function requireAdmin(req, res) {
+  const user = await requireLogin(req, res);
   if (!user) return null;
   if (!user.isAdmin) {
     sendJson(res, 403, { ok: false, message: '需要管理员权限' });
@@ -334,28 +386,21 @@ async function handleRoot(req, res) {
   await sendPage(res, 'discover.html');
 }
 
-/**
- * 老投稿页：投稿已并入「创作」页的「投稿」标签，这里只做跳转。
- *
- * 不再单独挡未登录 —— 跳过去的 `/sites` 自己要求登录，
- * 未登录用户最终仍会被送到登录页，效果与在这里挡一次相同。
- */
+/** 老投稿页：投稿已并入「创作」页的「投稿」标签，这里只做跳转。 */
 async function handleUploadPage(req, res) {
   sendRedirect(res, '/sites?tab=upload');
 }
 
-/** 登录页；已登录用户直接跳回首页。 */
 async function handleLoginPage(req, res) {
-  if (currentUser(req)) {
+  if (await currentUser(req)) {
     sendRedirect(res, '/');
     return;
   }
   await sendPage(res, 'login.html');
 }
 
-/** 管理后台页；未登录跳登录页，已登录但不是管理员时回 403 页面而不是跳转，避免来回弹。 */
 async function handleAdminPage(req, res) {
-  const user = currentUser(req);
+  const user = await currentUser(req);
   if (!user) {
     sendRedirect(res, '/login');
     return;
@@ -367,27 +412,24 @@ async function handleAdminPage(req, res) {
   await sendPage(res, 'admin.html');
 }
 
-/** 设置页（改密码 / 换绑邮箱 / MCP 密钥管理），未登录跳登录页。 */
 async function handleSettingsPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
   await sendPage(res, 'settings.html');
 }
 
-/** 找回密码页；已登录用户直接跳回首页。 */
 async function handleForgotPage(req, res) {
-  if (currentUser(req)) {
+  if (await currentUser(req)) {
     sendRedirect(res, '/');
     return;
   }
   await sendPage(res, 'forgot.html');
 }
 
-/** 个人资料页（用户名 / 简介），未登录跳登录页。 */
 async function handleAccountPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
@@ -396,7 +438,7 @@ async function handleAccountPage(req, res) {
 
 /** 页面管理页：站点列表 / 访问 / 编辑 / 删除。 */
 async function handleSitesPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
@@ -405,17 +447,13 @@ async function handleSitesPage(req, res) {
 
 /** 站点管理编辑页（单页编辑 / 多页文件管理，也是未来智能体辅助编辑的挂载点）。 */
 async function handleSiteEditPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
   await sendPage(res, 'site.html');
 }
 
-/**
- * 平台自己的静态资源（/_assets/<文件名>，目前主要是 style.css）。
- * 只放行单层文件名，挡掉 ../ 穿越；扩展名查 MIME_TYPES，查不到按 octet-stream 下发。
- */
 async function handleAsset(req, res, [file]) {
   // 只放行单层文件名，杜绝 ../ 之类的穿越
   if (!/^[a-zA-Z0-9._-]+$/.test(file) || file.includes('..')) {
@@ -425,12 +463,11 @@ async function handleAsset(req, res, [file]) {
 
   try {
     const data = await fs.readFile(path.join(PUBLIC_DIR, file));
-    res.writeHead(200, {
-      'Content-Type': MIME_TYPES[path.extname(file).toLowerCase()] ?? 'application/octet-stream',
-      'Content-Length': data.length,
+    const ext = path.extname(file).toLowerCase();
+    sendWithGzip(req, res, 200, {
+      'Content-Type': MIME_TYPES[ext] ?? 'application/octet-stream',
       'Cache-Control': 'no-cache',
-    });
-    res.end(data);
+    }, data, ext);
   } catch {
     sendHtml(res, 404, messagePage('404', '找不到这个文件。'));
   }
@@ -438,30 +475,22 @@ async function handleAsset(req, res, [file]) {
 
 // ---------------------------------------------------------------- 账号接口
 
-/**
- * GET /api/me：当前登录用户 + 未读通知数 / 未读私信数，导航条一次请求拿全。
- * 未登录时不报 401，而是 user: null、两个未读数都为 0，前端据此决定显示登录入口还是头像。
- */
 async function handleMe(req, res) {
-  const user = currentUser(req);
+  const user = await currentUser(req);
   // 登录用户附带未读通知数 / 未读私信数，导航条不用额外请求
   sendJson(res, 200, {
     ok: true,
     user,
-    unread: user ? countUnread(user.id) : 0,
-    unreadMessages: user ? countUnreadMessages(user.id) : 0,
+    unread: user ? await countUnread(user.id) : 0,
+    unreadMessages: user ? await countUnreadMessages(user.id) : 0,
   });
 }
 
-/**
- * POST /api/auth/login：校验账号密码（登录名可以是邮箱也可以是用户名），成功后建会话并下发 Cookie。
- * 密码错回 401，账号被封回 403，两种文案不同。
- */
 async function handleLogin(req, res) {
   const body = await readBody(req, res);
   if (!body) return;
 
-  const user = authenticate(String(body.login ?? '').trim(), String(body.password ?? ''));
+  const user = await authenticate(String(body.login ?? '').trim(), String(body.password ?? ''));
 
   if (!user) {
     sendJson(res, 401, { ok: false, message: '账号或密码不对' });
@@ -472,15 +501,14 @@ async function handleLogin(req, res) {
     return;
   }
 
-  const token = createSession(user.id);
+  const token = await createSession(user.id);
   setSessionCookie(res, token, SESSION_TTL_DAYS * 86400);
 
   sendJson(res, 200, { ok: true, user: publicUser(user) });
 }
 
-/** POST /api/auth/logout：删掉服务端会话记录并把 Cookie 置空；本来就没登录也照常回 ok。 */
 async function handleLogout(req, res) {
-  deleteSession(sessionToken(req));
+  await deleteSession(sessionToken(req));
   setSessionCookie(res, '', 0);
   sendJson(res, 200, { ok: true });
 }
@@ -509,7 +537,7 @@ async function handleSendCode(req, res) {
     }
 
     if (purpose === 'register') {
-      if (findUserByLogin(email)) {
+      if (await findUserByLogin(email)) {
         sendJson(res, 409, { ok: false, message: '这个邮箱已经注册过了' });
         return;
       }
@@ -523,14 +551,14 @@ async function handleSendCode(req, res) {
     }
 
     // reset：不管邮箱存不存在，回复都一样，避免被人拿来探测哪些邮箱注册过
-    const user = findUserByLogin(email);
+    const user = await findUserByLogin(email);
     if (user) await issueCode(email, purpose);
     sendJson(res, 200, { ok: true });
     return;
   }
 
   if (purpose === 'change') {
-    const user = requireLogin(req, res);
+    const user = await requireLogin(req, res);
     if (!user) return;
 
     const result = await issueCode(user.email, purpose);
@@ -566,19 +594,19 @@ async function handleRegister(req, res) {
     sendJson(res, 400, { ok: false, message: '请输入 6 位邮箱验证码' });
     return;
   }
-  if (findUserByLogin(email)) {
+  if (await findUserByLogin(email)) {
     sendJson(res, 409, { ok: false, message: '这个邮箱已经注册过了' });
     return;
   }
 
-  const verified = consumeCode(email, 'register', code);
+  const verified = await consumeCode(email, 'register', code);
   if (!verified.ok) {
     sendJson(res, 400, { ok: false, message: verified.message });
     return;
   }
 
-  const user = createUser({ email, password });
-  const token = createSession(user.id);
+  const user = await createUser({ email, password });
+  const token = await createSession(user.id);
   setSessionCookie(res, token, SESSION_TTL_DAYS * 86400);
 
   sendJson(res, 201, { ok: true, user: publicUser(user) });
@@ -595,7 +623,7 @@ async function handleForgotPassword(req, res) {
     return;
   }
 
-  if (findUserByLogin(email)) {
+  if (await findUserByLogin(email)) {
     await issueCode(email, 'reset');
   }
 
@@ -620,20 +648,20 @@ async function handleResetPassword(req, res) {
     return;
   }
 
-  const user = findUserByLogin(email);
+  const user = await findUserByLogin(email);
   if (!user) {
     sendJson(res, 400, { ok: false, message: '验证码不对或已过期' });
     return;
   }
 
-  const verified = consumeCode(email, 'reset', code);
+  const verified = await consumeCode(email, 'reset', code);
   if (!verified.ok) {
     sendJson(res, 400, { ok: false, message: verified.message });
     return;
   }
 
-  updateUserPassword(user.id, password);
-  deleteOtherSessions(user.id);
+  await updateUserPassword(user.id, password);
+  await deleteOtherSessions(user.id);
   sendJson(res, 200, { ok: true });
 }
 
@@ -642,7 +670,7 @@ async function handleResetPassword(req, res) {
  * 成功后踢掉其他设备的会话，保留当前这一个。
  */
 async function handleChangePassword(req, res) {
-  const session = currentUser(req);
+  const session = await currentUser(req);
   if (!session) {
     sendJson(res, 401, { ok: false, message: '请先登录' });
     return;
@@ -664,7 +692,7 @@ async function handleChangePassword(req, res) {
     return;
   }
 
-  const row = findUserById(session.id);
+  const row = await findUserById(session.id);
   if (!row || !verifyPassword(currentPassword, row.password_hash)) {
     sendJson(res, 400, { ok: false, message: '当前密码不对' });
     return;
@@ -674,29 +702,28 @@ async function handleChangePassword(req, res) {
     sendJson(res, 400, { ok: false, message: '请输入 6 位邮箱验证码' });
     return;
   }
-  const verified = consumeCode(row.email, 'change', code);
+  const verified = await consumeCode(row.email, 'change', code);
   if (!verified.ok) {
     sendJson(res, 400, { ok: false, message: verified.message });
     return;
   }
 
-  updateUserPassword(row.id, newPassword);
-  deleteOtherSessions(row.id, sessionToken(req));
+  await updateUserPassword(row.id, newPassword);
+  await deleteOtherSessions(row.id, sessionToken(req));
   sendJson(res, 200, { ok: true });
 }
 
 // ---------------------------------------------------------------- 账号自助设置接口
 
-/** POST /api/account/username：改用户名（body.username 传空即清空）。名字不合法回 400、被占用回 409。 */
 async function handleAccountUsername(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const body = await readBody(req, res);
   if (!body) return;
 
   try {
-    const username = setUsername(user.id, body.username ?? null);
+    const username = await setUsername(user.id, body.username ?? null);
     sendJson(res, 200, { ok: true, username });
   } catch (err) {
     if (err.code === 'BAD_NAME') {
@@ -711,19 +738,15 @@ async function handleAccountUsername(req, res) {
   }
 }
 
-/**
- * POST /api/account/password：已登录状态下凭「当前密码」直接改密码。
- * 与 /api/auth/password 的区别：这里不校验邮箱验证码，也不踢其他设备的会话。
- */
 async function handleAccountPassword(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const body = await readBody(req, res);
   if (!body) return;
 
   try {
-    changePassword(user.id, body.currentPassword, body.newPassword);
+    await changePassword(user.id, body.currentPassword, body.newPassword);
     sendJson(res, 200, { ok: true });
   } catch (err) {
     if (err.code === 'WRONG_PASSWORD' || err.code === 'PASSWORD_TOO_SHORT') {
@@ -736,14 +759,14 @@ async function handleAccountPassword(req, res) {
 
 /** 保存个人简介（个人中心的「想说的话」）。 */
 async function handleAccountBio(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const body = await readBody(req, res);
   if (!body) return;
 
   try {
-    const bio = setBio(user.id, body.bio ?? null);
+    const bio = await setBio(user.id, body.bio ?? null);
     sendJson(res, 200, { ok: true, bio });
   } catch (err) {
     if (err.code === 'BIO_TOO_LONG') {
@@ -756,16 +779,11 @@ async function handleAccountBio(req, res) {
 
 // ---------------------------------------------------------------- 站点接口
 
-/**
- * GET /api/sites：当前用户的站点列表（个人中心用）。
- * kind 由 file_count 反推（有附件文件就是 multi，否则 single）；
- * totalSize = 入口 html 大小 + 全部附件大小之和。
- */
 async function handleMySites(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const sites = listSitesByOwner(user.id).map((s) => ({
+  const sites = (await listSitesByOwner(user.id)).map((s) => ({
     id: s.id,
     name: s.name,
     title: s.title,
@@ -783,9 +801,8 @@ async function handleMySites(req, res) {
   sendJson(res, 200, { ok: true, sites });
 }
 
-/** POST /api/upload：老的单 HTML 上传入口，校验站名与体积后建站，返回可访问的绝对 URL。 */
 async function handleUpload(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const body = await readBody(req, res);
@@ -808,7 +825,7 @@ async function handleUpload(req, res) {
   }
 
   try {
-    const site = createSite({ name: checked.name, html, ownerId: user.id });
+    const site = await createSite({ name: checked.name, html, ownerId: user.id });
     sendJson(res, 201, {
       ok: true,
       name: site.name,
@@ -829,7 +846,7 @@ async function handleUpload(req, res) {
 
 /** 上传/覆盖站点里的一个文件。站点不存在时自动创建（入口页待补 index.html）。 */
 async function handleSiteFileUpload(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const checked = checkName(name);
@@ -848,11 +865,11 @@ async function handleSiteFileUpload(req, res, [name]) {
     return;
   }
 
-  let site = findSiteHeaderByName(checked.name);
+  let site = await findSiteHeaderByName(checked.name);
   if (!site) {
     try {
-      createSite({ name: checked.name, html: '', ownerId: user.id });
-      site = findSiteHeaderByName(checked.name);
+      await createSite({ name: checked.name, html: '', ownerId: user.id });
+      site = await findSiteHeaderByName(checked.name);
     } catch (err) {
       if (err.code === 'NAME_TAKEN') {
         sendJson(res, 409, { ok: false, message: err.message });
@@ -875,22 +892,136 @@ async function handleSiteFileUpload(req, res, [name]) {
     return;
   }
 
-  const isNew = getSiteFile(site.id, filePath) === null;
-  if (isNew && countSiteFiles(site.id) >= MAX_FILES_PER_SITE) {
+  const isNew = await getSiteFile(site.id, filePath) === null;
+  if (isNew && await countSiteFiles(site.id) >= MAX_FILES_PER_SITE) {
     sendJson(res, 409, { ok: false, message: `站点文件太多啦，上限 ${MAX_FILES_PER_SITE} 个` });
     return;
   }
+  // 单站总容量：把被覆盖文件的旧体积扣掉只算增量，超 512 MB 拒收
+  const usedBytes = await totalSiteFileSize(site.id, filePath);
+  if (usedBytes + content.length > MAX_SITE_TOTAL_BYTES) {
+    sendJson(res, 413, {
+      ok: false,
+      message: `站点总容量超限，单站上限 ${Math.round(MAX_SITE_TOTAL_BYTES / 1024 / 1024)} MB`,
+    });
+    return;
+  }
 
-  const saved = upsertSiteFile(site.id, filePath, content);
+  const saved = await upsertSiteFile(site.id, filePath, content);
   sendJson(res, isNew ? 201 : 200, { ok: true, path: saved.path, size: saved.size });
+}
+
+/**
+ * POST /api/sites/:name/zip：zip 直传整包发布（Netlify Drop 式交互）。
+ * body 是 zip 字节流（≤ MAX_ZIP_BYTES），服务端零依赖解压后逐个入库：
+ * 路径过滤（非法/垃圾/隐藏文件）→ 文件数与总容量校验 → upsert。
+ * 跳过的条目在响应里列出前 20 条，方便前端提示"这些没进来"。
+ */
+async function handleSiteZipUpload(req, res, [name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const checked = checkName(name);
+  if (!checked.ok) {
+    sendJson(res, 400, { ok: false, message: checked.reason });
+    return;
+  }
+
+  const zipBuf = await readFileBody(req, res, MAX_ZIP_BYTES);
+  if (!zipBuf) return;
+
+  let site = await findSiteHeaderByName(checked.name);
+  if (!site) {
+    try {
+      await createSite({ name: checked.name, html: '', ownerId: user.id });
+      site = await findSiteHeaderByName(checked.name);
+    } catch (err) {
+      if (err.code === 'NAME_TAKEN') {
+        sendJson(res, 409, { ok: false, message: err.message });
+        return;
+      }
+      console.error('[site-zip-upload]', err);
+      sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+      return;
+    }
+  }
+  if (site.owner_id !== user.id && !user.isAdmin) {
+    sendJson(res, 403, { ok: false, message: '只能操作自己的站点' });
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = parseZip(zipBuf, {
+      maxEntries: MAX_FILES_PER_SITE,
+      maxEntryBytes: MAX_FILE_BYTES,
+      maxTotalBytes: MAX_SITE_TOTAL_BYTES,
+    });
+  } catch (err) {
+    sendJson(res, 400, { ok: false, message: 'zip 解不开：' + err.message });
+    return;
+  }
+
+  const existing = await listSiteFiles(site.id);
+  const sizeByPath = new Map(existing.map((f) => [f.path, f.size]));
+  let totalBytes = existing.reduce((s, f) => s + f.size, 0);
+  const skipped = [...parsed.skipped];
+  let saved = 0;
+
+  for (const e of parsed.entries) {
+    if (!isValidSitePath(e.path)) {
+      skipped.push({ path: e.path, reason: '路径不合法或含垃圾文件' });
+      continue;
+    }
+    if (e.content.length === 0) {
+      skipped.push({ path: e.path, reason: '空文件' });
+      continue;
+    }
+    if (e.content.length > MAX_FILE_BYTES) {
+      skipped.push({ path: e.path, reason: '超过单文件上限' });
+      continue;
+    }
+    const isNew = !sizeByPath.has(e.path);
+    if (isNew && sizeByPath.size >= MAX_FILES_PER_SITE) {
+      skipped.push({ path: e.path, reason: '文件数超上限' });
+      continue;
+    }
+    const oldSize = sizeByPath.get(e.path) ?? 0;
+    if (totalBytes - oldSize + e.content.length > MAX_SITE_TOTAL_BYTES) {
+      skipped.push({ path: e.path, reason: '站点总容量超限' });
+      continue;
+    }
+
+    totalBytes = totalBytes - oldSize + e.content.length;
+    sizeByPath.set(e.path, e.content.length);
+    await upsertSiteFile(site.id, e.path, e.content);
+    saved++;
+  }
+
+  if (saved === 0) {
+    sendJson(res, 400, {
+      ok: false,
+      message: 'zip 里没有可发布的文件' + (skipped.length ? `（${skipped.length} 个条目被跳过）` : ''),
+      skipped: skipped.slice(0, 20),
+    });
+    return;
+  }
+
+  sendJson(res, 201, {
+    ok: true,
+    saved,
+    skipped: skipped.length,
+    skipList: skipped.slice(0, 20),
+    totalBytes,
+  });
 }
 
 /** 列出站点里的全部文件（不含内容）。站点的主人或管理员可看。 */
 async function handleSiteFilesList(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = findSiteHeaderByName(name);
+  const site = await findSiteHeaderByName(name);
   if (!site) {
     sendJson(res, 404, { ok: false, message: '没有这个站点' });
     return;
@@ -902,16 +1033,16 @@ async function handleSiteFilesList(req, res, [name]) {
 
   sendJson(res, 200, {
     ok: true,
-    total: countSiteFiles(site.id),
-    files: listSiteFiles(site.id),
+    total: await countSiteFiles(site.id),
+    files: await listSiteFiles(site.id),
   });
 }
 
 // ---------------------------------------------------------------- 站点管理接口（个人中心 / 编辑页用）
 
 /** 取一个站点（含 html），归属或管理员才放行；失败时已回响应并返回 null。 */
-function ownSiteOrRespond(req, res, user, name) {
-  const site = findSiteByName(name);
+async function ownSiteOrRespond(req, res, user, name) {
+  const site = await findSiteByName(name);
   if (!site) {
     sendJson(res, 404, { ok: false, message: '没有这个站点' });
     return null;
@@ -925,13 +1056,13 @@ function ownSiteOrRespond(req, res, user, name) {
 
 /** 站点详情：单页站带 html，多页站带文件数。 */
 async function handleSiteDetail(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, name);
   if (!site) return;
 
-  const fileCount = countSiteFiles(site.id);
+  const fileCount = await countSiteFiles(site.id);
   sendJson(res, 200, {
     ok: true,
     site: {
@@ -955,10 +1086,10 @@ async function handleSiteDetail(req, res, [name]) {
 
 /** 保存站点元信息（标题 / 简介 / 内容标签，编辑页「站点设置」用）。 */
 async function handleSiteSaveMeta(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, name);
   if (!site) return;
 
   const body = await readBody(req, res);
@@ -981,19 +1112,19 @@ async function handleSiteSaveMeta(req, res, [name]) {
     return;
   }
 
-  updateSiteMeta(site.id, { title, description, tag });
+  await updateSiteMeta(site.id, { title, description, tag });
   sendJson(res, 200, { ok: true, title, description, tag, tagLabel: siteTagLabel(tag) });
 }
 
 /** 保存单页站的 HTML（编辑页的「保存」按钮）。 */
 async function handleSiteSaveHtml(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, name);
   if (!site) return;
 
-  if (countSiteFiles(site.id) > 0) {
+  if (await countSiteFiles(site.id) > 0) {
     sendJson(res, 400, {
       ok: false,
       message: '这是多页站点，请到下方文件列表里编辑单个文件',
@@ -1014,28 +1145,28 @@ async function handleSiteSaveHtml(req, res, [name]) {
     return;
   }
 
-  const size = updateSiteHtml(site.id, html);
+  const size = await updateSiteHtml(site.id, html);
   sendJson(res, 200, { ok: true, size });
 }
 
 /** 删除整个站点（site_files 由外键级联清掉）。 */
 async function handleSiteDelete(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, name);
   if (!site) return;
 
-  deleteSite(site.id);
+  await deleteSite(site.id);
   sendJson(res, 200, { ok: true });
 }
 
 /** 取一个站点文件的内容（文本文件才能在编辑页里编辑）。 */
 async function handleSiteFileContent(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, name);
   if (!site) return;
 
   const filePath = new URL(req.url, 'http://internal').searchParams.get('path');
@@ -1044,7 +1175,7 @@ async function handleSiteFileContent(req, res, [name]) {
     return;
   }
 
-  const content = getSiteFile(site.id, filePath);
+  const content = await getSiteFile(site.id, filePath);
   if (!content) {
     sendJson(res, 404, { ok: false, message: '站点里没有这个文件' });
     return;
@@ -1065,10 +1196,10 @@ async function handleSiteFileContent(req, res, [name]) {
 
 /** 删除站点里的一个文件。 */
 async function handleSiteFileDelete(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, name);
   if (!site) return;
 
   const filePath = new URL(req.url, 'http://internal').searchParams.get('path');
@@ -1077,7 +1208,7 @@ async function handleSiteFileDelete(req, res, [name]) {
     return;
   }
 
-  const changes = removeSiteFile(site.id, filePath);
+  const changes = await removeSiteFile(site.id, filePath);
   if (changes === 0) {
     sendJson(res, 404, { ok: false, message: '站点里没有这个文件' });
     return;
@@ -1089,8 +1220,8 @@ async function handleSiteFileDelete(req, res, [name]) {
 // ---------------------------------------------------------------- 社区互动接口（阶段 1 数据层）
 
 /** 按名字取站点头部，不存在时已回 404 并返回 null。 */
-function siteHeaderOrRespond(res, name) {
-  const site = findSiteHeaderByName(name);
+async function siteHeaderOrRespond(res, name) {
+  const site = await findSiteHeaderByName(name);
   if (!site) {
     sendJson(res, 404, { ok: false, message: '没有这个站点' });
     return null;
@@ -1109,15 +1240,15 @@ function activeSiteOrRespond(res, site) {
 
 /** 互动数字汇总。公开接口，登录后附带「我是否赞过 / 藏过」。 */
 async function handleSiteStats(req, res, [name]) {
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site) return;
 
-  const viewer = currentUser(req);
+  const viewer = await currentUser(req);
   // 附带站点与作者信息，观看包装页一次请求全拿到
-  const authorRow = findUserById(site.owner_id);
+  const authorRow = await findUserById(site.owner_id);
   sendJson(res, 200, {
     ok: true,
-    stats: siteStats(site.id, viewer?.id ?? null),
+    stats: await siteStats(site.id, viewer?.id ?? null),
     site: {
       name: site.name,
       title: site.title || site.name,
@@ -1137,47 +1268,40 @@ async function handleSiteStats(req, res, [name]) {
   });
 }
 
-/** 点赞（幂等，重复点仍回成功）；已下线站点回 451，拒绝新的互动。 */
 async function handleSiteLike(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site || !activeSiteOrRespond(res, site)) return;
 
-  likeSite(site.id, user.id);
-  sendJson(res, 200, { ok: true, liked: true, likes: countLikes(site.id) });
+  await likeSite(site.id, user.id);
+  sendJson(res, 200, { ok: true, liked: true, likes: await countLikes(site.id) });
 }
 
-/** 取消点赞。这里不校验站点状态，已下线的站点也能取消（只有点赞那条路才会挡）。 */
 async function handleSiteUnlike(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site) return;
 
-  unlikeSite(site.id, user.id);
-  sendJson(res, 200, { ok: true, liked: false, likes: countLikes(site.id) });
+  await unlikeSite(site.id, user.id);
+  sendJson(res, 200, { ok: true, liked: false, likes: await countLikes(site.id) });
 }
 
-/** 评论列表，公开只读接口。同样不校验站点状态，已下线站点已有的评论仍看得见。 */
 async function handleSiteCommentsList(req, res, [name]) {
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site) return;
 
-  sendJson(res, 200, { ok: true, total: countComments(site.id), comments: listComments(site.id) });
+  sendJson(res, 200, { ok: true, total: await countComments(site.id), comments: await listComments(site.id) });
 }
 
-/**
- * 发评论。body.replyTo 可选，只支持一级回复：被回复的评论必须存在且属于同一个站点。
- * 响应里直接带回新评论和最新总数，前端不用再拉一次列表。
- */
 async function handleSiteCommentAdd(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site || !activeSiteOrRespond(res, site)) return;
 
   const body = await readBody(req, res);
@@ -1196,7 +1320,7 @@ async function handleSiteCommentAdd(req, res, [name]) {
   // 一级回复：被回复的评论必须存在且属于同一站点
   let replyTo = null;
   if (body.replyTo !== undefined && body.replyTo !== null) {
-    const parent = getComment(Number(body.replyTo));
+    const parent = await getComment(Number(body.replyTo));
     if (!parent || parent.site_id !== site.id) {
       sendJson(res, 400, { ok: false, message: '要回复的评论不存在' });
       return;
@@ -1204,7 +1328,7 @@ async function handleSiteCommentAdd(req, res, [name]) {
     replyTo = parent.id;
   }
 
-  const id = addComment({ siteId: site.id, userId: user.id, replyTo, content });
+  const id = await addComment({ siteId: site.id, userId: user.id, replyTo, content });
   sendJson(res, 201, {
     ok: true,
     comment: {
@@ -1214,19 +1338,19 @@ async function handleSiteCommentAdd(req, res, [name]) {
       createdAt: new Date().toISOString(),
       author: { id: user.id, name: user.username ?? user.email.split('@')[0], username: user.username ?? null },
     },
-    total: countComments(site.id),
+    total: await countComments(site.id),
   });
 }
 
 /** 删评论：作者本人或管理员。删掉的评论若有回复，回复一并级联删除。 */
 async function handleSiteCommentDelete(req, res, [name, id]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site) return;
 
-  const comment = getComment(Number(id));
+  const comment = await getComment(Number(id));
   if (!comment || comment.site_id !== site.id) {
     sendJson(res, 404, { ok: false, message: '没有这条评论' });
     return;
@@ -1236,16 +1360,15 @@ async function handleSiteCommentDelete(req, res, [name, id]) {
     return;
   }
 
-  deleteComment(comment.id);
-  sendJson(res, 200, { ok: true, total: countComments(site.id) });
+  await deleteComment(comment.id);
+  sendJson(res, 200, { ok: true, total: await countComments(site.id) });
 }
 
-/** 收藏。body.folder 是收藏夹名，缺省「默认收藏夹」，最长 50 字。已下线站点回 451。 */
 async function handleSiteFavorite(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site || !activeSiteOrRespond(res, site)) return;
 
   const body = await readBody(req, res);
@@ -1258,25 +1381,24 @@ async function handleSiteFavorite(req, res, [name]) {
     return;
   }
 
-  favoriteSite(site.id, user.id, folder);
-  sendJson(res, 200, { ok: true, favorited: true, favorites: countFavorites(site.id) });
+  await favoriteSite(site.id, user.id, folder);
+  sendJson(res, 200, { ok: true, favorited: true, favorites: await countFavorites(site.id) });
 }
 
-/** 取消收藏。同样不校验站点状态，已下线的站点也能取消。 */
 async function handleSiteUnfavorite(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, name);
   if (!site) return;
 
-  unfavoriteSite(site.id, user.id);
-  sendJson(res, 200, { ok: true, favorited: false, favorites: countFavorites(site.id) });
+  await unfavoriteSite(site.id, user.id);
+  sendJson(res, 200, { ok: true, favorited: false, favorites: await countFavorites(site.id) });
 }
 
 /** 关注 / 取关一个用户（按用户 id）。不能关注自己。 */
 async function handleUserFollow(req, res, [id]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const targetId = Number(id);
@@ -1284,50 +1406,49 @@ async function handleUserFollow(req, res, [id]) {
     sendJson(res, 400, { ok: false, message: '不能关注自己' });
     return;
   }
-  if (!findUserById(targetId)) {
+  if (!(await findUserById(targetId))) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
     return;
   }
 
-  followUser(user.id, targetId);
-  sendJson(res, 200, { ok: true, following: true, followers: socialProfile(targetId).followers });
+  await followUser(user.id, targetId);
+  sendJson(res, 200, { ok: true, following: true, followers: (await socialProfile(targetId)).followers });
 }
 
-/** 取关（按用户 id）。取关本身幂等，没关注过也回 ok；只有目标用户确实不存在才回 404。 */
 async function handleUserUnfollow(req, res, [id]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const targetId = Number(id);
-  if (unfollowUser(user.id, targetId) === 0 && !findUserById(targetId)) {
+  if ((await unfollowUser(user.id, targetId)) === 0 && !(await findUserById(targetId))) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
     return;
   }
 
-  sendJson(res, 200, { ok: true, following: false, followers: socialProfile(targetId).followers });
+  sendJson(res, 200, { ok: true, following: false, followers: (await socialProfile(targetId)).followers });
 }
 
 /** 粉丝数 / 关注数 / 我是否已关注。公开接口。 */
 async function handleUserSocial(req, res, [id]) {
-  const target = findUserById(Number(id));
+  const target = await findUserById(Number(id));
   if (!target) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
     return;
   }
 
-  const viewer = currentUser(req);
-  const profile = socialProfile(target.id);
+  const viewer = await currentUser(req);
+  const profile = await socialProfile(target.id);
   sendJson(res, 200, {
     ok: true,
     followers: profile.followers,
     following: profile.following,
-    isFollowing: isFollowing(viewer?.id ?? null, target.id),
+    isFollowing: await isFollowing(viewer?.id ?? null, target.id),
   });
 }
 
 /** 某用户的粉丝 / 关注列表。?type=followers|following，默认 followers。公开接口。 */
 async function handleFollowList(req, res, [id]) {
-  const target = findUserById(Number(id));
+  const target = await findUserById(Number(id));
   if (!target) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
     return;
@@ -1335,15 +1456,16 @@ async function handleFollowList(req, res, [id]) {
 
   const url = new URL(req.url, 'http://localhost');
   const type = url.searchParams.get('type') === 'following' ? 'following' : 'followers';
-  const viewer = currentUser(req);
-  const users = listFollows(target.id, type, viewer?.id ?? null);
+  const viewer = await currentUser(req);
+  const users = await listFollows(target.id, type, viewer?.id ?? null);
   sendJson(res, 200, { ok: true, type, users });
 }
 
 /** tag key -> 中文标签。 */
 const tagLabelOf = (key) => SITE_TAGS.find((t) => t.key === key)?.label ?? '';
 
-/** 社区发现流：公开上线站点 + 互动数字。?q= 模糊搜索，?tag= 标签筛选，?sort= 排序。 */
+/** 社区发现流：公开上线站点 + 互动数字。?q= 模糊搜索，?tag= 标签筛选，?sort= 排序，
+ *  ?page= 页码（从 1 起）、?size= 每页条数（默认 10，夹在 1..50）。 */
 async function handleDiscover(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const q = String(url.searchParams.get('q') ?? '').slice(0, 50);
@@ -1351,12 +1473,19 @@ async function handleDiscover(req, res) {
   const tag = SITE_TAGS.some((t) => t.key === tagParam) ? tagParam : '';
   const sort = String(url.searchParams.get('sort') ?? '');
 
-  const sites = discoverSites({ q, tag, sort }).map((s) => ({
-    ...s,
-    tagLabel: tagLabelOf(s.tag),
-  }));
+  const size = Math.min(50, Math.max(1, Number(url.searchParams.get('size')) || 10));
+  const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
 
-  sendJson(res, 200, { ok: true, total: sites.length, sites });
+  const { total, sites } = await discoverSites({ q, tag, sort, limit: size, offset: (page - 1) * size });
+
+  sendJson(res, 200, {
+    ok: true,
+    total,
+    page,
+    size,
+    pages: Math.max(1, Math.ceil(total / size)),
+    sites: sites.map((s) => ({ ...s, tagLabel: tagLabelOf(s.tag) })),
+  });
 }
 
 // ---------------------------------------------------------------- 创作者主页（阶段 3）
@@ -1368,18 +1497,18 @@ async function handleUserPage(req, res) {
 
 /** 创作者主页数据：资料 + 社交数字 + TA 的公开站点列表。 */
 async function handleCreatorProfile(req, res, [username]) {
-  const page = creatorPage(username);
+  const page = await creatorPage(username);
   if (!page) {
     sendJson(res, 404, { ok: false, message: '没有这个创作者' });
     return;
   }
 
-  const viewer = currentUser(req);
+  const viewer = await currentUser(req);
   sendJson(res, 200, {
     ok: true,
     user: page.user,
     stats: page.stats,
-    isFollowing: isFollowing(viewer?.id ?? null, page.user.id),
+    isFollowing: await isFollowing(viewer?.id ?? null, page.user.id),
     isOwn: viewer?.id === page.user.id,
     sites: page.sites.map((s) => ({ ...s, tagLabel: tagLabelOf(s.tag) })),
   });
@@ -1392,18 +1521,14 @@ async function handleViewPage(req, res) {
   await sendPage(res, 'view.html');
 }
 
-/** 通知列表页。通知是私人的，和其他「我的」页面一样挡掉未登录访问。 */
+/** 通知列表页。 */
 async function handleNotificationsPage(req, res) {
-  if (!currentUser(req)) {
-    sendRedirect(res, '/login');
-    return;
-  }
   await sendPage(res, 'notifications.html');
 }
 
 /** 我的收藏页。 */
 async function handleFavoritesPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
@@ -1412,7 +1537,7 @@ async function handleFavoritesPage(req, res) {
 
 /** 浏览历史页。 */
 async function handleHistoryPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
@@ -1421,7 +1546,7 @@ async function handleHistoryPage(req, res) {
 
 /** 私信页。 */
 async function handleMessagesPage(req, res) {
-  if (!currentUser(req)) {
+  if (!(await currentUser(req))) {
     sendRedirect(res, '/login');
     return;
   }
@@ -1430,21 +1555,21 @@ async function handleMessagesPage(req, res) {
 
 /** 通知列表：谁赞 / 评 / 藏 / 关注了我。 */
 async function handleNotificationsList(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   sendJson(res, 200, {
     ok: true,
-    items: listNotifications(user.id),
+    items: await listNotifications(user.id),
   });
 }
 
 /** 标记通知已读：把已读时间戳推进到当前时刻。 */
 async function handleNotificationsSeen(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  markNotificationsSeen(user.id);
+  await markNotificationsSeen(user.id);
   sendJson(res, 200, { ok: true });
 }
 
@@ -1455,75 +1580,75 @@ const withTagLabel = (sites) => sites.map((s) => ({ ...s, tagLabel: tagLabelOf(s
 
 /** 我的浏览历史列表。 */
 async function handleHistoryList(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  sendJson(res, 200, { ok: true, sites: withTagLabel(listHistory(user.id)) });
+  sendJson(res, 200, { ok: true, sites: withTagLabel(await listHistory(user.id)) });
 }
 
 /** 记录浏览历史（观看页打开时调用）。 */
 async function handleHistoryRecord(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const body = await readBody(req, res);
   if (!body) return;
 
-  const site = findSiteHeaderByName(String(body.site ?? ''));
+  const site = await findSiteHeaderByName(String(body.site ?? ''));
   if (!site) {
     sendJson(res, 404, { ok: false, message: '没有这个站点' });
     return;
   }
 
-  recordView(user.id, site.id);
+  await recordView(user.id, site.id);
   sendJson(res, 200, { ok: true });
 }
 
 /** 删除单条浏览历史。 */
 async function handleHistoryDelete(req, res, [name]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = findSiteHeaderByName(name);
-  if (site) removeHistory(user.id, site.id);
+  const site = await findSiteHeaderByName(name);
+  if (site) await removeHistory(user.id, site.id);
   sendJson(res, 200, { ok: true });
 }
 
 /** 清空浏览历史。 */
 async function handleHistoryClear(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  clearHistory(user.id);
+  await clearHistory(user.id);
   sendJson(res, 200, { ok: true });
 }
 
 /** 我的收藏列表（平铺，前端按收藏夹分组）。 */
 async function handleFavoritesList(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  sendJson(res, 200, { ok: true, sites: withTagLabel(listFavorites(user.id)) });
+  sendJson(res, 200, { ok: true, sites: withTagLabel(await listFavorites(user.id)) });
 }
 
 /** 用户搜索（搜索下拉的「用户」分区用）。 */
 async function handleUserSearch(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const q = String(url.searchParams.get('q') ?? '').slice(0, 50);
-  sendJson(res, 200, { ok: true, users: searchUsers(q) });
+  sendJson(res, 200, { ok: true, users: await searchUsers(q) });
 }
 
 /** 私信会话列表。 */
 async function handleConversations(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  sendJson(res, 200, { ok: true, conversations: listConversations(user.id) });
+  sendJson(res, 200, { ok: true, conversations: await listConversations(user.id) });
 }
 
 /** 与某人的消息往来，顺手把对方发来的标为已读。 */
 async function handleMessagesWith(req, res, [id]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const otherId = Number(id);
@@ -1531,14 +1656,14 @@ async function handleMessagesWith(req, res, [id]) {
     sendJson(res, 400, { ok: false, message: '不能和自己私信' });
     return;
   }
-  const other = findUserById(otherId);
+  const other = await findUserById(otherId);
   if (!other) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
     return;
   }
 
-  const messages = listMessagesWith(user.id, otherId);
-  markConversationRead(user.id, otherId);
+  const messages = await listMessagesWith(user.id, otherId);
+  await markConversationRead(user.id, otherId);
   sendJson(res, 200, {
     ok: true,
     user: {
@@ -1553,7 +1678,7 @@ async function handleMessagesWith(req, res, [id]) {
 
 /** 发私信。 */
 async function handleMessageSend(req, res, [id]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const otherId = Number(id);
@@ -1561,7 +1686,7 @@ async function handleMessageSend(req, res, [id]) {
     sendJson(res, 400, { ok: false, message: '不能和自己私信' });
     return;
   }
-  const other = findUserById(otherId);
+  const other = await findUserById(otherId);
   if (!other) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
     return;
@@ -1584,7 +1709,7 @@ async function handleMessageSend(req, res, [id]) {
     return;
   }
 
-  const mid = sendMessage(user.id, otherId, content);
+  const mid = await sendMessage(user.id, otherId, content);
   sendJson(res, 201, { ok: true, id: mid, at: new Date().toISOString() });
 }
 
@@ -1598,32 +1723,27 @@ async function handleMcpPost(req, res) {
   await handleMcp(req, res, '');
 }
 
-/** /mcp/<key> 形式的 MCP 入口，密钥从路径段取（优先级低于 Authorization 头和 ?key=）。 */
 async function handleMcpPostWithKey(req, res, [key]) {
   await handleMcp(req, res, key);
 }
 
 /** 密钥管理：走登录态，和 MCP 运行时那条 API key 路径互不相交。 */
 async function handleMcpTokenList(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  sendJson(res, 200, { ok: true, tokens: listMcpTokens(user.id) });
+  sendJson(res, 200, { ok: true, tokens: await listMcpTokens(user.id) });
 }
 
-/**
- * POST /api/mcp/tokens：给自己的账号新建一把 MCP 密钥。
- * 返回的 token 明文只出现这一次，库里只存 sha256，所以必须让用户当场存下。
- */
 async function handleMcpTokenCreate(req, res) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
   const body = await readBody(req, res);
   if (!body) return;
 
   try {
-    const { token, record } = createMcpToken(user.id, body.label);
+    const { token, record } = await createMcpToken(user.id, body.label);
     // 明文只在这里出现一次，库里存的是 sha256
     sendJson(res, 201, { ok: true, token, record });
   } catch (err) {
@@ -1639,12 +1759,11 @@ async function handleMcpTokenCreate(req, res) {
   }
 }
 
-/** POST /api/mcp/tokens/:id/revoke：吊销自己的一把密钥；不存在或不属于自己都回 404。 */
 async function handleMcpTokenRevoke(req, res, [id]) {
-  const user = requireLogin(req, res);
+  const user = await requireLogin(req, res);
   if (!user) return;
 
-  if (revokeMcpToken(user.id, id) === 0) {
+  if (await revokeMcpToken(user.id, id) === 0) {
     sendJson(res, 404, { ok: false, message: '没有这把密钥' });
     return;
   }
@@ -1654,23 +1773,18 @@ async function handleMcpTokenRevoke(req, res, [id]) {
 
 // ---------------------------------------------------------------- 管理接口
 
-/** GET /api/admin/users：全部用户，按 id 倒序最多 200 条（已过 publicUser，不含密码哈希）。 */
 async function handleAdminUsers(req, res) {
-  if (!requireAdmin(req, res)) return;
+  if (!(await requireAdmin(req, res))) return;
 
   sendJson(res, 200, {
     ok: true,
-    total: countUsers(),
-    users: listUsers().map(publicUser),
+    total: await countUsers(),
+    users: (await listUsers()).map(publicUser),
   });
 }
 
-/**
- * POST /api/admin/users/:id/status：封禁 / 解封。只认 body.status === 'banned'，其余值一律按 active 处理。
- * 不能封自己；封禁不删会话记录，但 currentUser 会把非 active 的账号当未登录，效果是立刻掉线。
- */
 async function handleAdminUserStatus(req, res, [id]) {
-  const admin = requireAdmin(req, res);
+  const admin = await requireAdmin(req, res);
   if (!admin) return;
 
   const targetId = Number(id);
@@ -1683,7 +1797,7 @@ async function handleAdminUserStatus(req, res, [id]) {
   if (!body) return;
 
   const status = body.status === 'banned' ? 'banned' : 'active';
-  const changes = setUserStatus(targetId, status);
+  const changes = await setUserStatus(targetId, status);
 
   if (changes === 0) {
     sendJson(res, 404, { ok: false, message: '没有这个用户' });
@@ -1693,29 +1807,24 @@ async function handleAdminUserStatus(req, res, [id]) {
   sendJson(res, 200, { ok: true, id: targetId, status });
 }
 
-/** GET /api/admin/sites：全部站点（含已下线的），管理页列表用。 */
 async function handleAdminSites(req, res) {
-  if (!requireAdmin(req, res)) return;
+  if (!(await requireAdmin(req, res))) return;
 
   sendJson(res, 200, {
     ok: true,
-    total: countSites(),
-    sites: listAllSites(),
+    total: await countSites(),
+    sites: await listAllSites(),
   });
 }
 
-/**
- * POST /api/admin/sites/:id/status：上线 / 下线站点。只认 body.status === 'offline'，其余值按 active 处理。
- * 下线后访问回 451，且不能再被赞 / 评 / 藏。
- */
 async function handleAdminSiteStatus(req, res, [id]) {
-  if (!requireAdmin(req, res)) return;
+  if (!(await requireAdmin(req, res))) return;
 
   const body = await readBody(req, res);
   if (!body) return;
 
   const status = body.status === 'offline' ? 'offline' : 'active';
-  const changes = setSiteStatus(Number(id), status);
+  const changes = await setSiteStatus(Number(id), status);
 
   if (changes === 0) {
     sendJson(res, 404, { ok: false, message: '没有这个页面' });
@@ -1725,11 +1834,10 @@ async function handleAdminSiteStatus(req, res, [id]) {
   sendJson(res, 200, { ok: true, id: Number(id), status });
 }
 
-/** DELETE /api/admin/sites/:id：管理员直接删站（site_files 靠外键级联一起清掉）。 */
 async function handleAdminDeleteSite(req, res, [id]) {
-  if (!requireAdmin(req, res)) return;
+  if (!(await requireAdmin(req, res))) return;
 
-  const changes = deleteSite(Number(id));
+  const changes = await deleteSite(Number(id));
   if (changes === 0) {
     sendJson(res, 404, { ok: false, message: '没有这个页面' });
     return;
@@ -1740,33 +1848,86 @@ async function handleAdminDeleteSite(req, res, [id]) {
 
 // ---------------------------------------------------------------- 用户站点
 
-/**
- * 按扩展名猜 MIME 下发一个站点文件，content 是刚从库里取出来的 Buffer。
- * html / htm / svg / xml 都是能带脚本的文档类型，必须补 SANDBOX_CSP 关进沙箱，漏一个就前功尽弃。
- */
-function serveSiteFile(res, filePath, content) {
+function serveSiteFile(req, res, filePath, content) {
   const ext = path.extname(filePath).toLowerCase();
   // html / svg / xml 都是可以带脚本的文档类型，必须一起关进沙箱
   const isDoc = ext === '.html' || ext === '.htm' || ext === '.svg' || ext === '.xml';
 
-  res.writeHead(200, {
+  const headers = {
     'Content-Type': MIME_TYPES[ext] ?? 'application/octet-stream',
-    'Content-Length': content.length,
     'X-Content-Type-Options': 'nosniff',
-    'Cache-Control': 'no-cache',
+    // HTML 入口保持 no-cache（随时能拿到最新版本，且体积小）；
+    // 其余静态资源（css/js/图片/字体/svg/json）给 1 小时浏览器缓存：
+    // 翻页、回访、多看几个封面时不再重复下载，是"封面慢"的主要缓解手段。
+    'Cache-Control': (ext === '.html' || ext === '.htm') ? 'no-cache' : 'public, max-age=3600',
+    // 宣告支持 Range：视频/音频拖进度条走 206，不会每次整包重下
+    'Accept-Ranges': 'bytes',
+    // 沙箱 CSP 下页面是 opaque origin，字体等子资源请求属跨域，必须带 CORS 头才不报 ERR_FAILED
+    'Access-Control-Allow-Origin': '*',
     ...(isDoc ? { 'Content-Security-Policy': SANDBOX_CSP } : {}),
-  });
-  res.end(content);
+  };
+
+  // 解析单段 Range（bytes=start-end / bytes=start- / bytes=-suffix）。
+  // 多段（含逗号）不支持，按无 Range 处理回整包 200。
+  let start = 0;
+  let end = content.length - 1;
+  const range = req.headers.range;
+  const m = range ? /^bytes=(\d*)-(\d*)$/.exec(range.trim()) : null;
+  if (m && (m[1] !== '' || m[2] !== '')) {
+    if (m[1] === '') {
+      // 尾段：bytes=-N，取末尾 N 字节
+      const suffix = Number(m[2]);
+      start = Math.max(0, content.length - suffix);
+      end = content.length - 1;
+    } else {
+      start = Number(m[1]);
+      end = m[2] === '' ? content.length - 1 : Number(m[2]);
+    }
+
+    if (start >= content.length || start > end) {
+      res.writeHead(416, { 'Content-Range': `bytes */${content.length}` });
+      res.end();
+      return;
+    }
+    if (end >= content.length) end = content.length - 1;
+
+    res.writeHead(206, {
+      ...headers,
+      'Content-Range': `bytes ${start}-${end}/${content.length}`,
+      'Content-Length': end - start + 1,
+    });
+    res.end(content.subarray(start, end + 1));
+    return;
+  }
+
+  sendWithGzip(req, res, 200, headers, content, ext);
 }
 
 /**
- * GET /站名[/站内路径]：用户站点的兜底路由，只有平台自己的路由全没命中时才会走到这里。
- * rest 为空或 '/' 时取 index.html，且只有入口页才 +1 浏览量（站内 css / js 子资源不算）。
- * 站内文件不存在时会退回老的「单 HTML 站点」兜底，但只兜 index.html，子路径一律 404。
- * 站点不存在回 404，非 active 回 451。
+ * 入口页识别：index.html → index.htm → default.html → 路径最浅的 html → 兜底 index.html。
+ * 没带根 index.html 的模板包（如整包源码，首页散在子目录里）靠它落位；
+ * 一次 listSiteFiles 把整站路径拉出来挑，不逐个试读 BLOB。
  */
-function handleSite(req, res, [name, rest = '']) {
-  const site = findSiteHeaderByName(name);
+async function pickEntryPath(siteId) {
+  const files = await listSiteFiles(siteId);
+  const names = new Set(files.map((f) => f.path));
+  for (const c of ['index.html', 'index.htm', 'default.html']) {
+    if (names.has(c)) return c;
+  }
+
+  let best = null;
+  for (const f of files) {
+    if (!/\.html?$/i.test(f.path)) continue;
+    const depth = f.path.split('/').length;
+    if (!best || depth < best.depth || (depth === best.depth && f.path < best.path)) {
+      best = { path: f.path, depth };
+    }
+  }
+  return best ? best.path : 'index.html';
+}
+
+async function handleSite(req, res, [name, rest = '']) {
+  const site = await findSiteHeaderByName(name);
 
   if (!site) {
     sendHtml(res, 404, messagePage('404', `没有找到 "${name}" 这个页面。`));
@@ -1777,23 +1938,30 @@ function handleSite(req, res, [name, rest = '']) {
     return;
   }
 
-  // /站点名 和 /站点名/ 都算入口页；其余去掉开头的 / 得到站点内路径
-  const filePath = !rest || rest === '/' ? 'index.html' : rest.slice(1);
+  // /站点名 和 /站点名/ 都算入口页（走 pickEntryPath 识别）；其余去掉开头的 / 得到站点内路径
+  const isRoot = !rest || rest === '/';
+  const filePath = isRoot ? await pickEntryPath(site.id) : rest.slice(1);
 
-  const content = getSiteFile(site.id, filePath);
+  // 广场迷你封面专用（?mpcover=1）：给入口 HTML 注入滚动代理脚本，
+  // 父页面才能 postMessage 驱动内部下翻；/view/站名 等直接访问不带参，不受影响
+  const forCover =
+    isRoot && new URL(req.url, 'http://internal').searchParams.get('mpcover') === '1';
+
+  const content = await getSiteFile(site.id, filePath);
   if (content) {
     // 浏览量简单版：只有入口页 +1，站内 css / js 等子资源不算
-    if (filePath === 'index.html') incrementViews(site.id);
-    serveSiteFile(res, filePath, content);
+    if (isRoot) await incrementViews(site.id);
+    const out = forCover && /\.html?$/i.test(filePath) ? injectPeekProxy(content) : content;
+    serveSiteFile(req, res, filePath, out);
     return;
   }
 
   // 老的「单 HTML 文件」站点：内容存在 sites.html 里，只兜入口页
-  if (filePath === 'index.html') {
-    const legacy = findSiteByName(name);
+  if (isRoot) {
+    const legacy = await findSiteByName(name);
     if (legacy && legacy.html && legacy.html.trim() !== '') {
-      incrementViews(site.id);
-      sendHtml(res, 200, legacy.html, {
+      await incrementViews(site.id);
+      sendHtml(res, 200, forCover ? injectPeekProxy(legacy.html) : legacy.html, {
         'Content-Security-Policy': SANDBOX_CSP,
         'Cache-Control': 'no-cache',
       });
@@ -1849,6 +2017,7 @@ const ROUTES = [
   ['DELETE', /^\/api\/sites\/([a-z0-9-]+)$/, handleSiteDelete],
   ['GET', /^\/api\/sites\/([a-z0-9-]+)\/files$/, handleSiteFilesList],
   ['POST', /^\/api\/sites\/([a-z0-9-]+)\/files$/, handleSiteFileUpload],
+  ['POST', /^\/api\/sites\/([a-z0-9-]+)\/zip$/, handleSiteZipUpload],
   ['GET', /^\/api\/sites\/([a-z0-9-]+)\/files\/content$/, handleSiteFileContent],
   ['DELETE', /^\/api\/sites\/([a-z0-9-]+)\/files$/, handleSiteFileDelete],
 
@@ -1891,16 +2060,10 @@ const ROUTES = [
   ['POST', /^\/api\/mcp\/tokens\/(\d+)\/revoke$/, handleMcpTokenRevoke],
 ];
 
-/**
- * 总入口：先按 ROUTES 逐条匹配（method + 正则），命中就把正则捕获组数组当作第三个参数交给 handler。
- * 全都没命中才依次尝试：/mcp 非 POST 的 405 → 用户站点兜底（只 GET）→ 404。
- * favicon.ico 在最前面短路成 204，免得掉进用户站点那条路变成误导性的 404。
- * 这里不兜异常，异常统一由 createServer 的回调捕获。
- */
 async function handleRequest(req, res) {
   const { pathname } = new URL(req.url, 'http://internal');
 
-  if (req.method === 'GET' && pathname === '/favicon.ico') {
+  if ((req.method === 'GET' || req.method === 'HEAD') && pathname === '/favicon.ico') {
     res.writeHead(204);
     res.end();
     return;
@@ -1929,10 +2092,11 @@ async function handleRequest(req, res) {
 
   // 平台自己的路由都没命中，最后才考虑用户站点
   // /站点名 或 /站点名/任意/相对/路径.css
-  if (req.method === 'GET') {
+  // HEAD 也放行：探测站点/资源是否存在时不用拿整包；响应体由 Node 按 HEAD 自动省略
+  if (req.method === 'GET' || req.method === 'HEAD') {
     const m = pathname.match(/^\/([a-z0-9-]+)(\/.*)?$/);
     if (m) {
-      handleSite(req, res, [m[1], m[2] ?? '']);
+      await handleSite(req, res, [m[1], m[2] ?? '']);
       return;
     }
   }
@@ -1942,7 +2106,6 @@ async function handleRequest(req, res) {
 
 // ---------------------------------------------------------------- 通用页面
 
-/** HTML 转义（& < > " '），只用在 messagePage 拼提示页时。 */
 function escapeHtml(text) {
   return String(text).replace(
     /[&<>"']/g,
@@ -1950,7 +2113,6 @@ function escapeHtml(text) {
   );
 }
 
-/** 拼一张最简单的提示页（404 / 403 / 已下线等场景直接 sendHtml 出去）。两个参数都会被转义，不要再转一遍。 */
 function messagePage(title, message) {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1983,10 +2145,6 @@ const server = http.createServer((req, res) => {
   });
 });
 
-/**
- * SIGINT / SIGTERM 的优雅退出：停收新连接 → 关数据库 → 退出码 0。
- * 5 秒还没关干净就强退 1；这个兜底定时器 unref 过，不会挡正常退出。
- */
 function shutdown(signal) {
   console.log(`\n收到 ${signal}，正在关闭…`);
   server.close(() => {
@@ -1999,16 +2157,17 @@ function shutdown(signal) {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-server.listen(PORT, HOST, () => {
-  const removed = deleteExpiredSessions();
-  if (removed > 0) console.log(`清理了 ${removed} 条过期会话`);
+server.listen(PORT, HOST, async () => {
+  try {
+    const removed = await deleteExpiredSessions();
+    if (removed > 0) console.log(`清理了 ${removed} 条过期会话`);
 
-  const created = ensureAdminAccount();
+    const created = await ensureAdminAccount();
 
-  console.log(`\nMinePage 跑起来了 → http://${HOST}:${PORT}`);
+    console.log(`\nMinePage 跑起来了 → http://${HOST}:${PORT}`);
 
-  if (created) {
-    console.log(`
+    if (created) {
+      console.log(`
 ┌──────────────────────────────────────────────┐
    已创建默认管理员账号（只在数据库为空时创建一次）
 
@@ -2019,5 +2178,10 @@ server.listen(PORT, HOST, () => {
    ! 这是开发用的默认密码，上线前必须改掉。
    登录地址 http://${HOST}:${PORT}/login
 └──────────────────────────────────────────────┘`);
+    }
+  } catch (err) {
+    console.error(`\n启动失败：数据库连不上或初始化出错（${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DATABASE}）`);
+    console.error(err?.message ?? err);
+    process.exit(1);
   }
 });

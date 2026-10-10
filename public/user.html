@@ -76,42 +76,18 @@ let favFolder = 0;    // 收藏夹下标
 let following = false;
 let isOwn = false;
 
-// TODO 后端对接：替换为 fetch('/api/u/:name/profile')
+// TODO 后端对接：替换为 fetch('/api/u/:name/profile')（接口已有，前端尚未接线）
 /**
- * 拼出这个创作者的公开资料：{ user, sites, stats }。
- * 作品为空、且用户名也不是当前登录的演示身份（MP.ME）时返回 null，调用方据此显示「没有这个创作者」。
- * 数据源是 MP.SITES 这份演示数据（按 s.author.username 过滤），**不发任何请求**；
- * 粉丝数是拿作品点赞数凑的（1280 + 点赞 % 900），关注数写死 86，简介也是写死的示例文案。
+ * 拉取这个创作者的公开资料：{ user, sites, stats }。
+ * 演示数据已删除、接口尚未接线，这里恒返回 null，页面会显示「没有这个创作者」的空态；
+ * 接线时返回 null 的条件改成「接口 404」，isOwn 也要改由返回的 profile 数据判断。
  */
 function loadProfile() {
-  const sites = MP.SITES.filter((s) => s.author.username === USERNAME);
-  const mine = USERNAME === MP.ME.username;
-
-  if (!sites.length && !mine) return null;
-
-  const name = sites.length ? sites[0].author.name : MP.ME.name;
-  /** 把这批站点的某个数字字段加起来（用于统计条上的总浏览 / 总赞 / 总收藏）。 */
-  const sum = (k) => sites.reduce((n, s) => n + (s[k] || 0), 0);
-  return {
-    user: { name, username: USERNAME, bio: mine ? MP.ME.bio : '喜欢把想法做成能点开的网页。' },
-    sites,
-    stats: {
-      followers: 1280 + sum('likes') % 900,
-      following: 86,
-      sites: sites.length,
-      views: sum('views'),
-      likes: sum('likes'),
-      favorites: sum('favorites'),
-    },
-  };
+  return null;
 }
 
-// 收藏夹（演示数据）
-const FAV_FOLDERS = [
-  { name: '默认收藏夹', sites: MP.topSites(4) },
-  { name: '设计灵感', sites: MP.SITES.filter((s) => s.tag === 'portfolio' || s.tag === 'blog') },
-  { name: '好用的工具站', sites: MP.SITES.filter((s) => s.tag === 'opensource') },
-];
+// 收藏夹（接口尚未接线；收藏夹分组后端暂无模型，见 favorites.html 顶部 TODO）
+const FAV_FOLDERS = [];
 
 // ---------------------------------------------------------------- 头部
 
@@ -122,7 +98,8 @@ const FAV_FOLDERS = [
  */
 function renderProfile() {
   const { user, stats } = profile;
-  isOwn = USERNAME === MP.ME.username;
+  // isOwn 尚无法判断（未接 /api/me 与 profile），接真实接口后由 profile 数据决定；先按「看别人」渲染
+  isOwn = false;
 
   document.title = user.name + ' · MinePage';
   avatarBox.textContent = user.name.charAt(0).toUpperCase();
@@ -224,18 +201,21 @@ function renderWorks() {
 
 /**
  * 渲染「收藏」页：收藏夹 chips + 当前收藏夹里的站点卡片。
- * 数据源是下面写死的 FAV_FOLDERS 演示数据（内容来自 MP.topSites(4) 和按 tag 从 MP.SITES 里
- * 筛出来的站点），**不发请求**，这一块目前也没有 TODO 标记。
- * favFolder 存的是下标，点 chips 先改它再整体重绘；FAV_FOLDERS 至少要有一项，否则取 .sites 会抛错。
+ * FAV_FOLDERS 尚未接线（恒为空数组），显示空态；接线后 favFolder 存下标，点 chips 改它再整体重绘。
  */
 function renderFavs() {
   favChipsBox.textContent = '';
+  const cur = FAV_FOLDERS[favFolder];
+  if (!cur) {
+    favCardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">还没有收藏的页面</div>';
+    return;
+  }
   FAV_FOLDERS.forEach((f, i) => {
     favChipsBox.appendChild(chip(f.name + ' ' + f.sites.length, favFolder === i, () => {
       favFolder = i; renderFavs();
     }));
   });
-  MP.renderCards(favCardsBox, FAV_FOLDERS[favFolder].sites);
+  MP.renderCards(favCardsBox, cur.sites);
 }
 
 // ---------------------------------------------------------------- Tab 切换

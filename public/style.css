@@ -240,6 +240,35 @@ section { margin-top: 32px; }
   margin-top: 16px;
 }
 
+/* 翻页器：卡片网格下方的页码条（每页 10 条，467 站共 47 页） */
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 18px;
+}
+.pager .pg {
+  min-width: 34px;
+  height: 34px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.pager .pg:hover { border-color: var(--pink); color: var(--pink); }
+.pager .pg.active { background: var(--pink); border-color: var(--pink); color: #fff; cursor: default; }
+.pager .pg.disabled { color: var(--muted); cursor: default; opacity: .6; }
+.pager .pg.disabled:hover { border-color: var(--border); color: var(--muted); }
+.pager .pg.dots { border-color: transparent; background: transparent; cursor: default; }
+
 .vcard {
   position: relative;
   display: flex;
@@ -261,6 +290,14 @@ section { margin-top: 32px; }
   justify-content: center;
   overflow: hidden;
 }
+/* 封面真图层（自定义上传 / 首页首图）：盖住渐变底，加载失败由 app.js 移除回落 */
+.vcover .vimg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
 .vcover .coverChar {
   font-size: 44px;
   font-weight: 700;
@@ -268,8 +305,10 @@ section { margin-top: 32px; }
   text-shadow: 0 2px 10px rgba(0, 0, 0, .18);
   user-select: none;
 }
+/* 角标 z-index 高于预览 iframe（.peek 是 5），悬停看预览时角标仍然可见 */
 .vcover .vtag {
   position: absolute;
+  z-index: 6;
   top: 8px;
   left: 8px;
   padding: 1px 8px;
@@ -281,6 +320,7 @@ section { margin-top: 32px; }
 }
 .vcover .vviews {
   position: absolute;
+  z-index: 6;
   left: 10px;
   bottom: 8px;
   display: flex;
@@ -292,6 +332,7 @@ section { margin-top: 32px; }
 }
 .vcover .vkind {
   position: absolute;
+  z-index: 6;
   right: 10px;
   bottom: 8px;
   color: #fff;
@@ -334,15 +375,44 @@ section { margin-top: 32px; }
 .vauthor a { color: var(--muted2); }
 .vauthor a:hover { color: var(--pink); }
 
-/* 悬停实时预览 iframe（盖住封面区） */
-.peek {
+/* 悬停实时预览 iframe：挂在 .vcover 里，宽高与缩放由 app.js 内联设置；
+   overflow:hidden 的 .vcover 负责把缩放后超出的部分裁掉 */
+.peek,
+.mcover {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
   z-index: 5;
-  width: 100%;
-  height: 100%;
   border: 0;
   background: #fff;
+  pointer-events: none;
+  will-change: transform;
+}
+
+/* 封面淡入：iframe 载入完成前先露 .vcover 的渐变占位，稍后淡入真站画面。
+   底色透明——真站还没绘制出来的那一下，透出的是下层渐变占位，不会白块闪一下。 */
+.mcover { background: transparent; opacity: 0; transition: opacity .35s ease; }
+.mcover.loaded { opacity: 1; }
+
+/* 编辑页（site.html）的封面预览小图 */
+.coverPreview {
+  width: 160px;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: #f2f2f4;
+  flex: none;
+}
+
+/* 视觉隐藏的文件选择框：不可见但保留键盘可达与可定位能力 */
+.srFile {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
 }
 
 /* 卡片快捷操作（赞/藏） */

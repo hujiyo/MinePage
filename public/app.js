@@ -1,9 +1,9 @@
 /* ============================================================
    MinePage 前端公共脚本（app.js）
-   职责：图标库 / 统一顶栏 / 搜索下拉 / 卡片渲染 / 演示数据
+   职责：图标库 / 统一顶栏 / 搜索下拉 / 卡片渲染
    ------------------------------------------------------------
-   当前为「纯前端阶段」：所有用户态与列表数据均为本地演示数据，
-   每处需要后端的地方都留了 TODO，后续接 /api/* 时逐个替换即可。
+   页面数据一律走 /api/* 真实接口；演示数据已全部移除，
+   尚未接线的页面以空态展示（各页顶部有 TODO 标记）。
    ============================================================ */
 
 (function () {
@@ -118,24 +118,6 @@
   }
   MP.grad = grad;
 
-  /* ----------------------------------------------------------
-     3. 演示数据（TODO 后端对接：全部替换为 /api/* 返回）
-     ---------------------------------------------------------- */
-
-  // 演示数据占位对象：全文没有任何代码读它，真正被页面用的是下面的 MP.ME / MP.SITES / MP.HOT / MP.BANNERS。
-  const DEMO = { enabled: true };
-
-  // TODO 后端对接：替换为 fetch('/api/me')
-  MP.ME = {
-    name: '演示用户',
-    username: 'demo',
-    email: 'demo@minepage.dev',
-    isAdmin: true,
-    bio: '在做一个个人网页托管社区，随手收集好看的页面。',
-    unread: 3,      // 未读消息
-    dynamic: 5,     // 未读动态
-  };
-
   // 标签词表。
   // '' 和 'hot' 是筛选专用的伪标签（服务端不认，也不会被提交）；
   // 其余 key 必须与服务端 lib/sites.js 的 SITE_TAGS 完全一致，
@@ -165,87 +147,6 @@
     return t ? t.label : '';
   }
   MP.tagLabel = tagLabel;
-
-  // TODO 后端对接：替换为 fetch('/api/discover')
-  MP.SITES = [
-    { name: 'lin-resume', title: '林同学 · 前端工程师求职简历', tag: 'resume',
-      description: '一份用单页 HTML 写的简历，含项目经历、技能雷达和作品链接。',
-      author: { name: '林同学', username: 'lin' }, views: 12800, likes: 342, favorites: 128, comments: 26, pages: 1 },
-    { name: 'aurora-portfolio', title: 'Aurora 视觉设计作品集', tag: 'portfolio',
-      description: 'Motion 与品牌视觉合集，深色留白排版，滚动动效。',
-      author: { name: 'Aurora', username: 'aurora' }, views: 45200, likes: 1890, favorites: 763, comments: 88, pages: 6 },
-    { name: 'linkhub', title: '我的社交聚合页 · LinkHub', tag: 'social',
-      description: '把微博、GitHub、播客和邮箱收在一页，支持一键复制。',
-      author: { name: '演示用户', username: 'demo' }, views: 7300, likes: 156, favorites: 92, comments: 11, pages: 1 },
-    { name: 'weekly-blog', title: '前端周刊笔记 · 第 42 期', tag: 'blog',
-      description: '每周整理值得读的前端文章，本期聊渲染性能与可访问性。',
-      author: { name: '演示用户', username: 'demo' }, views: 25600, likes: 920, favorites: 431, comments: 54, pages: 12 },
-    { name: 'summer-fest', title: '夏日音乐节 · 活动落地页', tag: 'event',
-      description: '演出阵容、购票入口与场地地图，含倒计时与票务进度条。',
-      author: { name: 'Momo', username: 'momo' }, views: 31500, likes: 1120, favorites: 508, comments: 132, pages: 4 },
-    { name: 'mini-vue', title: 'mini-vue · 200 行读懂响应式', tag: 'opensource',
-      description: '手写一个迷你 Vue，附可交互的依赖收集演示页面。',
-      author: { name: 'Byte', username: 'byte' }, views: 68400, likes: 3210, favorites: 1780, comments: 240, pages: 9 },
-    { name: 'coffee-shop', title: '街角咖啡 · 门店与菜单', tag: 'other',
-      description: '小店官网，菜单、营业时间与外卖入口，移动端优先。',
-      author: { name: '豆子', username: 'douzi' }, views: 9400, likes: 210, favorites: 76, comments: 18, pages: 3 },
-    { name: 'ui-notes', title: '设计系统笔记 · 色彩与间距', tag: 'blog',
-      description: '把自己的设计 token 整理成可视化的对比页，方便团队对齐。',
-      author: { name: '演示用户', username: 'demo' }, views: 18200, likes: 640, favorites: 355, comments: 41, pages: 5 },
-    { name: 'grad-apply', title: '保研材料汇总页（简历+项目+成绩）', tag: 'resume',
-      description: '把申请材料做成一页索引，老师扫码即可查看附件。',
-      author: { name: '演示用户', username: 'demo' }, views: 6100, likes: 98, favorites: 44, comments: 7, pages: 1 },
-    { name: 'pixel-game', title: '像素小游戏合集 · 摸鱼专用', tag: 'other',
-      description: '三个纯前端小游戏，键盘操作，支持本地最高分记录。',
-      author: { name: 'Ken', username: 'ken' }, views: 52300, likes: 2450, favorites: 1330, comments: 176, pages: 8 },
-    { name: 'photo-wall', title: '毕业照云相册墙', tag: 'social',
-      description: '全班照片瀑布流，支持按人筛选与一键下载原图。',
-      author: { name: '小满', username: 'man' }, views: 14700, likes: 512, favorites: 268, comments: 63, pages: 2 },
-    { name: 'opensource-landing', title: '开源项目落地页 · Pager', tag: 'opensource',
-      description: '项目介绍、Star 趋势图与快速上手代码示例。',
-      author: { name: 'Pager', username: 'pager' }, views: 39800, likes: 1560, favorites: 890, comments: 102, pages: 7 },
-  ];
-
-  // TODO 后端对接：替换为 fetch('/api/hot')
-  MP.HOT = [
-    { word: '前端简历模板', tag: '热', val: '128.6万' },
-    { word: '个人作品集怎么做', val: '96.3万' },
-    { word: '暑期活动落地页', tag: '新', val: '74.1万' },
-    { word: '响应式布局教程', val: '58.9万' },
-    { word: '毕设网页模板', val: '47.2万' },
-    { word: '开源项目主页', val: '36.5万' },
-    { word: '社交聚合页', val: '28.7万' },
-    { word: '动效设计参考', val: '21.4万' },
-  ];
-
-  // TODO 后端对接：轮播位来自运营配置
-  MP.BANNERS = [
-    { title: '夏日作品集征集 · 晒出你的个人主页', sub: '投稿即有机会登上首页推荐', site: 'aurora-portfolio',
-      img: 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=soft%20gradient%20background%20in%20summer%20blue%20and%20pink%2C%20abstract%20smooth%20waves%2C%20minimal%20modern%20poster%2C%20no%20text%2C%20no%20letters%2C%20no%20words&image_size=landscape_16_9' },
-    { title: 'MinePage 创作激励计划上线', sub: '优质页面获得流量扶持与徽章', site: 'mini-vue',
-      img: 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=pink%20to%20white%20gradient%20background%20with%20soft%20geometric%20shapes%2C%20minimal%20creative%20technology%20poster%2C%20no%20text%2C%20no%20letters%2C%20no%20words&image_size=landscape_16_9' },
-    { title: '本周热门 · 开源项目主页精选', sub: '看看大家都在 Star 什么', site: 'opensource-landing',
-      img: 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=deep%20blue%20night%20sky%20with%20tiny%20glowing%20stars%20and%20soft%20light%20streaks%2C%20minimal%20tech%20poster%2C%20no%20text%2C%20no%20letters%2C%20no%20words&image_size=landscape_16_9' },
-  ];
-
-  // TODO 后端对接：真要用时替换为 fetch('/api/discover?tag=…&q=…')；当前没有页面调用它，发现页走的是真实接口。
-  /** 按标签/关键词过滤演示数据。 */
-  MP.querySites = function (opt) {
-    const q = (opt && opt.q || '').trim().toLowerCase();
-    const tag = (opt && opt.tag) || '';
-    return MP.SITES.filter((s) => {
-      if (tag === 'hot' ? (s.views < 20000) : (tag && s.tag !== tag)) return false;
-      if (!q) return true;
-      return (s.title + s.description + s.name + s.author.name).toLowerCase().includes(q);
-    });
-  };
-
-  // n 省略或传 0 都会落到默认的 8 条（内部是 n || 8）；返回新数组，排序不会动到 MP.SITES。
-  // 数据源是写死的演示数据（见 MP.SITES 上面的 TODO），接口接上后要换成 /api/discover?sort=views。
-  /** 热门榜单（按浏览排序）。 */
-  MP.topSites = function (n) {
-    return MP.SITES.slice().sort((a, b) => b.views - a.views).slice(0, n || 8);
-  };
 
   /* ----------------------------------------------------------
      4. 搜索历史（localStorage）
@@ -369,7 +270,7 @@
 
   /**
    * 拼出顶栏的 HTML 字符串（只返回字符串，不碰 DOM）。
-   * 这里刻意按「未登录」渲染用户区和未读红点：真实会话是异步来的，先渲染演示用户会闪一下错账号，
+   * 这里刻意按「未登录」渲染用户区和未读红点：真实会话是异步来的，先渲染假账号会闪一下错账号，
    * 拿到会话后由 MP.topbar 用 innerHTML 把那两处补上。
    * active 与 NAVS 的 key 对应，决定哪个导航项加 .on；搜索历史与热搜此刻还是空的，挂载后再填。
    */
@@ -406,7 +307,7 @@
    *   collapse=true 时在顶栏左下角加「收起/展开」箭头，并在收起后于屏幕顶部留一条触发带
    *
    * 副作用不少：改 DOM（插到 body 最前）、往 document 上挂 click 监听（挂上就不摘）、
-   * 读 MP.searchHist / MP.HOT 填搜索面板、发 /api/me 请求，点「退出登录」还会
+   * 读 MP.searchHist 填搜索面板、发 /api/me 请求，点「退出登录」还会
    * POST /api/auth/logout 再跳 /login。
    * 顺序是先本地渲染未登录态、再用会话打补丁，所以登录用户会看到极短的一下「登录 / 注册」，属预期。
    * 返回注入的 header 元素；一个页面只该调一次，重复调用会插出第二个顶栏（连带两套全局监听）。
@@ -447,17 +348,7 @@
       });
     }
 
-    hotBox.textContent = '';
-    MP.HOT.forEach((h, i) => {
-      const row = document.createElement('div');
-      row.className = 'hRow';
-      row.innerHTML = '<span class="hNo' + (i < 3 ? ' top' + (i + 1) : '') + '">' + (i + 1) + '</span>'
-        + '<span class="hWord">' + esc(h.word)
-        + (h.tag ? '<span class="hTag">' + esc(h.tag) + '</span>' : '') + '</span>'
-        + '<span class="hVal">' + esc(h.val) + '</span>';
-      row.addEventListener('mousedown', (e) => { e.preventDefault(); MP.goSearch(h.word); });
-      hotBox.appendChild(row);
-    });
+    hotBox.innerHTML = '<span class="none">暂无热搜</span>';
 
     renderHist();
     header.querySelector('#tsClear').addEventListener('mousedown', (e) => {
@@ -574,7 +465,7 @@
    * @param {{peek?:boolean}} [opt]
    *
    * 返回的是 DOM 节点（不是 HTML 字符串），由调用方自己 append。
-   * 字段兼容两套来源：页数认接口给的 fileCount，演示数据只有 pages；标签中文名优先 site.tagLabel，
+   * 字段兼容：页数优先接口给的 fileCount，缺了退到 pages，再退 1；标签中文名优先 site.tagLabel，
    * 没有才用 tagLabel(site.tag) 去查词表。
    * opt.peek=false 时这张卡不挂悬停预览（卡片多的列表页更省）。
    * 右下角赞 / 藏两个按钮目前只切自己的 .on 样式，不发请求（见函数里的 TODO）。
@@ -587,12 +478,26 @@
     const cover = document.createElement('div');
     cover.className = 'vcover';
     cover.style.background = grad(site);
-    // 页数：接口给的是 fileCount/kind，演示数据给的是 pages，两种都认
+    // 页数：优先接口的 fileCount/kind，兼容字段 pages，都没有按单页算
     const pages = site.fileCount != null ? site.fileCount : (site.pages != null ? site.pages : 1);
     cover.innerHTML = '<span class="vtag">' + esc(site.tagLabel || tagLabel(site.tag) || '页面') + '</span>'
       + '<span class="coverChar">' + esc(initial(site)) + '</span>'
       + '<span class="vviews">' + icon('view') + fmtNum(site.views) + '</span>'
       + '<span class="vkind">' + (pages > 1 ? pages + ' 页' : '单页') + '</span>';
+    // 封面两级：自定义上传图 > 迷你 iframe（站点顶部实时画面，即悬停下翻的起始画面）。
+    // img/iframe 插在最前（coverChar 是 static 会被盖住，角标是 absolute 自然浮在上面）；
+    // 自定义图加载失败就移除 img，露出渐变底完成回落。
+    if (site.hasCover) {
+      const img = document.createElement('img');
+      img.className = 'vimg';
+      img.alt = '';
+      img.referrerPolicy = 'no-referrer';
+      img.addEventListener('error', () => img.remove());
+      img.src = '/api/sites/' + encodeURIComponent(site.name) + '/cover';
+      cover.insertBefore(img, cover.firstChild);
+    } else {
+      cover.appendChild(buildLiveCover(site, cover));
+    }
     // ⚠️ 已知缺陷：封面是普通 div，**点它没有任何反应**。
     // 整张卡片里只有下面的 `.vtitle` 是可点的链接，用户点封面/空白处会以为卡片坏了。
     // 修法（本节未做）：把封面包进 <a href="/view/:名字">，或给卡片挂一个
@@ -667,40 +572,189 @@
     return card;
   };
 
+  // 迷你封面 / 悬停预览共用的虚拟视口与速度
+  const COVER_VW = 1280; // 虚拟视口宽：桌面布局能正常展开
+  // 虚拟视口高必须等于真实首屏高度（720）：iframe 里 100vh 跟着 iframe 高度走，
+  // 视口拉太高会把全屏 hero 撑出封面可见区，封面就只剩一片背景色
+  const COVER_VH = 720;
+  const COVER_SPEED = 45; // 下翻速度（屏幕像素/秒）：太快像刷屏，太慢没进展
+
+  // 封面并发闸门：封面是整站 iframe，同时开太多会把带宽切碎、每张都慢。
+  // 同一时刻最多加载 COVER_MAX 张，其余按可见顺序排队；用户最先看到的卡片
+  // 因此能独占带宽、最快出画面。加载完或超时即释放闸门给下一张。
+  const COVER_MAX = 3;
+  const COVER_DWELL = 400;    // 进入视口后停留这么久才排队（快速滚过的卡片不浪费流量）
+  const COVER_TIMEOUT = 6000; // 超过这么久还没 load 就放行下一张，避免个别慢站卡住整条队列
+  let coverBusy = 0;
+  const coverQueue = []; // 待加载的 arm 函数，FIFO ≈ 页面从上到下的可见顺序
+
+  function pumpCoverQueue() {
+    while (coverBusy < COVER_MAX && coverQueue.length) {
+      coverQueue.shift()();
+    }
+  }
+
   /**
-   * 悬停实时预览：进入封面 300ms 后挂 iframe，离开即销毁。
-   * 前端阶段站点 slug 并不存在，故用 srcdoc 生成一张预览占位。
-   * TODO 后端对接：把 iframe.src 换成 '/' + site.name + '/'
+   * 迷你 iframe 封面：封面区直接显示站点顶部画面（= 悬停下翻的起始画面）。
+   * 懒加载 + 停留节流 + 并发闸门：滚进视口且停留一小会儿，才排进队列去载入真站；
+   * 载入完成淡入（.mcover.loaded），超时则保留渐变占位、放行下一张。
+   */
+  function buildLiveCover(site, cover) {
+    const frame = document.createElement('iframe');
+    frame.className = 'mcover';
+    frame.referrerPolicy = 'no-referrer';
+    // 只给脚本不给同源：站点 JS 照常跑，但摸不到父页面和 cookie
+    frame.sandbox = 'allow-scripts';
+    frame.setAttribute('scrolling', 'no');
+    let armed = false;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      coverBusy = Math.max(0, coverBusy - 1);
+      pumpCoverQueue();
+    };
+    /** 算尺寸并载入真站（并发队列的入口，悬停兜底也会调它）。 */
+    const arm = () => {
+      if (armed) return;
+      const scale = cover.clientWidth / COVER_VW;
+      if (!scale) return; // 没布局好就先不占用闸门（悬停时会再试）
+      armed = true;
+      coverBusy += 1; // 占用一个并发槽，release 时归还
+      frame.style.width = COVER_VW + 'px';
+      frame.style.height = COVER_VH + 'px';
+      frame.style.transformOrigin = '0 0';
+      frame.style.transform = 'scale(' + scale + ')';
+      // load 标志必须在设 src 之后挂：iframe 一创建就有 about:blank 的 load，不能算数
+      const reveal = () => frame.classList.add('loaded'); // 淡入（见 style.css 的 .mcover）
+      frame.addEventListener('load', () => {
+        frame.dataset.loaded = '1';
+        reveal();
+        release();
+      }, { once: true });
+      // ?mpcover=1：服务端给入口 HTML 注入滚动代理，悬停时 postMessage 驱动内部下翻
+      frame.src = '/' + encodeURIComponent(site.name) + '/?mpcover=1';
+      // 首屏通常很快就画出来了，不必等整站（含首屏外的图片/视频）全部下完才露脸：
+      // 到点先显示，此时 iframe 底透明，没画出来的部分透出下层渐变占位，不会是白块。
+      setTimeout(reveal, 900);
+      setTimeout(release, COVER_TIMEOUT);
+    };
+    frame.arm = arm; // attachPeek 悬停兜底用
+
+    // 懒加载 + 停留节流：进入视口起算 COVER_DWELL，期间滚出去就作废
+    let dwell = null;
+    const enqueue = () => { coverQueue.push(arm); pumpCoverQueue(); };
+    if ('IntersectionObserver' in window) {
+      const io = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            if (!dwell) dwell = setTimeout(() => { io.disconnect(); enqueue(); }, COVER_DWELL);
+          } else if (dwell) {
+            clearTimeout(dwell);
+            dwell = null;
+          }
+        }
+      }, { threshold: 0.01 });
+      io.observe(cover);
+    } else {
+      setTimeout(enqueue, COVER_DWELL);
+    }
+    return frame;
+  }
+
+  /**
+   * 悬停实时预览：进入封面 300ms 后页面匀速自动向下翻（循环）。
+   *
+   * 没有自定义封面的卡片，封面本身就是 .mcover（站点顶部实时画面）——
+   * 悬停时同一个 iframe 原地开始翻，移开后停在顶部继续当封面，所见即所得；
+   * 自定义图封面的卡片没有 .mcover，才临时新建 .peek，移开即摘掉。
+   *
+   * 技术要点：沙箱 iframe（不给 allow-same-origin）里父页面碰不到它的内部滚动，
+   * 所以服务端给带 ?mpcover=1 的入口页注入了一个滚动代理脚本，悬停时父页面
+   * postMessage 让文档自己往下滚——等价于真实浏览器窗口下翻，100vh 全屏
+   * 首屏的站点也能正常预览（离开时 mpPeekStop 回顶，封面继续显示首屏）。
+   * iframe 挂在封面 div 里（.vcover 自带 overflow:hidden），缩放多出的部分被裁掉，
+   * 不会盖住卡片的标题区；pointer-events:none 保证悬停事件照常触发。
    */
   function attachPeek(card, site, cover) {
-    let iframe = null;
+    const target = cover || card;
+    let frame = null;    // 本次悬停用的 iframe（复用 .mcover 或新建 .peek）
+    let created = false; // 是否本次新建的（移开时要摘掉）
     let timer = null;
-    /** 悬停 300ms 后才挂 iframe：防止鼠标扫过卡片时一路建预览。 */
+    let kick = null;
+    let started = false;
+    /** 页面加载完（或 1.5s 兜底）才开始下翻：白屏翻动没有意义。 */
+    const start = () => {
+      if (started || !frame) return;
+      const scale = target.clientWidth / COVER_VW;
+      if (!scale) return;
+      started = true;
+      // 下翻 = 驱动 iframe 内部文档滚动；速度换算成虚拟像素，滚动手感与缩放无关
+      try {
+        frame.contentWindow.postMessage({ mpPeekSpeed: Math.round(COVER_SPEED / scale) }, '*');
+      } catch (e) { /* iframe 尚未就绪，交给 mpReady 握手补发 */ }
+    };
+    /** 悬停 300ms 后才开始：防止鼠标扫过卡片时一路触发。 */
     const open = () => {
       timer = setTimeout(() => {
-        iframe = document.createElement('iframe');
-        iframe.className = 'peek';
-        iframe.loading = 'lazy';
-        iframe.referrerPolicy = 'no-referrer';
-        iframe.sandbox = 'allow-scripts';
-        iframe.srcdoc = '<!DOCTYPE html><html><head><meta charset="utf-8"><style>'
-          + 'html,body{margin:0;height:100%;font-family:system-ui,sans-serif;'
-          + 'background:' + grad(site) + ';display:flex;align-items:center;justify-content:center;color:#fff}'
-          + '.w{text-align:center;padding:16px}'
-          + '.w b{display:block;font-size:18px}'
-          + '.w p{font-size:12px;opacity:.9;margin:6px 0 0}'
-          + '</style></head><body><div class="w"><b>' + esc(site.title || site.name)
-          + '</b><p>' + esc((site.description || '').slice(0, 40)) + '</p></div></body></html>';
-        card.appendChild(iframe);
+        const scale = target.clientWidth / COVER_VW;
+        if (!scale) return;
+        started = false;
+        frame = target.querySelector('iframe.mcover');
+        if (frame) {
+          // 封面 iframe 可能还在加载，load 后（或 1.5s 兜底）再翻
+          if (frame.dataset.loaded === '1') {
+            start();
+          } else {
+            // 懒加载还没触发（后台窗口等），悬停当场载入
+            if (frame.arm) frame.arm();
+            frame.addEventListener('load', start, { once: true });
+            kick = setTimeout(start, 1500);
+          }
+        } else {
+          created = true;
+          const f = document.createElement('iframe');
+          f.className = 'peek';
+          f.loading = 'lazy';
+          f.referrerPolicy = 'no-referrer';
+          f.sandbox = 'allow-scripts';
+          f.src = '/' + encodeURIComponent(site.name) + '/?mpcover=1';
+          f.style.width = COVER_VW + 'px';
+          f.style.height = COVER_VH + 'px';
+          f.style.transformOrigin = '0 0';
+          f.style.transform = 'scale(' + scale + ')';
+          target.appendChild(f);
+          frame = f;
+          f.addEventListener('load', start, { once: true });
+          kick = setTimeout(start, 1500);
+        }
       }, 300);
     };
-    /** 离开卡片：取消还没触发的定时器，并把已挂上的 iframe 摘掉（预览不常驻）。 */
+    /** 离开封面：让内部滚动停下并回顶；新建的 .peek 摘掉，复用的 .mcover 留着当封面。 */
     const close = () => {
       clearTimeout(timer);
-      if (iframe) { iframe.remove(); iframe = null; }
+      clearTimeout(kick);
+      started = false;
+      if (frame) {
+        try { frame.contentWindow.postMessage({ mpPeekStop: 1 }, '*'); } catch (e) { /* ignore */ }
+      }
+      if (frame && created) frame.remove();
+      frame = null;
+      created = false;
     };
-    (cover || card).addEventListener('mouseenter', open);
-    card.addEventListener('mouseleave', close);
+    // 注入的滚动代理就绪后会广播 mpReady；若 start() 发速度时代理还没跑起来
+    // （load / 1.5s 兜底都可能早于它执行，消息会丢），就绪这一刻把速度补发一次
+    window.addEventListener('message', (e) => {
+      const w = frame && frame.contentWindow;
+      if (started && w && e.source === w && e.data && e.data.mpReady) {
+        try {
+          const scale = target.clientWidth / COVER_VW;
+          w.postMessage({ mpPeekSpeed: Math.round(COVER_SPEED / scale) }, '*');
+        } catch (err) { /* ignore */ }
+      }
+    });
+    target.addEventListener('mouseenter', open);
+    target.addEventListener('mouseleave', close);
   }
   MP.attachPeek = attachPeek;
 

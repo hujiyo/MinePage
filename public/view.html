@@ -56,10 +56,13 @@
 // 数据来源（**已接真实后端**）：
 //   GET /api/sites/:name/stats   公开接口，一次拿全互动数字 + 站点与作者信息
 //   GET /:站名                    iframe 直接嵌真实站点（后端带沙箱 CSP）
-//   POST/DELETE /api/sites/:name/like   点赞（要登录）
+//   POST/DELETE /api/sites/:name/like      点赞（要登录）
+//   POST/DELETE /api/sites/:name/favorite  收藏/取消收藏（要登录）
+//   POST /api/history            观看成功后上报浏览历史（登录才记）
 //
 // **还没接的**（后端没实现，所以这里明确提示而不是假装能用）：
-//   评论（3 条接口）· 收藏（2 条）· 关注（2 条）
+//   评论（3 条接口）· 关注（2 条）
+//   投币：后端没有这个概念，保持纯前端装饰
 MP.topbar({ collapse: true });
 
 const SITE = decodeURIComponent(location.pathname.replace(/^\/view\//, '').replace(/\/+$/, ''));
@@ -199,6 +202,40 @@ async function toggleLike() {
   renderBar();
 }
 
+/**
+ * 收藏 / 取消收藏 —— 接真实接口，套路与 toggleLike 相同。
+ *
+ * 契约：`POST /api/sites/:name/favorite` → `{ok, favorited: true, favorites: N}`；
+ *      `DELETE` 同路径 → `{ok, favorited: false, favorites: N}`。
+ *
+ * 注意两个坑：
+ *   ① POST 必须带个 `{}` body —— 后端 readJsonBody 对空 body 会 JSON.parse('') 直接 400；
+ *      不传 folder 就落到后端的「默认收藏夹」。
+ *   ② 451 已下线站点不能收藏（后端校验），但取消收藏不校验 —— 跟点赞一个脾气。
+ */
+async function toggleFavorite() {
+  const res = await fetch('/api/sites/' + enc(SITE) + '/favorite', {
+    method: favored ? 'DELETE' : 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: favored ? undefined : '{}',
+  });
+  const data = await res.json().catch(() => null);
+
+  if (res.status === 401) {
+    MP.toast('登录后才能收藏');
+    MP.auth.openLogin({});
+    return;
+  }
+  if (!res.ok || !data || !data.ok) {
+    MP.toast((data && data.message) || '操作失败，稍后再试');
+    return;
+  }
+
+  favored = data.favorited;
+  stats.favorites = data.favorites;
+  renderBar();
+}
+
 /** 重新渲染底部吸附栏（互动状态变化时调用）。 */
 function renderBar() {
   if (!site) return;
@@ -222,11 +259,10 @@ function renderBar() {
     title: '投币是纯前端装饰，后端没有这个数据',
     click: () => { coined = !coined; stats.coins += coined ? 1 : -1; renderBar(); },
   }));
-  // 收藏：后端还没实现（POST/DELETE /api/sites/:name/favorite 缺失）
+  // 收藏：接真实接口（不传 folder，落到「默认收藏夹」）
   gLeft.appendChild(makeItem('fav', '收藏 ' + MP.fmtNum(stats.favorites), {
     on: favored,
-    title: '收藏功能还没接上后端',
-    click: () => MP.toast('收藏功能还没接上后端（下一步做）'),
+    click: toggleFavorite,
   }));
 
   // 中间：收起小三角形（点击整条栏收起，只在左下角留一个小三角形）
@@ -588,6 +624,17 @@ async function boot() {
 
   // 真实登录态 —— 后面判"是不是自己的站/评论"要用它
   me = await MP.me();
+
+  // 观看上报：登录了就记一条浏览历史（一人一站一条，重复看只刷新时间）。
+  // keepalive 让这个 POST 不被紧跟着的页面离开打断；纯锦上添花，失败静默。
+  if (me) {
+    fetch('/api/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ site: SITE }),
+      keepalive: true,
+    }).catch(() => {});
+  }
 
   const a = site.author || null;
   document.title = (site.title || site.name) + ' · MinePage';

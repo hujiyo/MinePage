@@ -221,7 +221,8 @@ function renderSites(sites) {
     actions.style.cssText = 'gap:8px;flex:none';
 
     const view = document.createElement('a');
-    view.href = '/' + site.name;
+    // 进观看页（带平台导航和赞/藏/评论）；想看裸站点用编辑页里的「访问站点」
+    view.href = '/view/' + encodeURIComponent(site.name);
     view.target = '_blank';
     view.rel = 'noopener';
     view.innerHTML = '<button type="button" class="ghost tiny">访问</button>';
@@ -301,16 +302,35 @@ function showResult(ok, html) {
 let picked = [];        // [{ path, file }]
 let pickedMode = null;  // 'single' | 'multi'
 
+// 系统垃圾文件黑名单（与服务端 lib/config.js JUNK_SEGMENTS 对齐），
+// 收文件时就跳过，别把 Thumbs.db / node_modules 这类东西传上去。
+const JUNK_SEGMENTS = new Set([
+  'thumbs.db', 'desktop.ini', 'ehthumbs.db', 'ehthumbs_vista.db', '__macosx', 'node_modules',
+]);
+function isJunkPath(p) {
+  return p.split('/').some((s) => s.startsWith('.') || JUNK_SEGMENTS.has(s.toLowerCase()));
+}
+
+// 断点续传：同一站名上传失败后，再次提交跳过已成功的文件。
+// 换了文件选择或换了站名就作废重来。
+let resumeKey = '';
+let resumeDone = new Set();
+function resetResume(key) {
+  if (resumeKey !== key) { resumeKey = key; resumeDone = new Set(); }
+}
+function clearResume() { resumeKey = ''; resumeDone = new Set(); }
+
 /** 统一入口：根据收集到的文件决定上传模式并刷新界面。 */
 function applyPick(list, source) {
   picked = list;
+  clearResume();
   pickList.textContent = '';
   modeTag.hidden = true;
 
   if (list.length === 0) {
     pickedMode = null;
     drop.classList.remove('ready');
-    dropTitle.textContent = '把 HTML 文件、多个文件或整个文件夹拖到这里';
+    dropTitle.textContent = '把 HTML 文件、文件夹或 zip 包拖到这里';
     pickList.hidden = true;
     return;
   }
@@ -328,15 +348,32 @@ function applyPick(list, source) {
     return;
   }
 
+  // 单个 zip：整包解压发布（Netlify Drop 式）
+  if (list.length === 1 && /\.zip$/i.test(list[0].path)) {
+    pickedMode = 'zip';
+    drop.classList.add('ready');
+    dropTitle.textContent = list[0].path;
+    modeTag.hidden = false;
+    modeTag.innerHTML = '<span class="badge ok">ZIP 模式 · 解压后整包发布</span>';
+    pickList.hidden = true;
+    return;
+  }
+
   // 多页模式
   pickedMode = 'multi';
   drop.classList.add('ready');
   dropTitle.textContent = list.length + ' 个文件';
   const hasIndex = list.some((it) => it.path === 'index.html');
+  const hasAnyHtml = list.some((it) => /\.html?$/i.test(it.path));
   modeTag.hidden = false;
-  modeTag.innerHTML = hasIndex
-    ? '<span class="badge ok">多页模式 · 入口 index.html</span>'
-    : '<span class="badge bad">多页模式 · 缺 index.html，上传会被拒绝</span>';
+  if (hasIndex) {
+    modeTag.innerHTML = '<span class="badge ok">多页模式 · 入口 index.html</span>';
+  } else if (hasAnyHtml) {
+    // 没有根 index.html 也能发：服务端会自动识别最浅的 html 当入口
+    modeTag.innerHTML = '<span class="badge ok">多页模式 · 入口自动识别（缺 index.html）</span>';
+  } else {
+    modeTag.innerHTML = '<span class="badge bad">多页模式 · 没有任何 HTML 文件，上传会被拒绝</span>';
+  }
 
   pickList.hidden = false;
   list.slice(0, 100).forEach((it) => {
@@ -355,7 +392,12 @@ document.getElementById('pickFiles').addEventListener('click', () => fileInput.c
 document.getElementById('pickFolder').addEventListener('click', () => folderInput.click());
 
 fileInput.addEventListener('change', () => {
-  applyPick(Array.from(fileInput.files || []).map((f) => ({ path: f.name, file: f })), 'files');
+  applyPick(
+    Array.from(fileInput.files || [])
+      .map((f) => ({ path: f.name, file: f }))
+      .filter((it) => !isJunkPath(it.path)),
+    'files',
+  );
 });
 
 folderInput.addEventListener('change', () => {
@@ -363,8 +405,8 @@ folderInput.addEventListener('change', () => {
   for (const f of Array.from(folderInput.files || [])) {
     // webkitRelativePath 形如「文件夹名/css/style.css」，去掉第一段
     const rel = (f.webkitRelativePath || '').split('/').slice(1).join('/');
-    // 跳过点开头的隐藏文件/文件夹
-    if (!rel || rel.split('/').some((s) => s.startsWith('.'))) continue;
+    // 跳过点开头的隐藏文件/文件夹和系统垃圾文件
+    if (!rel || isJunkPath(rel)) continue;
     list.push({ path: rel, file: f });
   }
   applyPick(list, 'folder');
@@ -425,7 +467,7 @@ drop.addEventListener('drop', async (e) => {
   if (entries.length === 0) {
     // 兜底：拿不到 entry 就当散文件处理
     const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
-    applyPick(files.map((f) => ({ path: f.name, file: f })), 'files');
+    applyPick(files.map((f) => ({ path: f.name, file: f })).filter((it) => !isJunkPath(it.path)), 'files');
     return;
   }
 
@@ -434,7 +476,7 @@ drop.addEventListener('drop', async (e) => {
     const list = [];
     for (const entry of entries) list.push(...await walkEntry(entry));
     const source = list.some((it) => it.fromDir) ? 'folder' : 'files';
-    applyPick(list.filter((it) => !it.path.split('/').some((s) => s.startsWith('.'))), source);
+    applyPick(list.filter((it) => !isJunkPath(it.path)), source);
   } catch (err) {
     applyPick([], 'files');
     dropTitle.textContent = '读取拖入内容失败：' + err.message;
@@ -449,6 +491,14 @@ form.addEventListener('submit', async (e) => {
 
   const siteName = nameInput.value.trim();
   if (!siteName) { showResult(false, '先给页面起个名字'); return; }
+  // 与后端 checkName（lib/names.js）同口径。服务端接口路由正则只认小写字母/数字/连字符，
+  // 不合法的名字（如中文）根本匹配不上路由，只会拿到 404 HTML 页，前端解析 JSON 就报
+  // 「Unexpected token '<'」—— 所以必须在发请求前拦下。
+  if (!/^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(siteName)) {
+    showResult(false,
+      '页面名字要 3-32 位小写字母、数字或连字符，且不能以连字符开头或结尾，例如 my-page-4');
+    return;
+  }
   if (picked.length === 0) { showResult(false, '先选择要上传的内容'); return; }
 
   submit.disabled = true;
@@ -474,39 +524,108 @@ form.addEventListener('submit', async (e) => {
       } else {
         showResult(false, data.message || '上传失败');
       }
+    } else if (pickedMode === 'zip') {
+      // ZIP 模式：整包丢给服务端解压发布
+      submit.textContent = '解压发布中…';
+      const res = await fetch(
+        '/api/sites/' + encodeURIComponent(siteName) + '/zip',
+        { method: 'POST', headers: { 'Content-Type': 'application/zip' },
+          body: await picked[0].file.arrayBuffer() },
+      );
+      const data = await res.json();
+      if (data.ok) {
+        const url = '/' + encodeURIComponent(siteName) + '/';
+        let msg = '解压发布完成，收下 ' + data.saved + ' 个文件';
+        if (data.skipped) msg += '，跳过 ' + data.skipped + ' 个';
+        msg += '。地址：<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>';
+        if (data.skipList && data.skipList.length) {
+          msg += '<details><summary>被跳过的条目</summary>'
+            + data.skipList.map((it) => escapeHtml(it.path + '（' + it.reason + '）')).join('<br>')
+            + '</details>';
+        }
+        showResult(true, msg);
+        form.reset();
+        applyPick([], 'files');
+        loadSites();
+      } else {
+        showResult(false, escapeHtml(data.message || '发布失败'));
+      }
     } else {
-      // 多页：逐个文件上传
-      if (!picked.some((it) => it.path === 'index.html')) {
-        showResult(false, '多页站点必须有 index.html 作为入口页');
+      // 多页：4 路并发上传 + 断点续传（失败后再点发布，跳过已成功的文件）
+      if (!picked.some((it) => /\.html?$/i.test(it.path))) {
+        showResult(false, '至少要有一个 HTML 文件作为入口页');
         return;
       }
 
-      let okCount = 0;
-      for (let i = 0; i < picked.length; i++) {
-        const item = picked[i];
-        submit.textContent = '上传中 ' + (i + 1) + '/' + picked.length + '：' + item.path;
+      resetResume(siteName);
+      const queue = picked.filter((it) => !resumeDone.has(it.path));
+      const skipped = picked.length - queue.length;
+      const total = picked.length;
+      let doneCount = skipped;
+      const failures = [];
+      let cursor = 0;
 
-        const res = await fetch(
-          '/api/sites/' + encodeURIComponent(siteName) + '/files?path=' + encodeURIComponent(item.path),
-          { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' },
-            body: await item.file.arrayBuffer() },
-        );
-        const data = await res.json();
-        if (!data.ok) {
-          showResult(false,
-            '上传「' + escapeHtml(item.path) + '」失败：' + escapeHtml(data.message || '未知错误'));
-          return;
+      const uploadOne = async (item) => {
+        // 网络抖动重试 2 次；服务端返回的业务错误（4xx）重试没意义，直接回传
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            const res = await fetch(
+              '/api/sites/' + encodeURIComponent(siteName) + '/files?path=' + encodeURIComponent(item.path),
+              { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' },
+                body: await item.file.arrayBuffer() },
+            );
+            // 服务端没命中路由或出错时回的是 HTML 错误页，直接 json() 会抛
+            // 「Unexpected token '<'」这种让人看不懂的错；先验类型再解析
+            if (!(res.headers.get('content-type') || '').includes('application/json')) {
+              return '服务端返回异常（HTTP ' + res.status + '），请检查页面名字是否合法';
+            }
+            const data = await res.json();
+            if (data.ok) return null;
+            return data.message || '未知错误';
+          } catch (err) {
+            if (attempt === 3) return '网络出错：' + err.message;
+            await new Promise((r) => setTimeout(r, 500 * attempt));
+          }
         }
-        okCount++;
-      }
+        return '网络出错';
+      };
+
+      const worker = async () => {
+        for (;;) {
+          const i = cursor++;
+          if (i >= queue.length) return;
+          const item = queue[i];
+          const errMsg = await uploadOne(item);
+          if (errMsg === null) {
+            resumeDone.add(item.path);
+            doneCount++;
+          } else {
+            failures.push(item.path + '：' + errMsg);
+          }
+          submit.textContent = '上传中 ' + doneCount + '/' + total;
+        }
+      };
+
+      const CONCURRENCY = 4;
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
 
       const url = '/' + encodeURIComponent(siteName) + '/';
-      showResult(true,
-        '上传完成，共 ' + okCount + ' 个文件。地址：<a href="' + url + '" target="_blank" rel="noopener">'
-        + url + '</a>，也可以去左侧「已发布」看看。');
-      form.reset();
-      applyPick([], 'files');
-      loadSites();
+      if (failures.length === 0) {
+        showResult(true,
+          '上传完成，共 ' + doneCount + ' 个文件'
+          + (skipped ? '（跳过已传的 ' + skipped + ' 个）' : '')
+          + '。地址：<a href="' + url + '" target="_blank" rel="noopener">'
+          + url + '</a>，也可以去左侧「已发布」看看。');
+        form.reset();
+        applyPick([], 'files');
+        loadSites();
+      } else {
+        showResult(false,
+          '成功 ' + doneCount + '/' + total + ' 个，失败 ' + failures.length + ' 个：<br>'
+          + failures.slice(0, 3).map(escapeHtml).join('<br>')
+          + (failures.length > 3 ? '<br>…' : '')
+          + '<br>再点一次「发布页面」会跳过已成功的文件，从中断处继续传。');
+      }
     }
   } catch (err) {
     showResult(false, '网络出问题了：' + err.message);
