@@ -517,8 +517,14 @@ async function run() {
   check('发私信成功', send.body?.ok === true, JSON.stringify(send.body));
   const convs = await api('/api/messages', { cookie: a.cookie });
   check('会话列表 1 条（JOIN users）', convs.body?.conversations?.length === 1, JSON.stringify(convs.body?.conversations));
+  check('收到私信前会话标记 1 条未读', convs.body?.conversations?.[0]?.unread === 1);
   const thread = await api(`/api/messages/${b.user.id}`, { cookie: a.cookie });
   check('私信内容读回一致', thread.body?.messages?.[0]?.content === '你好，这是私信', JSON.stringify(thread.body?.messages?.[0]?.content));
+  const readConvs = await api('/api/messages', { cookie: a.cookie });
+  check('打开会话后数据库未读数归零', readConvs.body?.conversations?.[0]?.unread === 0);
+  const messageReply = await api(`/api/messages/${b.user.id}`, { body: { content: '收到，稍后联系' }, cookie: a.cookie, method: 'POST' });
+  const bThread = await api(`/api/messages/${a.user.id}`, { cookie: b.cookie });
+  check('回复后双方能读到同一条消息', messageReply.body?.ok === true && bThread.body?.messages?.at(-1)?.content === '收到，稍后联系');
 
   // 通知是「按当前互动数据算出来的」（没有事件表），所以先把互动补上再看
   await api(`/api/sites/${SITE}/like`, { cookie: b.cookie, method: 'POST' });
