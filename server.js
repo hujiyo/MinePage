@@ -112,6 +112,7 @@ import {
   unfavoriteSite,
   unfollowUser,
   unlikeSite,
+  withViewerFlags,
 } from './lib/social.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -1467,6 +1468,7 @@ const tagLabelOf = (key) => SITE_TAGS.find((t) => t.key === key)?.label ?? '';
 /** 社区发现流：公开上线站点 + 互动数字。?q= 模糊搜索，?tag= 标签筛选，?sort= 排序，
  *  ?page= 页码（从 1 起）、?size= 每页条数（默认 10，夹在 1..50）。 */
 async function handleDiscover(req, res) {
+  const viewer = await currentUser(req);
   const url = new URL(req.url, 'http://localhost');
   const q = String(url.searchParams.get('q') ?? '').slice(0, 50);
   const tagParam = String(url.searchParams.get('tag') ?? '');
@@ -1484,7 +1486,7 @@ async function handleDiscover(req, res) {
     page,
     size,
     pages: Math.max(1, Math.ceil(total / size)),
-    sites: sites.map((s) => ({ ...s, tagLabel: tagLabelOf(s.tag) })),
+    sites: (await withViewerFlags(sites, viewer?.id)).map((s) => ({ ...s, tagLabel: tagLabelOf(s.tag) })),
   });
 }
 
@@ -1510,7 +1512,7 @@ async function handleCreatorProfile(req, res, [username]) {
     stats: page.stats,
     isFollowing: await isFollowing(viewer?.id ?? null, page.user.id),
     isOwn: viewer?.id === page.user.id,
-    sites: page.sites.map((s) => ({ ...s, tagLabel: tagLabelOf(s.tag) })),
+    sites: (await withViewerFlags(page.sites, viewer?.id)).map((s) => ({ ...s, tagLabel: tagLabelOf(s.tag) })),
   });
 }
 
@@ -1632,7 +1634,7 @@ async function handleFavoritesList(req, res) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  sendJson(res, 200, { ok: true, sites: withTagLabel(await listFavorites(user.id)) });
+  sendJson(res, 200, { ok: true, sites: withTagLabel(await withViewerFlags(await listFavorites(user.id), user.id)) });
 }
 
 /** 用户搜索（搜索下拉的「用户」分区用）。 */

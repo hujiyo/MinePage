@@ -430,14 +430,16 @@ async function run() {
   const tooBig = await api('/api/upload', { body: { html: bigHtml, name: 'smoke-too-big' }, cookie: a.cookie, method: 'POST' });
   check('单页上传超过 2MB → 413', tooBig.res.status === 413, `status=${tooBig.res.status}`);
 
-  const hugeFile = `<p>${'y'.repeat(10 * 1024 * 1024)}</p>`;
-  const huge = await api(`/api/sites/${SITE}/files?path=huge.html`, {
+  const largeFile = `<p>${'y'.repeat(10 * 1024 * 1024)}</p>`;
+  const large = await api(`/api/sites/${SITE}/files?path=large.html`, {
     cookie: a.cookie,
     method: 'POST',
-    raw: hugeFile,
+    raw: largeFile,
     type: 'text/html',
   });
-  check('多文件站点单文件超过 10MB → 413', huge.res.status === 413, `status=${huge.res.status}`);
+  check('多文件站点 10MB 文件可上传（上限 90MB）', large.res.status === 201, `status=${large.res.status}`);
+  const removeLarge = await api(`/api/sites/${SITE}/files?path=large.html`, { cookie: a.cookie, method: 'DELETE' });
+  check('大文件可删除以恢复文件列表', removeLarge.body?.ok === true);
 
   // 浏览计数：连续访问两次
   await api(`/${SITE}`);
@@ -455,8 +457,14 @@ async function run() {
   check('重复点赞幂等', likeAgain.body?.ok === true, JSON.stringify(likeAgain.body));
   const statLiked = await api(`/api/sites/${SITE}/stats`, { cookie: a.cookie });
   check('点赞数 = 1（数字）', statLiked.body?.stats?.likes === 1, JSON.stringify(statLiked.body?.stats));
+  const likedCards = await api('/api/discover', { cookie: b.cookie });
+  check('发现流卡片读回我的点赞状态', likedCards.body?.sites?.find((s) => s.name === SITE)?.liked === true);
+  const creatorLikedCards = await api('/api/u/smoke-a/profile', { cookie: b.cookie });
+  check('创作者卡片读回我的点赞状态', creatorLikedCards.body?.sites?.find((s) => s.name === SITE)?.liked === true);
   const unlike = await api(`/api/sites/${SITE}/like`, { cookie: b.cookie, method: 'DELETE' });
   check('取消点赞成功', unlike.body?.ok === true, JSON.stringify(unlike.body));
+  const unlikedCards = await api('/api/discover', { cookie: b.cookie });
+  check('取消点赞后卡片状态归零', unlikedCards.body?.sites?.find((s) => s.name === SITE)?.liked === false);
   const statUnliked = await api(`/api/sites/${SITE}/stats`, { cookie: a.cookie });
   check('点赞数回到 0', statUnliked.body?.stats?.likes === 0, JSON.stringify(statUnliked.body?.stats));
 
@@ -485,8 +493,11 @@ async function run() {
     favs.body?.sites?.some((f) => f.name === SITE),
     `status=${favs.res.status} ${JSON.stringify(favs.body?.sites?.map((f) => f.name))}`,
   );
+  check('收藏夹卡片带真实收藏状态', favs.body?.sites?.find((s) => s.name === SITE)?.favorited === true);
   const unfav = await api(`/api/sites/${SITE}/favorite`, { cookie: b.cookie, method: 'DELETE' });
   check('取消收藏成功', unfav.body?.ok === true, JSON.stringify(unfav.body));
+  const unfavedCards = await api('/api/discover', { cookie: b.cookie });
+  check('取消收藏后卡片状态归零', unfavedCards.body?.sites?.find((s) => s.name === SITE)?.favorited === false);
 
   const follow = await api(`/api/users/${a.user.id}/follow`, { cookie: b.cookie, method: 'POST' });
   check('关注成功', follow.body?.ok === true, JSON.stringify(follow.body));
