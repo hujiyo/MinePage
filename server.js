@@ -1523,6 +1523,10 @@ async function handleViewPage(req, res) {
 
 /** 通知列表页。 */
 async function handleNotificationsPage(req, res) {
+  if (!(await currentUser(req))) {
+    sendRedirect(res, '/login');
+    return;
+  }
   await sendPage(res, 'notifications.html');
 }
 

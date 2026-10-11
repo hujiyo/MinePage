@@ -214,6 +214,13 @@ async function run() {
     `status=${sitesAnon.res.status} loc=${sitesAnon.res.headers.get('location')}`,
   );
 
+  const notificationsAnon = await api('/notifications', { redirect: 'manual' });
+  check(
+    'GET /notifications 未登录跳登录页',
+    notificationsAnon.res.status === 302 && notificationsAnon.res.headers.get('location') === '/login',
+    `status=${notificationsAnon.res.status} loc=${notificationsAnon.res.headers.get('location')}`,
+  );
+
   const adminAnon = await api('/admin', { redirect: 'manual' });
   check('GET /admin 未登录跳登录页', adminAnon.res.status === 302, `status=${adminAnon.res.status}`);
 
@@ -264,6 +271,8 @@ async function run() {
   check('已注册邮箱再发码 → 409', dupe.res.status === 409, `status=${dupe.res.status}`);
 
   const a = await login(A_EMAIL, PASS);
+  const notificationsPage = await api('/notifications', { cookie: a.cookie });
+  check('登录后可打开通知页', notificationsPage.res.status === 200);
   const me = await api('/api/me', { cookie: a.cookie });
   check('GET /api/me 是刚注册的账号', me.body?.user?.email === A_EMAIL, JSON.stringify(me.body?.user));
   check('新账号默认不是管理员', me.body?.user?.isAdmin === false, JSON.stringify(me.body?.user));
@@ -506,8 +515,15 @@ async function run() {
     (notifications.body?.items?.length ?? 0) > 0,
     `status=${notifications.res.status} ${JSON.stringify(notifications.body)?.slice(0, 200)}`,
   );
+  check('新通知带未读状态', notifications.body?.items?.some((item) => item.unread === true));
+  const anonymousNotifications = await api('/api/notifications');
+  check('未登录不能读取通知', anonymousNotifications.res.status === 401);
+  const anonymousSeen = await api('/api/notifications/seen', { method: 'POST' });
+  check('未登录不能标记通知', anonymousSeen.res.status === 401);
   const seen = await api('/api/notifications/seen', { cookie: a.cookie, method: 'POST' });
   check('标记通知已读成功', seen.body?.ok === true, JSON.stringify(seen.body));
+  const seenNotifications = await api('/api/notifications', { cookie: a.cookie });
+  check('已读状态从数据库读回', seenNotifications.body?.items?.every((item) => item.unread === false));
   const meUnread = await api('/api/me', { cookie: a.cookie });
   check('未读数归零', meUnread.body?.unread === 0, JSON.stringify(meUnread.body?.unread));
 
