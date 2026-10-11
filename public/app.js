@@ -866,7 +866,7 @@
    * 清单必须与服务端守卫一致 —— 客户端少了会直接跳转，服务端少了等于没保护。
    */
   function needsLogin(href) {
-    return LOGIN_REQUIRED.some((re) => re.test(href));
+    return LOGIN_REQUIRED.some((re) => re.test(href.split(/[?#]/, 1)[0]));
   }
 
   /** 登录 / 注册表单的标记。弹窗和 /login 页共用同一份。 */

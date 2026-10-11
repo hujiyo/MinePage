@@ -172,6 +172,13 @@ function renderActions() {
     }
   });
   actionsBox.appendChild(btn);
+
+  const message = document.createElement('a');
+  message.href = '/messages?to=' + profile.user.id;
+  message.className = 'badge';
+  message.style.padding = '6px 14px';
+  message.textContent = '私信';
+  actionsBox.appendChild(message);
 }
 
 // ---------------------------------------------------------------- 作品

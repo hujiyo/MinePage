@@ -44,7 +44,7 @@ lib/mcp/tokens.js             MCP 密钥：铸造 / 列表 / 吊销 / 鉴权（�
 lib/mcp/tools.js              MCP 工具注册表（唯一真源）+ 10 个 backend
 lib/mcp/server.js             MCP 的 JSON-RPC 分发，零依赖手写
 scripts/mcp-smoke.mjs         MCP 冒烟测试（68 项，见下）
-scripts/api-smoke.mjs         全站接口冒烟测试（142 项，自己拉起临时服务，见下）
+scripts/api-smoke.mjs         全站接口冒烟测试（145 项，自己拉起临时服务，见下）
 public/index.html             上传页（/upload）
 public/discover.html          社区首页（/）
 public/user.html              创作者主页（/u/:用户名）
@@ -161,7 +161,7 @@ node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项（需
 冒烟库的表，跑完自己收拾：
 
 ```
-node scripts/api-smoke.mjs          # 142 项：注册/登录/站点/文件/社交/权限/后台/改密
+node scripts/api-smoke.mjs          # 145 项：注册/登录/站点/文件/社交/权限/后台/改密
 node scripts/api-smoke.mjs --json   # 末尾多打印一段 JSON，换库前后可以拿来对比
 ```
 
