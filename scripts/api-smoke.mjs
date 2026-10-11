@@ -474,6 +474,8 @@ async function run() {
 
   const delComment = await api(`/api/sites/${SITE}/comments/${parentId}`, { cookie: b.cookie, method: 'DELETE' });
   check('删除自己的评论成功', delComment.body?.ok === true, JSON.stringify(delComment.body));
+  const afterDeleteComments = await api(`/api/sites/${SITE}/comments`);
+  check('删除顶层评论后回复也从数据库删除', afterDeleteComments.body?.comments?.length === 0);
 
   const fav = await api(`/api/sites/${SITE}/favorite`, { body: { folder: '冒烟收藏夹' }, cookie: b.cookie, method: 'POST' });
   check('收藏成功', fav.body?.ok === true, JSON.stringify(fav.body));
@@ -488,6 +490,8 @@ async function run() {
 
   const follow = await api(`/api/users/${a.user.id}/follow`, { cookie: b.cookie, method: 'POST' });
   check('关注成功', follow.body?.ok === true, JSON.stringify(follow.body));
+  const socialFollowed = await api(`/api/users/${a.user.id}/social`, { cookie: b.cookie });
+  check('作品页关注状态接口读回已关注', socialFollowed.body?.isFollowing === true);
   const followedProfile = await api('/api/u/smoke-a/profile', { cookie: b.cookie });
   check('关注状态与粉丝数从数据库读回',
     followedProfile.body?.isFollowing === true && followedProfile.body?.stats?.followers === 1);
@@ -499,6 +503,8 @@ async function run() {
   );
   const unfollow = await api(`/api/users/${a.user.id}/follow`, { cookie: b.cookie, method: 'DELETE' });
   check('取消关注成功', unfollow.body?.ok === true, JSON.stringify(unfollow.body));
+  const socialUnfollowed = await api(`/api/users/${a.user.id}/social`, { cookie: b.cookie });
+  check('作品页关注状态接口读回未关注', socialUnfollowed.body?.isFollowing === false);
   const unfollowedProfile = await api('/api/u/smoke-a/profile', { cookie: b.cookie });
   check('取消关注后主页状态与粉丝数归零',
     unfollowedProfile.body?.isFollowing === false && unfollowedProfile.body?.stats?.followers === 0);
