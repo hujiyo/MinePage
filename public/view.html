@@ -60,9 +60,8 @@
 //   POST/DELETE /api/sites/:name/favorite  收藏/取消收藏（要登录）
 //   POST /api/history            观看成功后上报浏览历史（登录才记）
 //
-// **还没接的**（后端没实现，所以这里明确提示而不是假装能用）：
-//   评论（3 条接口）· 关注（2 条）
-//   投币：后端没有这个概念，保持纯前端装饰
+//   GET/POST/DELETE /api/sites/:name/comments  评论
+//   GET /api/users/:id/social 与 POST/DELETE /api/users/:id/follow  关注
 MP.topbar({ collapse: true });
 
 const SITE = decodeURIComponent(location.pathname.replace(/^\/view\//, '').replace(/\/+$/, ''));
@@ -82,17 +81,11 @@ const cEmpty = document.getElementById('cEmpty');
 
 let site = null;
 let me = null;          // 真实登录态（未登录为 null）—— 不再用演示身份 MP.ME
-let following = false;
+let following = null;
+let followPending = false;
 let liked = false;
 let favored = false;
-let coined = false;
-
-// 互动数字。`likes` / `favorites` / `comments` 来自后端；
-// **`coins` 后端没有这个概念**，它一直是纯前端装饰（原版按 likes/4 算），这里保留。
-let stats = { views: 0, likes: 0, favorites: 0, comments: 0, coins: 0 };
-
-// 评论列表。后端还没实现评论接口，所以**这里是空的，不是演示数据** ——
-// 之前那版塞了 4 条 DEMO_COMMENTS（"小林""演示用户"），会让人以为评论是真的。
+let stats = { views: 0, likes: 0, favorites: 0, comments: 0 };
 let comments = [];
 
 /**
@@ -114,6 +107,54 @@ function fmtTime(ts) {
 function toMs(iso) {
   const t = Date.parse(iso);
   return Number.isFinite(t) ? t : Date.now();
+}
+
+async function requestJson(url, options) {
+  const res = await fetch(url, { ...options, headers: { Accept: 'application/json', ...options?.headers } });
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data?.ok) {
+    if (res.status === 401) {
+      MP.forgetSession();
+      MP.auth.openLogin({});
+    }
+    throw new Error(data?.message || '操作失败，稍后再试');
+  }
+  return data;
+}
+
+async function loadSocial() {
+  const id = site?.author?.id;
+  if (!id) return;
+  try {
+    const data = await requestJson('/api/users/' + id + '/social');
+    following = data.isFollowing === true;
+    renderBar();
+  } catch (error) {
+    following = null;
+    renderBar();
+    MP.toast(error.message);
+  }
+}
+
+async function toggleFollow() {
+  if (followPending) return;
+  if (following === null) return loadSocial();
+  if (!me) {
+    MP.auth.openLogin({});
+    return;
+  }
+  followPending = true;
+  try {
+    const data = await requestJson('/api/users/' + site.author.id + '/follow', {
+      method: following ? 'DELETE' : 'POST',
+    });
+    following = data.following === true;
+    renderBar();
+  } catch (error) {
+    MP.toast(error.message);
+  } finally {
+    followPending = false;
+  }
 }
 
 /* ---------------------------------------------------------------- 播放区 */
@@ -243,21 +284,22 @@ function renderBar() {
 
   snapbar.textContent = '';
 
-  // 左组：分享 / 赞 / 投币 / 收藏
+  // 左组：分享 / 赞 / 收藏
   const gLeft = document.createElement('div');
   gLeft.className = 'sgroup';
   gLeft.appendChild(makeItem('share', '分享', {
-    click: () => { MP.toast('链接已复制，去分享给朋友吧'); },
+    click: async () => {
+      try {
+        await navigator.clipboard.writeText(location.href);
+        MP.toast('链接已复制，去分享给朋友吧');
+      } catch {
+        MP.toast('复制失败，请从地址栏复制链接');
+      }
+    },
   }));
   gLeft.appendChild(makeItem('like', '赞 ' + MP.fmtNum(stats.likes), {
     on: liked,
     click: toggleLike,
-  }));
-  // 投币：**后端没有这个概念**，纯前端装饰（原版按 likes/4 算）。点了只改本地。
-  gLeft.appendChild(makeItem('coin', '投币 ' + MP.fmtNum(stats.coins), {
-    on: coined,
-    title: '投币是纯前端装饰，后端没有这个数据',
-    click: () => { coined = !coined; stats.coins += coined ? 1 : -1; renderBar(); },
   }));
   // 收藏：接真实接口（不传 folder，落到「默认收藏夹」）
   gLeft.appendChild(makeItem('fav', '收藏 ' + MP.fmtNum(stats.favorites), {
@@ -309,16 +351,15 @@ function renderBar() {
   }
 
   // 「是不是自己的站」用**真实登录态**判断（之前用的是演示身份 MP.ME）
-  const isOwn = !!me && !!a.username && a.username === me.username;
+  const isOwn = !!me && a.id === me.id;
   if (!isOwn) {
-    // 关注：后端还没实现（POST/DELETE /api/users/:id/follow 缺失）
-    gRight.appendChild(makeItem(following ? 'check' : 'plus', following ? '已关注' : '关注', {
+    gRight.appendChild(makeItem(following ? 'check' : 'plus', following === null ? '关注状态不可用' : following ? '已关注' : '关注', {
       on: following,
-      title: '关注功能还没接上后端',
-      click: () => MP.toast('关注功能还没接上后端（下一步做）'),
+      title: following === null ? '点击重试加载关注状态' : undefined,
+      click: toggleFollow,
     }));
   }
-  gRight.appendChild(makeItem('message', '私信', { href: '/messages' }));
+  if (!isOwn && a.id) gRight.appendChild(makeItem('message', '私信', { href: '/messages?to=' + a.id }));
 
   snapbar.appendChild(gLeft);
   snapbar.appendChild(mid);
@@ -408,10 +449,9 @@ function authorNode(author) {
  * isTop 为真时才算顶层评论：额外挂「回复」按钮，并把 rootOf 归到它名下的回复递归渲染进 .replies；
  * 回复本身不再带回复按钮，层级因此最多两层。
  *
- * **删除按钮对谁可见**：用真实登录态判断（作者本人或管理员），
- * 之前这里比的是演示身份 `MP.ME.username`，任何人都看不到删除按钮。
+ * 删除按钮只对评论作者本人或管理员可见，按用户 ID 判断。
  *
- * 注意：点赞 / 回复 / 删除**都还没接后端**（评论接口缺失），点了只会提示。
+ * 回复与删除写入数据库后重新读取评论列表。
  */
 function renderComment(c, isTop) {
   const div = document.createElement('div');
@@ -437,7 +477,7 @@ function renderComment(c, isTop) {
 
   const time = document.createElement('span');
   time.className = 'time';
-  time.textContent = fmtTime(c.createdAt);
+  time.textContent = fmtTime(toMs(c.createdAt));
   head.appendChild(time);
   div.appendChild(head);
 
@@ -449,12 +489,6 @@ function renderComment(c, isTop) {
   const ops = document.createElement('div');
   ops.className = 'cOps';
 
-  const likeBtn = document.createElement('button');
-  likeBtn.type = 'button';
-  likeBtn.textContent = '赞 ' + (c.likes || 0);
-  likeBtn.addEventListener('click', () => MP.toast('评论点赞还没接上后端'));
-  ops.appendChild(likeBtn);
-
   // 回复按钮：只挂在顶层评论上（回复的回复归到同一父评论）
   if (isTop) {
     const replyBtn = document.createElement('button');
@@ -465,13 +499,27 @@ function renderComment(c, isTop) {
   }
 
   // 删除：作者本人或管理员。**判断用真实登录态**。
-  const canDelete = !!me && (c.author.username === me.username || me.isAdmin);
+  const canDelete = !!me && (c.author.id === me.id || me.isAdmin);
   if (canDelete) {
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
     delBtn.className = 'del';
     delBtn.textContent = '删除';
-    delBtn.addEventListener('click', () => MP.toast('删除评论还没接上后端'));
+    delBtn.addEventListener('click', async () => {
+      delBtn.disabled = true;
+      try {
+        const data = await requestJson('/api/sites/' + enc(SITE) + '/comments/' + c.id, { method: 'DELETE' });
+        stats.comments = data.total;
+        try {
+          await loadComments();
+        } catch {
+          MP.toast('评论已删除，列表刷新失败，请稍后刷新页面');
+        }
+      } catch (error) {
+        MP.toast(error.message);
+        delBtn.disabled = false;
+      }
+    });
     ops.appendChild(delBtn);
   }
 
@@ -534,10 +582,12 @@ function toggleReplyBox(commentDiv, parent) {
   row.appendChild(submit);
   box.appendChild(row);
 
-  box.addEventListener('submit', (e) => {
+  box.addEventListener('submit', async (e) => {
     e.preventDefault();
-    // 后端没有 POST /api/sites/:name/comments，所以**不往列表里塞假数据**，只提示。
-    MP.toast('评论功能还没接上后端（下一步做）');
+    submit.disabled = true;
+    const added = await addCommentFromInput(ta.value, parent.id);
+    if (added) box.remove();
+    else submit.disabled = false;
   });
 
   commentDiv.appendChild(box);
@@ -553,7 +603,7 @@ function toggleReplyBox(commentDiv, parent) {
 function renderComments() {
   cList.textContent = '';
   const tops = comments.filter((c) => c.replyTo == null);
-  cHead.textContent = comments.length;
+  cHead.textContent = stats.comments;
   cEmpty.hidden = comments.length > 0;
   tops.forEach((c) => cList.appendChild(renderComment(c, true)));
 
@@ -565,10 +615,46 @@ function renderComments() {
   }
 }
 
-cForm.addEventListener('submit', (e) => {
+async function loadComments() {
+  const data = await requestJson('/api/sites/' + enc(SITE) + '/comments');
+  comments = data.comments;
+  stats.comments = data.total;
+  cEmpty.textContent = '还没有评论，来抢沙发。';
+  renderComments();
+}
+
+async function addCommentFromInput(content, replyTo = null) {
+  if (!content.trim()) {
+    MP.toast('评论不能是空的');
+    return false;
+  }
+  let data;
+  try {
+    data = await requestJson('/api/sites/' + enc(SITE) + '/comments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, ...(replyTo == null ? {} : { replyTo }) }),
+    });
+  } catch (error) {
+    MP.toast(error.message);
+    return false;
+  }
+  stats.comments = data.total;
+  try {
+    await loadComments();
+  } catch {
+    MP.toast('评论已发表，列表刷新失败，请稍后刷新页面');
+  }
+  return true;
+}
+
+cForm.addEventListener('submit', async (e) => {
   e.preventDefault();
-  // 同回复：后端接口还没实现，**不假装发布成功**。
-  MP.toast('评论功能还没接上后端（下一步做）');
+  const submit = cForm.querySelector('[type="submit"]');
+  submit.disabled = true;
+  const added = await addCommentFromInput(cInput.value);
+  if (added) cInput.value = '';
+  submit.disabled = false;
 });
 
 /* ---------------------------------------------------------------- 启动 */
@@ -617,7 +703,6 @@ async function boot() {
     likes: s.likes || 0,
     favorites: s.favorites || 0,
     comments: s.comments || 0,
-    coins: Math.floor((s.likes || 0) / 4),   // 后端没有投币概念，按老规则派生
   };
   liked = !!s.liked;
   favored = !!s.favorited;
@@ -646,12 +731,14 @@ async function boot() {
     document.getElementById('toAuthor').textContent = '';
   }
 
-  // 评论：后端没有接口，所以明确说清"这里是空的"，而不是放几条演示评论
-  cEmpty.textContent = '评论功能还没接上后端，所以这里暂时是空的。';
-
   renderFrame();
   renderBar();
   renderComments();
+  loadComments().catch((error) => {
+    cEmpty.textContent = error.message || '评论加载失败，稍后再试';
+    cEmpty.hidden = false;
+  });
+  if (a?.id && a.id !== me?.id) loadSocial();
 }
 
 boot();
