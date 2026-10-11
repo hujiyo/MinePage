@@ -8,8 +8,6 @@
 </head>
 <body>
 <main class="page wide">
-  <div id="bannerArea"></div>
-
   <div class="homeGrid">
     <div>
       <div class="secHead">
@@ -28,11 +26,6 @@
           <a class="more" href="/?sort=rank">更多</a>
         </div>
         <div class="rankList" id="rank"></div>
-      </div>
-
-      <div>
-        <div class="secHead"><h2>热搜</h2></div>
-        <div class="rankList" id="hot"></div>
       </div>
 
       <div class="panel">
@@ -62,7 +55,6 @@ const cardsBox = document.getElementById('cards');
 const pagerBox = document.getElementById('pager');
 const feedTitle = document.getElementById('feedTitle');
 const rankBox = document.getElementById('rank');
-const hotBox = document.getElementById('hot');
 
 // ---------------------------------------------------------------- 分类 chips
 
@@ -85,13 +77,42 @@ function renderChips() {
 // ---------------------------------------------------------------- 侧栏
 
 /**
- * 渲染右侧栏两块列表：「热门榜单」「热搜」。
- * 演示数据已删除：热搜词需要服务端搜索日志聚合（后端暂无接口），
- * 热门榜单后续可用 /api/discover?sort=views 取前 10 接上，前端均未接线，先给空态占位。
+ * 用现有发现接口查询按浏览量排序的前十个公开站点。
  */
-function renderSide() {
-  rankBox.innerHTML = '<div class="empty">暂无数据</div>';
-  hotBox.innerHTML = '<div class="empty">暂无热搜</div>';
+async function renderSide() {
+  rankBox.innerHTML = '<div class="empty">榜单加载中…</div>';
+  try {
+    const res = await fetch('/api/discover?sort=views&page=1&size=10', { headers: { Accept: 'application/json' } });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.ok || !Array.isArray(data.sites)) throw new Error(data?.message || '榜单加载失败');
+    rankBox.textContent = '';
+    if (!data.sites.length) {
+      rankBox.innerHTML = '<div class="empty">暂无公开作品</div>';
+      return;
+    }
+    data.sites.forEach((site, index) => {
+      const item = document.createElement('a');
+      item.className = 'rankItem';
+      item.href = '/view/' + encodeURIComponent(site.name);
+      const number = document.createElement('span');
+      number.className = 'no';
+      number.textContent = String(index + 1);
+      const name = document.createElement('span');
+      name.className = 'rw';
+      name.textContent = site.title || site.name;
+      const views = document.createElement('span');
+      views.className = 'rv';
+      views.textContent = MP.fmtNum(site.views) + ' 浏览';
+      item.append(number, name, views);
+      rankBox.appendChild(item);
+    });
+  } catch (error) {
+    rankBox.textContent = '';
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = error.message || '榜单加载失败';
+    rankBox.appendChild(empty);
+  }
 }
 
 // ---------------------------------------------------------------- 列表
@@ -182,7 +203,6 @@ function renderPager(data) {
   slot('下一页', cur + 1, { disabled: cur >= pages });
 }
 
-// 轮播位（bannerArea）已留空：Banner 属运营配置，后端暂无接口，等配置接口就绪后再挂载。
 renderChips();
 renderSide();
 reload();
