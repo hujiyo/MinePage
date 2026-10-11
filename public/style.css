@@ -644,32 +644,6 @@ section { margin-top: 32px; }
 .tsHist { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
 .tsHist .chip { padding: 3px 12px; font-size: 12px; }
 .tsHist .none { color: var(--muted); font-size: 12px; padding: 2px 0 8px; }
-.tsHot .hRow {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 5px 6px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-}
-.tsHot .hRow:hover { background: var(--panel2); }
-.hNo {
-  width: 18px;
-  text-align: center;
-  font-style: italic;
-  font-weight: 700;
-  color: var(--muted);
-  font-size: 13px;
-  flex: none;
-}
-.hNo.top1 { color: var(--danger); }
-.hNo.top2 { color: #ff8f3c; }
-.hNo.top3 { color: #ffb02e; }
-.hWord { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hWord .hTag { color: var(--danger); font-size: 11px; font-weight: 600; margin-left: 4px; }
-.hVal { color: var(--muted); font-size: 12px; flex: none; }
-
 .tacts { display: flex; gap: 2px; flex: none; margin-left: auto; }
 .tact {
   position: relative;
@@ -863,6 +837,7 @@ section { margin-top: 32px; }
 }
 .rankItem {
   display: flex;
+  color: var(--text);
   align-items: center;
   gap: 10px;
   padding: 7px 14px;

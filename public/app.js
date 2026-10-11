@@ -2,8 +2,7 @@
    MinePage 前端公共脚本（app.js）
    职责：图标库 / 统一顶栏 / 搜索下拉 / 卡片渲染
    ------------------------------------------------------------
-   页面数据一律走 /api/* 真实接口；演示数据已全部移除，
-   尚未接线的页面以空态展示（各页顶部有 TODO 标记）。
+   页面数据一律走 /api/* 真实接口。
    ============================================================ */
 
 (function () {
@@ -272,7 +271,7 @@
    * 拼出顶栏的 HTML 字符串（只返回字符串，不碰 DOM）。
    * 这里刻意按「未登录」渲染用户区和未读红点：真实会话是异步来的，先渲染假账号会闪一下错账号，
    * 拿到会话后由 MP.topbar 用 innerHTML 把那两处补上。
-   * active 与 NAVS 的 key 对应，决定哪个导航项加 .on；搜索历史与热搜此刻还是空的，挂载后再填。
+   * active 与 NAVS 的 key 对应，决定哪个导航项加 .on；搜索历史挂载后填入。
    */
   function topbarHtml(active) {
     const nav = NAVS.map((n) => '<a href="' + n.href + '"'
@@ -291,8 +290,6 @@
       +     '<div class="tsPanel">'
       +       '<div class="tsSec"><span>搜索历史</span><span class="clr" id="tsClear">清空</span></div>'
       +       '<div class="tsHist" id="tsHist"></div>'
-      +       '<div class="tsSec" style="margin-top:6px">' + icon('fire') + '<span style="flex:1">热门搜索</span></div>'
-      +       '<div class="tsHot" id="tsHot"></div>'
       +     '</div>'
       +   '</div>'
       +   '<div class="tacts" id="tacts">' + tactsInner(null) + '</div>'
@@ -325,7 +322,6 @@
     const ts = header.querySelector('#ts');
     const input = header.querySelector('#tsInput');
     const histBox = header.querySelector('#tsHist');
-    const hotBox = header.querySelector('#tsHot');
 
     const params = new URLSearchParams(location.search);
     if (params.get('q')) input.value = params.get('q');
@@ -347,8 +343,6 @@
         histBox.appendChild(el);
       });
     }
-
-    hotBox.innerHTML = '<span class="none">暂无热搜</span>';
 
     renderHist();
     header.querySelector('#tsClear').addEventListener('mousedown', (e) => {
