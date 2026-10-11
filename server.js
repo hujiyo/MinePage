@@ -65,6 +65,7 @@ import {
   listAllSites,
   listSiteFiles,
   listSitesByOwner,
+  publishSiteZip,
   removeSiteFile,
   setSiteStatus,
   siteTagLabel,
@@ -931,22 +932,8 @@ async function handleSiteZipUpload(req, res, [name]) {
   const zipBuf = await readFileBody(req, res, MAX_ZIP_BYTES);
   if (!zipBuf) return;
 
-  let site = await findSiteHeaderByName(checked.name);
-  if (!site) {
-    try {
-      await createSite({ name: checked.name, html: '', ownerId: user.id });
-      site = await findSiteHeaderByName(checked.name);
-    } catch (err) {
-      if (err.code === 'NAME_TAKEN') {
-        sendJson(res, 409, { ok: false, message: err.message });
-        return;
-      }
-      console.error('[site-zip-upload]', err);
-      sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
-      return;
-    }
-  }
-  if (site.owner_id !== user.id && !user.isAdmin) {
+  const site = await findSiteHeaderByName(checked.name);
+  if (site && site.owner_id !== user.id && !user.isAdmin) {
     sendJson(res, 403, { ok: false, message: '只能操作自己的站点' });
     return;
   }
@@ -963,58 +950,37 @@ async function handleSiteZipUpload(req, res, [name]) {
     return;
   }
 
-  const existing = await listSiteFiles(site.id);
-  const sizeByPath = new Map(existing.map((f) => [f.path, f.size]));
-  let totalBytes = existing.reduce((s, f) => s + f.size, 0);
-  const skipped = [...parsed.skipped];
-  let saved = 0;
-
-  for (const e of parsed.entries) {
-    if (!isValidSitePath(e.path)) {
-      skipped.push({ path: e.path, reason: '路径不合法或含垃圾文件' });
-      continue;
-    }
-    if (e.content.length === 0) {
-      skipped.push({ path: e.path, reason: '空文件' });
-      continue;
-    }
-    if (e.content.length > MAX_FILE_BYTES) {
-      skipped.push({ path: e.path, reason: '超过单文件上限' });
-      continue;
-    }
-    const isNew = !sizeByPath.has(e.path);
-    if (isNew && sizeByPath.size >= MAX_FILES_PER_SITE) {
-      skipped.push({ path: e.path, reason: '文件数超上限' });
-      continue;
-    }
-    const oldSize = sizeByPath.get(e.path) ?? 0;
-    if (totalBytes - oldSize + e.content.length > MAX_SITE_TOTAL_BYTES) {
-      skipped.push({ path: e.path, reason: '站点总容量超限' });
-      continue;
-    }
-
-    totalBytes = totalBytes - oldSize + e.content.length;
-    sizeByPath.set(e.path, e.content.length);
-    await upsertSiteFile(site.id, e.path, e.content);
-    saved++;
-  }
-
-  if (saved === 0) {
-    sendJson(res, 400, {
-      ok: false,
-      message: 'zip 里没有可发布的文件' + (skipped.length ? `（${skipped.length} 个条目被跳过）` : ''),
-      skipped: skipped.slice(0, 20),
+  try {
+    const { saved, skipped, totalBytes } = await publishSiteZip({
+      name: checked.name,
+      ownerId: user.id,
+      isAdmin: user.isAdmin,
+      entries: parsed.entries,
+      skipped: parsed.skipped,
     });
-    return;
+    sendJson(res, 201, {
+      ok: true,
+      saved,
+      skipped: skipped.length,
+      skipList: skipped.slice(0, 20),
+      totalBytes,
+    });
+  } catch (err) {
+    if (err.code === 'NO_FILES') {
+      sendJson(res, 400, {
+        ok: false,
+        message: 'zip 里没有可发布的文件' + (err.skipped.length ? `（${err.skipped.length} 个条目被跳过）` : ''),
+        skipped: err.skipped.slice(0, 20),
+      });
+      return;
+    }
+    if (err.code === 'FORBIDDEN' || err.code === 'NAME_TAKEN') {
+      sendJson(res, err.code === 'FORBIDDEN' ? 403 : 409, { ok: false, message: err.message });
+      return;
+    }
+    console.error('[site-zip-upload]', err);
+    sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
   }
-
-  sendJson(res, 201, {
-    ok: true,
-    saved,
-    skipped: skipped.length,
-    skipList: skipped.slice(0, 20),
-    totalBytes,
-  });
 }
 
 /** 列出站点里的全部文件（不含内容）。站点的主人或管理员可看。 */
