@@ -59,6 +59,7 @@ const msg = document.getElementById('msg');
 
 let hideTimer = null;
 
+/** 造一个只放文本的单元格 `<td>`（className 可选）；返回的元素还没挂进表格，由调用方 append。 */
 function td(text, className) {
   const cell = document.createElement('td');
   if (className) cell.className = className;
@@ -66,6 +67,7 @@ function td(text, className) {
   return cell;
 }
 
+/** 造一个状态徽章 `<span class="badge">`；kind 是额外修饰类（'ok' / 'bad' / 'admin'），不传就是朴素徽章。 */
 function badge(text, kind) {
   const el = document.createElement('span');
   el.className = 'badge' + (kind ? ' ' + kind : '');
@@ -73,6 +75,7 @@ function badge(text, kind) {
   return el;
 }
 
+/** 造一个小按钮（固定 'tiny' 类 + 传入的额外类），handler 直接挂 click；返回的元素同样还没挂载。 */
 function tinyButton(label, className, handler) {
   const button = document.createElement('button');
   button.type = 'button';
@@ -82,9 +85,15 @@ function tinyButton(label, className, handler) {
   return button;
 }
 
+/** 后端给的 ISO 时间串转成本地时间显示；空值显示 '—'。 */
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('zh-CN') : '—');
+/** 文件大小的粗略显示：小于 1 KB 直接用 B，否则折算成 KB（只留一位小数）。 */
 const fmtSize = (n) => (n < 1024 ? n + ' B' : (n / 1024).toFixed(1) + ' KB');
 
+/**
+ * 在页面底部的结果条里显示一条提示。
+ * 副作用：3 秒后自动隐藏；连续调用会重置计时器，所以前一条提示会被后一条顶掉。
+ */
 function showMsg(ok, text) {
   msg.hidden = false;
   msg.className = 'result ' + (ok ? 'ok' : 'err');
@@ -94,6 +103,12 @@ function showMsg(ok, text) {
   hideTimer = setTimeout(() => { msg.hidden = true; }, 3000);
 }
 
+/**
+ * 带统一错误处理的请求封装：HTTP 状态码非 2xx，或响应体里 ok !== true，都会抛错。
+ * 返回的是整个响应体，管理接口的关键字段在 total / users / sites 上。
+ * 注意：响应不是合法 JSON 时（例如网关直接回 HTML 错误页），异常来自 res.json() 本身，
+ * 消息不是后端的 message，只会是一句 JSON 解析错误。
+ */
 async function api(url, options) {
   const res = await fetch(url, options);
   const data = await res.json();
@@ -101,6 +116,10 @@ async function api(url, options) {
   return data;
 }
 
+/**
+ * 用 GET /api/admin/users 返回的用户数组重建用户表（先清空 tbody，空数组时显示一行「还没有用户」）。
+ * 账号列优先显示 username，没有才退回 email；操作按钮按当前状态在「封禁 / 解封」之间切换。
+ */
 function renderUsers(users) {
   usersBody.textContent = '';
 
@@ -146,6 +165,11 @@ function renderUsers(users) {
   });
 }
 
+/**
+ * 用 GET /api/admin/sites 返回的页面数组重建页面表（空数组时显示一行「还没有页面」）。
+ * 归属列取 owner_username / owner_email，都没有时显示「（无归属）」；每行带「下线 / 恢复」和「删除」。
+ * 删除按钮把整个 site 对象交给 removeSite —— 那边要用 site.name 拼确认文案，所以不能只传 id。
+ */
 function renderSites(sites) {
   sitesBody.textContent = '';
 
@@ -198,6 +222,11 @@ function renderSites(sites) {
   });
 }
 
+/**
+ * 封禁 / 解封一个用户：POST /api/admin/users/:id/status。
+ * 服务端只认 'active' 和 'banned'，其它值一律当 'active'；也会拒绝管理员封自己。
+ * 成功后整页重拉（loadAll），失败把后端消息交给 showMsg。
+ */
 async function setUserStatus(id, status) {
   try {
     await api('/api/admin/users/' + id + '/status', {
@@ -212,6 +241,11 @@ async function setUserStatus(id, status) {
   }
 }
 
+/**
+ * 下线 / 恢复一个页面：POST /api/admin/sites/:id/status。
+ * 服务端只认 'active' 和 'offline'，其它值一律当 'active'；成功后整页重拉（loadAll）。
+ * 「下线」只是状态标记，页面和文件都还在，随时可以恢复。
+ */
 async function setSiteStatus(id, status) {
   try {
     await api('/api/admin/sites/' + id + '/status', {
@@ -226,6 +260,10 @@ async function setSiteStatus(id, status) {
   }
 }
 
+/**
+ * 删除一个页面：DELETE /api/admin/sites/:id，删之前先弹 confirm。
+ * 只是前端确认，后端不做二次询问，删掉的页面和文件都找不回来。
+ */
 async function removeSite(site) {
   if (!confirm('确定删除 /' + site.name + ' 吗？删了就找不回来了。')) return;
 
@@ -238,6 +276,12 @@ async function removeSite(site) {
   }
 }
 
+/**
+ * 拉取后台概览并整体刷新：GET /api/me、/api/admin/users、/api/admin/sites 三个并发，
+ * 写顶部统计条和两张表。启动时调一次，之后每次改动成功都会再调一次。
+ * 陷阱：/api/me 对匿名请求也返回 200 + user:null，真正拦住非管理员的是后两个接口的
+ * 401 / 403，它们让 api() 抛错，结果只剩一条错误提示、两张表保持空白。
+ */
 async function loadAll() {
   try {
     const results = await Promise.all([

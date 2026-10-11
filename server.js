@@ -1,5 +1,6 @@
 import http from 'node:http';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -10,6 +11,8 @@ import {
   MAX_BODY_BYTES,
   MAX_FILE_BYTES,
   MAX_FILES_PER_SITE,
+  MAX_SITE_TOTAL_BYTES,
+  MAX_ZIP_BYTES,
   SESSION_COOKIE,
   SESSION_TTL_DAYS,
   COOKIE_SECURE,
@@ -65,11 +68,13 @@ import {
   removeSiteFile,
   setSiteStatus,
   siteTagLabel,
+  totalSiteFileSize,
   updateSiteHtml,
   updateSiteMeta,
   upsertSiteFile,
   SITE_TAGS,
 } from './lib/sites.js';
+import { parseZip } from './lib/zip.js';
 import {
   addComment,
   countComments,
@@ -117,6 +122,32 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 // 现在平台上有了登录 Cookie，这道墙不再是「保险」而是「必需品」。
 const SANDBOX_CSP =
   'sandbox allow-scripts allow-forms allow-popups allow-downloads allow-top-navigation-by-user-activation';
+
+// 迷你封面滚动代理：注入到带 ?mpcover=1 的入口页。
+// 封面 iframe 是沙箱（opaque origin），父页面摸不到它的内部滚动，
+// 只能 postMessage 让页面自己滚 —— 等价于真实浏览器窗口往下翻，
+// 「100vh 全屏首屏」这类内容高度跟着视口走的站点也能正常预览下翻。
+// mpPeekSpeed：匀速下翻（px/s，到底循环）；mpPeekStop：停下回顶；mpPeekTo：滚到指定位置。
+// 一律 behavior:'instant'：模板常设 scroll-behavior:smooth，平滑滚动既拖慢步进又会卡在半路。
+const MPEEK_PROXY =
+  '<script>(function(){var s=0,sp=0,raf=0,last=0;' +
+  'function tick(t){if(!sp)return;var dt=Math.min((t-last)/1000,0.1);last=t;' +
+  'var max=document.documentElement.scrollHeight-window.innerHeight;' +
+  'if(max<=0){raf=requestAnimationFrame(tick);return;}' +
+  's+=sp*dt;if(s>=max)s=0;window.scrollTo({top:s,behavior:"instant"});raf=requestAnimationFrame(tick);}' +
+  'window.addEventListener("message",function(e){var d=e.data||{};' +
+  'if(d.mpPeekSpeed!=null){sp=d.mpPeekSpeed;last=performance.now();if(sp&&!raf)raf=requestAnimationFrame(tick);}' +
+  'else if(d.mpPeekStop){sp=0;if(raf)cancelAnimationFrame(raf);raf=0;window.scrollTo({top:0,behavior:"instant"});}' +
+  'else if(d.mpPeekTo!=null){window.scrollTo({top:d.mpPeekTo,behavior:"instant"});}});' +
+  'parent.postMessage({mpReady:1},"*");})();</script>';
+
+// 把代理脚本插到最后一个 </body> 前，找不到就追加到末尾；Buffer 进 Buffer 出，string 进 string 出
+function injectPeekProxy(html) {
+  const s = html.toString('utf8');
+  const i = s.toLowerCase().lastIndexOf('</body');
+  const out = i === -1 ? s + MPEEK_PROXY : s.slice(0, i) + MPEEK_PROXY + s.slice(i);
+  return Buffer.isBuffer(html) ? Buffer.from(out, 'utf8') : out;
+}
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -171,6 +202,43 @@ function sendHtml(res, status, html, extraHeaders = {}) {
 function sendRedirect(res, location) {
   res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
   res.end();
+}
+
+// ---------------------------------------------------------------- 响应压缩（gzip）
+
+// 可压缩的文本类扩展名；图片/字体/视频已是二进制，压了更慢，不列。
+const GZIP_EXTS = new Set([
+  '.html', '.htm', '.css', '.js', '.mjs', '.json', '.svg', '.xml', '.txt', '.map', '.webmanifest',
+]);
+const GZIP_MIN_BYTES = 512; // 太小的响应不值得压（省不下多少还费 CPU）
+
+/** 请求头里是否声明接受 gzip。 */
+function acceptsGzip(req) {
+  return /\bgzip\b/i.test(String(req.headers['accept-encoding'] ?? ''));
+}
+
+/**
+ * 按需 gzip：客户端不接、非文本类型、体积太小三种情况都原样返回。
+ * 返回 { body, gzip }，调用方据此决定要不要写 Content-Encoding 与 Vary。
+ * 关键点：压缩做在应用里，本地/生产同一份代码都生效，不再依赖 nginx 的 gzip 配置。
+ */
+function maybeGzip(req, input, ext) {
+  const buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input), 'utf8');
+  if (!GZIP_EXTS.has(ext) || buf.length < GZIP_MIN_BYTES || !acceptsGzip(req)) {
+    return { body: buf, gzip: false };
+  }
+  return { body: zlib.gzipSync(buf), gzip: true };
+}
+
+/** 按 gzip 结果补头并下发一条响应（Content-Length 用压缩后的真实长度）。 */
+function sendWithGzip(req, res, status, headers, input, ext) {
+  const { body, gzip } = maybeGzip(req, input, ext);
+  res.writeHead(status, {
+    ...headers,
+    ...(gzip ? { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' } : {}),
+    'Content-Length': body.length,
+  });
+  res.end(body);
 }
 
 async function sendPage(res, filename, status = 200) {
@@ -395,12 +463,11 @@ async function handleAsset(req, res, [file]) {
 
   try {
     const data = await fs.readFile(path.join(PUBLIC_DIR, file));
-    res.writeHead(200, {
-      'Content-Type': MIME_TYPES[path.extname(file).toLowerCase()] ?? 'application/octet-stream',
-      'Content-Length': data.length,
+    const ext = path.extname(file).toLowerCase();
+    sendWithGzip(req, res, 200, {
+      'Content-Type': MIME_TYPES[ext] ?? 'application/octet-stream',
       'Cache-Control': 'no-cache',
-    });
-    res.end(data);
+    }, data, ext);
   } catch {
     sendHtml(res, 404, messagePage('404', '找不到这个文件。'));
   }
@@ -830,9 +897,123 @@ async function handleSiteFileUpload(req, res, [name]) {
     sendJson(res, 409, { ok: false, message: `站点文件太多啦，上限 ${MAX_FILES_PER_SITE} 个` });
     return;
   }
+  // 单站总容量：把被覆盖文件的旧体积扣掉只算增量，超 512 MB 拒收
+  const usedBytes = await totalSiteFileSize(site.id, filePath);
+  if (usedBytes + content.length > MAX_SITE_TOTAL_BYTES) {
+    sendJson(res, 413, {
+      ok: false,
+      message: `站点总容量超限，单站上限 ${Math.round(MAX_SITE_TOTAL_BYTES / 1024 / 1024)} MB`,
+    });
+    return;
+  }
 
   const saved = await upsertSiteFile(site.id, filePath, content);
   sendJson(res, isNew ? 201 : 200, { ok: true, path: saved.path, size: saved.size });
+}
+
+/**
+ * POST /api/sites/:name/zip：zip 直传整包发布（Netlify Drop 式交互）。
+ * body 是 zip 字节流（≤ MAX_ZIP_BYTES），服务端零依赖解压后逐个入库：
+ * 路径过滤（非法/垃圾/隐藏文件）→ 文件数与总容量校验 → upsert。
+ * 跳过的条目在响应里列出前 20 条，方便前端提示"这些没进来"。
+ */
+async function handleSiteZipUpload(req, res, [name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const checked = checkName(name);
+  if (!checked.ok) {
+    sendJson(res, 400, { ok: false, message: checked.reason });
+    return;
+  }
+
+  const zipBuf = await readFileBody(req, res, MAX_ZIP_BYTES);
+  if (!zipBuf) return;
+
+  let site = await findSiteHeaderByName(checked.name);
+  if (!site) {
+    try {
+      await createSite({ name: checked.name, html: '', ownerId: user.id });
+      site = await findSiteHeaderByName(checked.name);
+    } catch (err) {
+      if (err.code === 'NAME_TAKEN') {
+        sendJson(res, 409, { ok: false, message: err.message });
+        return;
+      }
+      console.error('[site-zip-upload]', err);
+      sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+      return;
+    }
+  }
+  if (site.owner_id !== user.id && !user.isAdmin) {
+    sendJson(res, 403, { ok: false, message: '只能操作自己的站点' });
+    return;
+  }
+
+  let parsed;
+  try {
+    parsed = parseZip(zipBuf, {
+      maxEntries: MAX_FILES_PER_SITE,
+      maxEntryBytes: MAX_FILE_BYTES,
+      maxTotalBytes: MAX_SITE_TOTAL_BYTES,
+    });
+  } catch (err) {
+    sendJson(res, 400, { ok: false, message: 'zip 解不开：' + err.message });
+    return;
+  }
+
+  const existing = await listSiteFiles(site.id);
+  const sizeByPath = new Map(existing.map((f) => [f.path, f.size]));
+  let totalBytes = existing.reduce((s, f) => s + f.size, 0);
+  const skipped = [...parsed.skipped];
+  let saved = 0;
+
+  for (const e of parsed.entries) {
+    if (!isValidSitePath(e.path)) {
+      skipped.push({ path: e.path, reason: '路径不合法或含垃圾文件' });
+      continue;
+    }
+    if (e.content.length === 0) {
+      skipped.push({ path: e.path, reason: '空文件' });
+      continue;
+    }
+    if (e.content.length > MAX_FILE_BYTES) {
+      skipped.push({ path: e.path, reason: '超过单文件上限' });
+      continue;
+    }
+    const isNew = !sizeByPath.has(e.path);
+    if (isNew && sizeByPath.size >= MAX_FILES_PER_SITE) {
+      skipped.push({ path: e.path, reason: '文件数超上限' });
+      continue;
+    }
+    const oldSize = sizeByPath.get(e.path) ?? 0;
+    if (totalBytes - oldSize + e.content.length > MAX_SITE_TOTAL_BYTES) {
+      skipped.push({ path: e.path, reason: '站点总容量超限' });
+      continue;
+    }
+
+    totalBytes = totalBytes - oldSize + e.content.length;
+    sizeByPath.set(e.path, e.content.length);
+    await upsertSiteFile(site.id, e.path, e.content);
+    saved++;
+  }
+
+  if (saved === 0) {
+    sendJson(res, 400, {
+      ok: false,
+      message: 'zip 里没有可发布的文件' + (skipped.length ? `（${skipped.length} 个条目被跳过）` : ''),
+      skipped: skipped.slice(0, 20),
+    });
+    return;
+  }
+
+  sendJson(res, 201, {
+    ok: true,
+    saved,
+    skipped: skipped.length,
+    skipList: skipped.slice(0, 20),
+    totalBytes,
+  });
 }
 
 /** 列出站点里的全部文件（不含内容）。站点的主人或管理员可看。 */
@@ -1283,7 +1464,8 @@ async function handleFollowList(req, res, [id]) {
 /** tag key -> 中文标签。 */
 const tagLabelOf = (key) => SITE_TAGS.find((t) => t.key === key)?.label ?? '';
 
-/** 社区发现流：公开上线站点 + 互动数字。?q= 模糊搜索，?tag= 标签筛选，?sort= 排序。 */
+/** 社区发现流：公开上线站点 + 互动数字。?q= 模糊搜索，?tag= 标签筛选，?sort= 排序，
+ *  ?page= 页码（从 1 起）、?size= 每页条数（默认 10，夹在 1..50）。 */
 async function handleDiscover(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const q = String(url.searchParams.get('q') ?? '').slice(0, 50);
@@ -1291,12 +1473,19 @@ async function handleDiscover(req, res) {
   const tag = SITE_TAGS.some((t) => t.key === tagParam) ? tagParam : '';
   const sort = String(url.searchParams.get('sort') ?? '');
 
-  const sites = (await discoverSites({ q, tag, sort })).map((s) => ({
-    ...s,
-    tagLabel: tagLabelOf(s.tag),
-  }));
+  const size = Math.min(50, Math.max(1, Number(url.searchParams.get('size')) || 10));
+  const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
 
-  sendJson(res, 200, { ok: true, total: sites.length, sites });
+  const { total, sites } = await discoverSites({ q, tag, sort, limit: size, offset: (page - 1) * size });
+
+  sendJson(res, 200, {
+    ok: true,
+    total,
+    page,
+    size,
+    pages: Math.max(1, Math.ceil(total / size)),
+    sites: sites.map((s) => ({ ...s, tagLabel: tagLabelOf(s.tag) })),
+  });
 }
 
 // ---------------------------------------------------------------- 创作者主页（阶段 3）
@@ -1659,19 +1848,82 @@ async function handleAdminDeleteSite(req, res, [id]) {
 
 // ---------------------------------------------------------------- 用户站点
 
-function serveSiteFile(res, filePath, content) {
+function serveSiteFile(req, res, filePath, content) {
   const ext = path.extname(filePath).toLowerCase();
   // html / svg / xml 都是可以带脚本的文档类型，必须一起关进沙箱
   const isDoc = ext === '.html' || ext === '.htm' || ext === '.svg' || ext === '.xml';
 
-  res.writeHead(200, {
+  const headers = {
     'Content-Type': MIME_TYPES[ext] ?? 'application/octet-stream',
-    'Content-Length': content.length,
     'X-Content-Type-Options': 'nosniff',
-    'Cache-Control': 'no-cache',
+    // HTML 入口保持 no-cache（随时能拿到最新版本，且体积小）；
+    // 其余静态资源（css/js/图片/字体/svg/json）给 1 小时浏览器缓存：
+    // 翻页、回访、多看几个封面时不再重复下载，是"封面慢"的主要缓解手段。
+    'Cache-Control': (ext === '.html' || ext === '.htm') ? 'no-cache' : 'public, max-age=3600',
+    // 宣告支持 Range：视频/音频拖进度条走 206，不会每次整包重下
+    'Accept-Ranges': 'bytes',
+    // 沙箱 CSP 下页面是 opaque origin，字体等子资源请求属跨域，必须带 CORS 头才不报 ERR_FAILED
+    'Access-Control-Allow-Origin': '*',
     ...(isDoc ? { 'Content-Security-Policy': SANDBOX_CSP } : {}),
-  });
-  res.end(content);
+  };
+
+  // 解析单段 Range（bytes=start-end / bytes=start- / bytes=-suffix）。
+  // 多段（含逗号）不支持，按无 Range 处理回整包 200。
+  let start = 0;
+  let end = content.length - 1;
+  const range = req.headers.range;
+  const m = range ? /^bytes=(\d*)-(\d*)$/.exec(range.trim()) : null;
+  if (m && (m[1] !== '' || m[2] !== '')) {
+    if (m[1] === '') {
+      // 尾段：bytes=-N，取末尾 N 字节
+      const suffix = Number(m[2]);
+      start = Math.max(0, content.length - suffix);
+      end = content.length - 1;
+    } else {
+      start = Number(m[1]);
+      end = m[2] === '' ? content.length - 1 : Number(m[2]);
+    }
+
+    if (start >= content.length || start > end) {
+      res.writeHead(416, { 'Content-Range': `bytes */${content.length}` });
+      res.end();
+      return;
+    }
+    if (end >= content.length) end = content.length - 1;
+
+    res.writeHead(206, {
+      ...headers,
+      'Content-Range': `bytes ${start}-${end}/${content.length}`,
+      'Content-Length': end - start + 1,
+    });
+    res.end(content.subarray(start, end + 1));
+    return;
+  }
+
+  sendWithGzip(req, res, 200, headers, content, ext);
+}
+
+/**
+ * 入口页识别：index.html → index.htm → default.html → 路径最浅的 html → 兜底 index.html。
+ * 没带根 index.html 的模板包（如整包源码，首页散在子目录里）靠它落位；
+ * 一次 listSiteFiles 把整站路径拉出来挑，不逐个试读 BLOB。
+ */
+async function pickEntryPath(siteId) {
+  const files = await listSiteFiles(siteId);
+  const names = new Set(files.map((f) => f.path));
+  for (const c of ['index.html', 'index.htm', 'default.html']) {
+    if (names.has(c)) return c;
+  }
+
+  let best = null;
+  for (const f of files) {
+    if (!/\.html?$/i.test(f.path)) continue;
+    const depth = f.path.split('/').length;
+    if (!best || depth < best.depth || (depth === best.depth && f.path < best.path)) {
+      best = { path: f.path, depth };
+    }
+  }
+  return best ? best.path : 'index.html';
 }
 
 async function handleSite(req, res, [name, rest = '']) {
@@ -1686,23 +1938,30 @@ async function handleSite(req, res, [name, rest = '']) {
     return;
   }
 
-  // /站点名 和 /站点名/ 都算入口页；其余去掉开头的 / 得到站点内路径
-  const filePath = !rest || rest === '/' ? 'index.html' : rest.slice(1);
+  // /站点名 和 /站点名/ 都算入口页（走 pickEntryPath 识别）；其余去掉开头的 / 得到站点内路径
+  const isRoot = !rest || rest === '/';
+  const filePath = isRoot ? await pickEntryPath(site.id) : rest.slice(1);
+
+  // 广场迷你封面专用（?mpcover=1）：给入口 HTML 注入滚动代理脚本，
+  // 父页面才能 postMessage 驱动内部下翻；/view/站名 等直接访问不带参，不受影响
+  const forCover =
+    isRoot && new URL(req.url, 'http://internal').searchParams.get('mpcover') === '1';
 
   const content = await getSiteFile(site.id, filePath);
   if (content) {
     // 浏览量简单版：只有入口页 +1，站内 css / js 等子资源不算
-    if (filePath === 'index.html') await incrementViews(site.id);
-    serveSiteFile(res, filePath, content);
+    if (isRoot) await incrementViews(site.id);
+    const out = forCover && /\.html?$/i.test(filePath) ? injectPeekProxy(content) : content;
+    serveSiteFile(req, res, filePath, out);
     return;
   }
 
   // 老的「单 HTML 文件」站点：内容存在 sites.html 里，只兜入口页
-  if (filePath === 'index.html') {
+  if (isRoot) {
     const legacy = await findSiteByName(name);
     if (legacy && legacy.html && legacy.html.trim() !== '') {
       await incrementViews(site.id);
-      sendHtml(res, 200, legacy.html, {
+      sendHtml(res, 200, forCover ? injectPeekProxy(legacy.html) : legacy.html, {
         'Content-Security-Policy': SANDBOX_CSP,
         'Cache-Control': 'no-cache',
       });
@@ -1758,6 +2017,7 @@ const ROUTES = [
   ['DELETE', /^\/api\/sites\/([a-z0-9-]+)$/, handleSiteDelete],
   ['GET', /^\/api\/sites\/([a-z0-9-]+)\/files$/, handleSiteFilesList],
   ['POST', /^\/api\/sites\/([a-z0-9-]+)\/files$/, handleSiteFileUpload],
+  ['POST', /^\/api\/sites\/([a-z0-9-]+)\/zip$/, handleSiteZipUpload],
   ['GET', /^\/api\/sites\/([a-z0-9-]+)\/files\/content$/, handleSiteFileContent],
   ['DELETE', /^\/api\/sites\/([a-z0-9-]+)\/files$/, handleSiteFileDelete],
 
@@ -1803,7 +2063,7 @@ const ROUTES = [
 async function handleRequest(req, res) {
   const { pathname } = new URL(req.url, 'http://internal');
 
-  if (req.method === 'GET' && pathname === '/favicon.ico') {
+  if ((req.method === 'GET' || req.method === 'HEAD') && pathname === '/favicon.ico') {
     res.writeHead(204);
     res.end();
     return;
@@ -1832,7 +2092,8 @@ async function handleRequest(req, res) {
 
   // 平台自己的路由都没命中，最后才考虑用户站点
   // /站点名 或 /站点名/任意/相对/路径.css
-  if (req.method === 'GET') {
+  // HEAD 也放行：探测站点/资源是否存在时不用拿整包；响应体由 Node 按 HEAD 自动省略
+  if (req.method === 'GET' || req.method === 'HEAD') {
     const m = pathname.match(/^\/([a-z0-9-]+)(\/.*)?$/);
     if (m) {
       await handleSite(req, res, [m[1], m[2] ?? '']);

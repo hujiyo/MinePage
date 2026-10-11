@@ -74,12 +74,20 @@ MP.topbar();
 
 const msg = document.getElementById('msg');
 
+/**
+ * 在页面底部显示一条结果（ok 决定绿色 / 红色配色），纯文本写入，每次调用覆盖上一条。
+ */
 function showMsg(ok, text) {
   msg.hidden = false;
   msg.className = 'result ' + (ok ? 'ok' : 'err');
   msg.textContent = text;
 }
 
+/**
+ * POST JSON 的薄封装：把 payload 序列化成请求体，返回解析后的响应 JSON。
+ * 不看 HTTP 状态码、也不吞异常，所以调用方要用 try/catch 兜网络错，
+ * 并靠返回体里的 ok 字段判断成功与否（服务端即使 400 也会带 ok:false 和 message）。
+ */
 async function postJson(url, payload) {
   const res = await fetch(url, {
     method: 'POST',
@@ -91,6 +99,12 @@ async function postJson(url, payload) {
 
 // ---------------------------------------------------------------- 身份
 
+/**
+ * 把 /api/me 拿到的用户渲染进身份卡片（头像首字、展示名、管理员角标、邮箱、注册时间、简介），
+ * 并回填用户名和简介两个表单的初值。
+ * 只读参数、不发请求；头像取 username，没设置过就退回邮箱；用户名输入框的 placeholder
+ * 会按「已设置 / 未设置」切换措辞。
+ */
 function renderMe(me) {
   const label = me.username || me.email;
   document.getElementById('avatar').textContent = label.charAt(0).toUpperCase();

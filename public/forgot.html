@@ -64,17 +64,24 @@ const passwordInput = document.getElementById('password');
 const sendCodeBtn = document.getElementById('sendCode');
 const codeHint = document.getElementById('codeHint');
 
+/** 在表单下方显示一条错误 / 提示；成功后的那块「已改好」提示是另一个 DOM（done），不走这里。 */
 function showMsg(ok, text) {
   msg.hidden = false;
   msg.className = 'result ' + (ok ? 'ok' : 'err');
   msg.textContent = text;
 }
 
+/** 邮箱格式是否合法（只做最宽松的形状校验）；它同时决定发送按钮能不能点。 */
 const emailOk = () => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailInput.value.trim());
 
 let countdown = 0;
 let timer = null;
 
+/**
+ * 禁用「发送验证码」按钮并按秒倒计时，结束后文案改成「重新发送」，
+ * 且此时是否可点取决于邮箱格式是否合法（和输入框的 input 监听是同一套判断）。
+ * 副作用：覆盖模块级的 timer；本文件只在发送成功后调用，所以按钮已经处于禁用状态。
+ */
 function startCountdown(seconds) {
   countdown = seconds;
   sendCodeBtn.disabled = true;
@@ -94,6 +101,11 @@ emailInput.addEventListener('input', () => {
   if (countdown <= 0) sendCodeBtn.disabled = !emailOk();
 });
 
+/**
+ * 发一个 JSON POST 并返回解析后的响应体。
+ * 注意：不看 HTTP 状态码，成败一律由调用方判断 data.ok；而且服务端对「邮箱没注册过」
+ * 故意也回 ok: true（防探测），所以 data.ok 不等于验证码真的发出去了。
+ */
 async function post(url, payload) {
   const res = await fetch(url, {
     method: 'POST',

@@ -23,22 +23,8 @@
 <script>
 MP.topbar({ active: 'dynamic' });
 
-// TODO 后端对接：替换为 fetch('/api/notifications')
-let items = [
-  { type: 'comment', actor: '小林', actorUsername: 'lin', siteName: 'weekly-blog', siteTitle: '前端周刊笔记 · 第 42 期',
-    snippet: '渲染性能那一段很有帮助，能否再展开讲讲批量更新？', at: Date.now() - 8 * 60e3, unread: true },
-  { type: 'like', actor: 'Aurora', actorUsername: 'aurora', siteName: 'linkhub', siteTitle: '我的社交聚合页 · LinkHub',
-    at: Date.now() - 42 * 60e3, unread: true },
-  { type: 'favorite', actor: 'Byte', actorUsername: 'byte', siteName: 'ui-notes', siteTitle: '设计系统笔记 · 色彩与间距',
-    at: Date.now() - 3 * 3600e3, unread: true },
-  { type: 'follow', actor: 'Momo', actorUsername: 'momo', at: Date.now() - 26 * 3600e3 },
-  { type: 'like', actor: 'Ken', actorUsername: 'ken', siteName: 'grad-apply', siteTitle: '保研材料汇总页（简历+项目+成绩）',
-    at: Date.now() - 2 * 86400e3 },
-  { type: 'comment', actor: 'Momo', actorUsername: 'momo', siteName: 'weekly-blog', siteTitle: '前端周刊笔记 · 第 42 期',
-    snippet: '已经在团队周会上分享了，感谢整理！', at: Date.now() - 4 * 86400e3 },
-  { type: 'system', actor: 'MinePage 小助手',
-    snippet: '你投稿的「我的社交聚合页 · LinkHub」已通过审核，现在可以在首页被搜索到了。', at: Date.now() - 6 * 86400e3 },
-];
+// TODO 后端对接：替换为 fetch('/api/notifications')；通知接口后端已有（含已读上报），前端尚未接线
+let items = [];
 
 const TABS = [
   { key: 'all', label: '全部' },
@@ -61,6 +47,7 @@ const tabsBox = document.getElementById('tabs');
 const listBox = document.getElementById('list');
 const emptyBox = document.getElementById('empty');
 
+/** 把毫秒时间戳转成「刚刚 / N 分钟前 / N 小时前 / N 天前」，超过 30 天就直接显示日期。 */
 function fmtTime(ts) {
   const diff = (Date.now() - ts) / 1000;
   if (diff < 60) return '刚刚';
@@ -71,12 +58,17 @@ function fmtTime(ts) {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
 
+/**
+ * 判断一条通知是否属于当前选中的标签。
+ * 'interact' 是前端自己造的伪标签，对应 like 和 favorite 两种类型，后端没有这个值。
+ */
 function match(it) {
   if (tab === 'all') return true;
   if (tab === 'interact') return it.type === 'like' || it.type === 'favorite';
   return it.type === tab;
 }
 
+/** 重建顶部标签行；点某个标签会改 tab、重画标签高亮，并立刻重画列表。 */
 function renderTabs() {
   tabsBox.textContent = '';
   TABS.forEach((t) => {
@@ -88,6 +80,11 @@ function renderTabs() {
   });
 }
 
+/**
+ * 造一条通知的 DOM：头像取 actor 首字，非系统通知会把 actor（用户名存在时）和页面名做成链接，
+ * 有 snippet 才多一行摘要。返回的元素没有挂进 DOM，由 render() 负责 append。
+ * 注意：actor 是必填的（要取 actor[0]），缺了会直接抛错。
+ */
 function renderItem(it) {
   const el = document.createElement('div');
   el.className = 'rowItem' + (it.unread ? ' unread' : '');
@@ -145,6 +142,12 @@ function renderItem(it) {
   return el;
 }
 
+/**
+ * 按当前标签过滤后重画列表，并切换空态提示与列表容器的显隐。
+ * 数据源是页内那个演示数组 items，**不发任何请求**：后端其实已经有 GET /api/notifications
+ * （见文件顶部的 TODO）。页面右上角那个「全部标为已读」也一样，只改内存、不调
+ * POST /api/notifications/seen，所以刷新后未读高亮必然复原。
+ */
 function render() {
   listBox.textContent = '';
   const list = items.filter(match);

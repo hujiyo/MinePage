@@ -1,9 +1,9 @@
 /* ============================================================
    MinePage 前端公共脚本（app.js）
-   职责：图标库 / 统一顶栏 / 搜索下拉 / 卡片渲染 / 演示数据
+   职责：图标库 / 统一顶栏 / 搜索下拉 / 卡片渲染
    ------------------------------------------------------------
-   当前为「纯前端阶段」：所有用户态与列表数据均为本地演示数据，
-   每处需要后端的地方都留了 TODO，后续接 /api/* 时逐个替换即可。
+   页面数据一律走 /api/* 真实接口；演示数据已全部移除，
+   尚未接线的页面以空态展示（各页顶部有 TODO 标记）。
    ============================================================ */
 
 (function () {
@@ -106,6 +106,10 @@
     'linear-gradient(135deg,#00b7c3,#7fe3e9)',
     'linear-gradient(135deg,#8a6d3b,#d8c39a)',
   ];
+  /**
+   * 按站点名算一个稳定的封面渐变：同名站点每次刷新拿到的颜色都一样。
+   * 取的是 site.name（没有才退到 title），所以改站名会换色；色板是写死的 8 条。
+   */
   function grad(site) {
     const key = String(site.name || site.title || '');
     let h = 0;
@@ -114,23 +118,11 @@
   }
   MP.grad = grad;
 
-  /* ----------------------------------------------------------
-     3. 演示数据（TODO 后端对接：全部替换为 /api/* 返回）
-     ---------------------------------------------------------- */
-
-  const DEMO = { enabled: true };
-
-  // TODO 后端对接：替换为 fetch('/api/me')
-  MP.ME = {
-    name: '演示用户',
-    username: 'demo',
-    email: 'demo@minepage.dev',
-    isAdmin: true,
-    bio: '在做一个个人网页托管社区，随手收集好看的页面。',
-    unread: 3,      // 未读消息
-    dynamic: 5,     // 未读动态
-  };
-
+  // 标签词表。
+  // '' 和 'hot' 是筛选专用的伪标签（服务端不认，也不会被提交）；
+  // 其余 key 必须与服务端 lib/sites.js 的 SITE_TAGS 完全一致，
+  // 否则前端筛选项和服务端存的 key 对不上，筛出来是空的。
+  // tests/scripts/consistency.mjs 会核对这件事。
   const TAGS = [
     { key: '', label: '全部' },
     { key: 'hot', label: '热门' },
@@ -139,94 +131,22 @@
     { key: 'social', label: '社交聚合页' },
     { key: 'blog', label: '技术博客' },
     { key: 'event', label: '活动落地页' },
-    { key: 'oss', label: '开源项目' },
+    { key: 'opensource', label: '开源项目' },
+    { key: 'docs', label: '学习笔记' },
     { key: 'other', label: '其他' },
   ];
   MP.TAGS = TAGS;
 
+  /**
+   * 标签 key → 中文名；词表里查不到的 key 返回空串。
+   * 注意 '' 在词表里是筛选项「全部」，所以没打标签的站点会得到「全部」而不是空串，
+   * 想要别的兜底文案，调用方得自己先判断 key 是否为空（vcard 就是自己兜的）。
+   */
   function tagLabel(key) {
     const t = TAGS.find((x) => x.key === key);
     return t ? t.label : '';
   }
   MP.tagLabel = tagLabel;
-
-  // TODO 后端对接：替换为 fetch('/api/discover')
-  MP.SITES = [
-    { name: 'lin-resume', title: '林同学 · 前端工程师求职简历', tag: 'resume',
-      description: '一份用单页 HTML 写的简历，含项目经历、技能雷达和作品链接。',
-      author: { name: '林同学', username: 'lin' }, views: 12800, likes: 342, favorites: 128, comments: 26, pages: 1 },
-    { name: 'aurora-portfolio', title: 'Aurora 视觉设计作品集', tag: 'portfolio',
-      description: 'Motion 与品牌视觉合集，深色留白排版，滚动动效。',
-      author: { name: 'Aurora', username: 'aurora' }, views: 45200, likes: 1890, favorites: 763, comments: 88, pages: 6 },
-    { name: 'linkhub', title: '我的社交聚合页 · LinkHub', tag: 'social',
-      description: '把微博、GitHub、播客和邮箱收在一页，支持一键复制。',
-      author: { name: '演示用户', username: 'demo' }, views: 7300, likes: 156, favorites: 92, comments: 11, pages: 1 },
-    { name: 'weekly-blog', title: '前端周刊笔记 · 第 42 期', tag: 'blog',
-      description: '每周整理值得读的前端文章，本期聊渲染性能与可访问性。',
-      author: { name: '演示用户', username: 'demo' }, views: 25600, likes: 920, favorites: 431, comments: 54, pages: 12 },
-    { name: 'summer-fest', title: '夏日音乐节 · 活动落地页', tag: 'event',
-      description: '演出阵容、购票入口与场地地图，含倒计时与票务进度条。',
-      author: { name: 'Momo', username: 'momo' }, views: 31500, likes: 1120, favorites: 508, comments: 132, pages: 4 },
-    { name: 'mini-vue', title: 'mini-vue · 200 行读懂响应式', tag: 'oss',
-      description: '手写一个迷你 Vue，附可交互的依赖收集演示页面。',
-      author: { name: 'Byte', username: 'byte' }, views: 68400, likes: 3210, favorites: 1780, comments: 240, pages: 9 },
-    { name: 'coffee-shop', title: '街角咖啡 · 门店与菜单', tag: 'other',
-      description: '小店官网，菜单、营业时间与外卖入口，移动端优先。',
-      author: { name: '豆子', username: 'douzi' }, views: 9400, likes: 210, favorites: 76, comments: 18, pages: 3 },
-    { name: 'ui-notes', title: '设计系统笔记 · 色彩与间距', tag: 'blog',
-      description: '把自己的设计 token 整理成可视化的对比页，方便团队对齐。',
-      author: { name: '演示用户', username: 'demo' }, views: 18200, likes: 640, favorites: 355, comments: 41, pages: 5 },
-    { name: 'grad-apply', title: '保研材料汇总页（简历+项目+成绩）', tag: 'resume',
-      description: '把申请材料做成一页索引，老师扫码即可查看附件。',
-      author: { name: '演示用户', username: 'demo' }, views: 6100, likes: 98, favorites: 44, comments: 7, pages: 1 },
-    { name: 'pixel-game', title: '像素小游戏合集 · 摸鱼专用', tag: 'other',
-      description: '三个纯前端小游戏，键盘操作，支持本地最高分记录。',
-      author: { name: 'Ken', username: 'ken' }, views: 52300, likes: 2450, favorites: 1330, comments: 176, pages: 8 },
-    { name: 'photo-wall', title: '毕业照云相册墙', tag: 'social',
-      description: '全班照片瀑布流，支持按人筛选与一键下载原图。',
-      author: { name: '小满', username: 'man' }, views: 14700, likes: 512, favorites: 268, comments: 63, pages: 2 },
-    { name: 'opensource-landing', title: '开源项目落地页 · Pager', tag: 'oss',
-      description: '项目介绍、Star 趋势图与快速上手代码示例。',
-      author: { name: 'Pager', username: 'pager' }, views: 39800, likes: 1560, favorites: 890, comments: 102, pages: 7 },
-  ];
-
-  // TODO 后端对接：替换为 fetch('/api/hot')
-  MP.HOT = [
-    { word: '前端简历模板', tag: '热', val: '128.6万' },
-    { word: '个人作品集怎么做', val: '96.3万' },
-    { word: '暑期活动落地页', tag: '新', val: '74.1万' },
-    { word: '响应式布局教程', val: '58.9万' },
-    { word: '毕设网页模板', val: '47.2万' },
-    { word: '开源项目主页', val: '36.5万' },
-    { word: '社交聚合页', val: '28.7万' },
-    { word: '动效设计参考', val: '21.4万' },
-  ];
-
-  // TODO 后端对接：轮播位来自运营配置
-  MP.BANNERS = [
-    { title: '夏日作品集征集 · 晒出你的个人主页', sub: '投稿即有机会登上首页推荐', site: 'aurora-portfolio',
-      img: 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=soft%20gradient%20background%20in%20summer%20blue%20and%20pink%2C%20abstract%20smooth%20waves%2C%20minimal%20modern%20poster%2C%20no%20text%2C%20no%20letters%2C%20no%20words&image_size=landscape_16_9' },
-    { title: 'MinePage 创作激励计划上线', sub: '优质页面获得流量扶持与徽章', site: 'mini-vue',
-      img: 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=pink%20to%20white%20gradient%20background%20with%20soft%20geometric%20shapes%2C%20minimal%20creative%20technology%20poster%2C%20no%20text%2C%20no%20letters%2C%20no%20words&image_size=landscape_16_9' },
-    { title: '本周热门 · 开源项目主页精选', sub: '看看大家都在 Star 什么', site: 'opensource-landing',
-      img: 'https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=deep%20blue%20night%20sky%20with%20tiny%20glowing%20stars%20and%20soft%20light%20streaks%2C%20minimal%20tech%20poster%2C%20no%20text%2C%20no%20letters%2C%20no%20words&image_size=landscape_16_9' },
-  ];
-
-  /** 按标签/关键词过滤演示数据。 */
-  MP.querySites = function (opt) {
-    const q = (opt && opt.q || '').trim().toLowerCase();
-    const tag = (opt && opt.tag) || '';
-    return MP.SITES.filter((s) => {
-      if (tag === 'hot' ? (s.views < 20000) : (tag && s.tag !== tag)) return false;
-      if (!q) return true;
-      return (s.title + s.description + s.name + s.author.name).toLowerCase().includes(q);
-    });
-  };
-
-  /** 热门榜单（按浏览排序）。 */
-  MP.topSites = function (n) {
-    return MP.SITES.slice().sort((a, b) => b.views - a.views).slice(0, n || 8);
-  };
 
   /* ----------------------------------------------------------
      4. 搜索历史（localStorage）
@@ -235,6 +155,10 @@
   const HIST_KEY = 'mp_search_hist';
   const HIST_MAX = 8;
 
+  /**
+   * 读本地搜索历史：最近 8 条，新的在前。
+   * 隐私模式、或存进去的内容不是数组时返回空数组，不抛错；返回的是新数组，调用方随便改都不影响存储。
+   */
   MP.searchHist = function () {
     try {
       const raw = localStorage.getItem(HIST_KEY);
@@ -243,6 +167,10 @@
     } catch { return []; }
   };
 
+  /**
+   * 记一条搜索历史：按词去重后插到最前，只保留最近 8 条。
+   * 会写 localStorage；空白词直接忽略；写失败（隐私模式、配额满）静默放弃，调用方不用管。
+   */
   MP.pushSearchHist = function (word) {
     const w = String(word || '').trim();
     if (!w) return;
@@ -251,6 +179,7 @@
     try { localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX))); } catch { /* 忽略隐私模式报错 */ }
   };
 
+  /** 清空本地搜索历史；只影响当前浏览器，服务端没有这份记录。 */
   MP.clearSearchHist = function () {
     try { localStorage.removeItem(HIST_KEY); } catch { /* 同上 */ }
   };
@@ -287,21 +216,69 @@
     { key: 'rank', label: '排行榜', href: '/?sort=rank' },
   ];
 
-  function topbarHtml(active) {
-    const me = MP.ME;
-    const nav = NAVS.map((n) => '<a href="' + n.href + '"'
-      + (active === n.key ? ' class="on"' : '') + '>' + n.label + '</a>').join('');
+  /** 顶栏显示名：真实用户没有 name 字段，用 username 兜 email。 */
+  function displayName(user) {
+    return user.username || user.email || '用户';
+  }
 
+  /** #tuser 的内部 HTML。user 为 null 表示未登录，显示登录入口。 */
+  function userAreaInner(user) {
+    if (!user) {
+      // data-auth-open：点击弹窗登录、不跳转页面；href 保留作为 JS 失效时的兜底
+      return '<a class="tlogin" href="/login" data-auth-open>' + icon('user') + '<span>登录 / 注册</span></a>';
+    }
+
+    const name = displayName(user);
+    // 没有用户名时 /u/:username 是死链，改成引导去设置
+    const home = user.username
+      ? '<a href="/u/' + encodeURIComponent(user.username) + '">' + icon('user') + '我的主页</a>'
+      : '<a href="/account">' + icon('user') + '设置用户名</a>';
+
+    return ''
+      + '<div class="avatar sm" title="' + esc(name) + '">' + esc(name[0] || '?') + '</div>'
+      + '<div class="tmenu">'
+      +   '<div class="who">' + esc(name) + '<small>' + esc(user.email) + '</small></div>'
+      +   '<hr>'
+      +   home
+      +   '<a href="/account">' + icon('settings') + '账号设置</a>'
+      +   '<a href="/sites">' + icon('grid') + '页面管理</a>'
+      +   (user.isAdmin ? '<a href="/admin">' + icon('shield') + '管理后台</a>' : '')
+      +   '<hr>'
+      +   '<a href="/login" id="tLogout">' + icon('logout') + '退出登录</a>'
+      + '</div>';
+  }
+
+  /**
+   * 顶栏动作入口的内部 HTML。
+   *
+   * 两个红点的语义来自服务端，别弄反：
+   *   session.unread         = 未读「动态」（通知）
+   *   session.unreadMessages = 未读「消息」（私信）
+   */
+  function tactsInner(session) {
     const acts = [
-      { key: 'messages', href: '/messages', ic: 'message', label: '消息', dot: me.unread },
-      { key: 'dynamic', href: '/notifications', ic: 'bell', label: '动态', dot: me.dynamic },
+      { key: 'messages', href: '/messages', ic: 'message', label: '消息', dot: session ? session.unreadMessages : 0 },
+      { key: 'dynamic', href: '/notifications', ic: 'bell', label: '动态', dot: session ? session.unread : 0 },
       { key: 'favorites', href: '/favorites', ic: 'folder', label: '收藏' },
       { key: 'history', href: '/history', ic: 'history', label: '历史' },
       { key: 'create', href: '/sites', ic: 'grid', label: '创作' },
-    ].map((a) => '<a class="tact" href="' + a.href + '" title="' + a.label + '">'
+    ];
+    return acts.map((a) => '<a class="tact" href="' + a.href + '" title="' + a.label + '">'
       + icon(a.ic) + '<span>' + a.label + '</span>'
-      + (a.dot ? '<i class="dot">' + a.dot + '</i>' : '') + '</a>').join('');
+      + (a.dot ? '<i class="dot">' + a.dot + '</i>' : '')).join('');
+  }
 
+  /**
+   * 拼出顶栏的 HTML 字符串（只返回字符串，不碰 DOM）。
+   * 这里刻意按「未登录」渲染用户区和未读红点：真实会话是异步来的，先渲染假账号会闪一下错账号，
+   * 拿到会话后由 MP.topbar 用 innerHTML 把那两处补上。
+   * active 与 NAVS 的 key 对应，决定哪个导航项加 .on；搜索历史与热搜此刻还是空的，挂载后再填。
+   */
+  function topbarHtml(active) {
+    const nav = NAVS.map((n) => '<a href="' + n.href + '"'
+      + (active === n.key ? ' class="on"' : '') + '>' + n.label + '</a>').join('');
+
+    // 先按「未登录」渲染，避免闪出假的用户信息；拿到真实会话后由 MP.topbar 补上
     return ''
       + '<div class="tinner">'
       +   '<a class="tlogo" href="/">' + icon('logo') + '<span class="tname">MinePage</span></a>'
@@ -318,20 +295,9 @@
       +       '<div class="tsHot" id="tsHot"></div>'
       +     '</div>'
       +   '</div>'
-      +   '<div class="tacts">' + acts + '</div>'
-      +   '<div class="tuser" id="tuser">'
-      +     '<div class="avatar sm" title="' + esc(me.name) + '">' + esc(me.name[0]) + '</div>'
-      +     '<div class="tmenu">'
-      +       '<div class="who">' + esc(me.name) + '<small>' + esc(me.email) + '</small></div>'
-      +       '<hr>'
-      +       '<a href="/u/' + encodeURIComponent(me.username) + '">' + icon('user') + '我的主页</a>'
-      +       '<a href="/account">' + icon('settings') + '账号设置</a>'
-      +       '<a href="/sites">' + icon('grid') + '创作</a>'
-      +       (me.isAdmin ? '<a href="/admin">' + icon('shield') + '管理后台</a>' : '')
-      +       '<hr>'
-      +       '<a href="/login" id="tLogout">' + icon('logout') + '退出登录</a>'
-      +     '</div>'
-      +   '</div>'
+      +   '<div class="tacts" id="tacts">' + tactsInner(null) + '</div>'
+      // 独立「投稿」入口已去掉：投稿并入创作页的「投稿」标签（/sites?tab=upload）
+      +   '<div class="tuser" id="tuser">' + userAreaInner(null) + '</div>'
       + '</div>';
   }
 
@@ -339,6 +305,12 @@
    * 挂载顶栏：注入到 body 最前。
    * @param {{active?:string, collapse?:boolean}} [opt]
    *   collapse=true 时在顶栏左下角加「收起/展开」箭头，并在收起后于屏幕顶部留一条触发带
+   *
+   * 副作用不少：改 DOM（插到 body 最前）、往 document 上挂 click 监听（挂上就不摘）、
+   * 读 MP.searchHist 填搜索面板、发 /api/me 请求，点「退出登录」还会
+   * POST /api/auth/logout 再跳 /login。
+   * 顺序是先本地渲染未登录态、再用会话打补丁，所以登录用户会看到极短的一下「登录 / 注册」，属预期。
+   * 返回注入的 header 元素；一个页面只该调一次，重复调用会插出第二个顶栏（连带两套全局监听）。
    */
   MP.topbar = function (opt) {
     const o = opt || {};
@@ -358,6 +330,11 @@
     const params = new URLSearchParams(location.search);
     if (params.get('q')) input.value = params.get('q');
 
+    /**
+     * 渲染搜索历史词条（每次展开、清空后各调一次）。
+     * 用 textContent 写而不是拼 innerHTML：历史词是用户输入的内容，拼进去会被当成标签。
+     * 绑 mousedown 而不是 click：输入框 blur 后才会延时收起面板，mousedown 早于 blur 触发，点词条不会扑空。
+     */
     function renderHist() {
       const list = MP.searchHist();
       if (!list.length) { histBox.innerHTML = '<span class="none">还没有搜索记录</span>'; return; }
@@ -371,17 +348,7 @@
       });
     }
 
-    hotBox.textContent = '';
-    MP.HOT.forEach((h, i) => {
-      const row = document.createElement('div');
-      row.className = 'hRow';
-      row.innerHTML = '<span class="hNo' + (i < 3 ? ' top' + (i + 1) : '') + '">' + (i + 1) + '</span>'
-        + '<span class="hWord">' + esc(h.word)
-        + (h.tag ? '<span class="hTag">' + esc(h.tag) + '</span>' : '') + '</span>'
-        + '<span class="hVal">' + esc(h.val) + '</span>';
-      row.addEventListener('mousedown', (e) => { e.preventDefault(); MP.goSearch(h.word); });
-      hotBox.appendChild(row);
-    });
+    hotBox.innerHTML = '<span class="none">暂无热搜</span>';
 
     renderHist();
     header.querySelector('#tsClear').addEventListener('mousedown', (e) => {
@@ -404,10 +371,18 @@
       MP.goSearch(input.value);
     });
 
-    // 头像下拉
+    // 头像下拉。退出登录同样走委托绑定：用户区是异步补上的，
+    // 直接绑到 #tLogout 元素上会在重渲染之后失效。
     const tu = header.querySelector('#tuser');
     tu.addEventListener('click', (e) => {
-      if (e.target.closest('#tLogout')) return;
+      if (e.target.closest('#tLogout')) {
+        e.preventDefault();
+        // 有真实会话时先清掉，再回登录页；无会话时该请求只是空操作
+        fetch('/api/auth/logout', { method: 'POST' })
+          .catch(() => { /* 忽略网络异常，直接跳转 */ })
+          .finally(() => { location.href = '/login'; });
+        return;
+      }
       tu.classList.toggle('open');
     });
     document.addEventListener('click', (e) => {
@@ -416,13 +391,16 @@
     document.addEventListener('click', (e) => {
       if (!ts.contains(e.target)) ts.classList.remove('open');
     });
-    header.querySelector('#tLogout').addEventListener('click', (e) => {
-      e.preventDefault();
-      // 有真实会话时先清掉，再回登录页；无会话时该请求只是空操作
-      fetch('/api/auth/logout', { method: 'POST' })
-        .catch(() => { /* 忽略网络异常，直接跳转 */ })
-        .finally(() => { location.href = '/login'; });
-    });
+
+    // 用真实会话补上用户区与未读红点。请求失败就保持未登录外观，不抛错。
+    MP.session()
+      .then((session) => {
+        const userBox = header.querySelector('#tuser');
+        if (userBox) userBox.innerHTML = userAreaInner(session.user);
+        const actsBox = header.querySelector('#tacts');
+        if (actsBox) actsBox.innerHTML = tactsInner(session.user ? session : null);
+      })
+      .catch(() => { /* 保持未登录外观 */ });
 
     return header;
   };
@@ -459,6 +437,10 @@
     handle.innerHTML = icon('triUp', null, 14);
     document.body.appendChild(handle);
 
+    /**
+     * 把当前的收起状态刷到 body 的 class 与按钮 title 上；只读不写 localStorage
+     *（写只在点击时做，所以挂载时能沿用上次的折叠状态）。
+     */
     function sync() {
       document.body.classList.toggle('nav-collapsed', collapsed);
       handle.title = collapsed ? '展开导航栏' : '收起导航栏';
@@ -481,6 +463,12 @@
    * 生成一张站点卡片。
    * @param {object} site 站点数据
    * @param {{peek?:boolean}} [opt]
+   *
+   * 返回的是 DOM 节点（不是 HTML 字符串），由调用方自己 append。
+   * 字段兼容：页数优先接口给的 fileCount，缺了退到 pages，再退 1；标签中文名优先 site.tagLabel，
+   * 没有才用 tagLabel(site.tag) 去查词表。
+   * opt.peek=false 时这张卡不挂悬停预览（卡片多的列表页更省）。
+   * 右下角赞 / 藏两个按钮目前只切自己的 .on 样式，不发请求（见函数里的 TODO）。
    */
   MP.vcard = function (site, opt) {
     const o = opt || {};
@@ -490,10 +478,30 @@
     const cover = document.createElement('div');
     cover.className = 'vcover';
     cover.style.background = grad(site);
-    cover.innerHTML = '<span class="vtag">' + esc(tagLabel(site.tag) || '页面') + '</span>'
+    // 页数：优先接口的 fileCount/kind，兼容字段 pages，都没有按单页算
+    const pages = site.fileCount != null ? site.fileCount : (site.pages != null ? site.pages : 1);
+    cover.innerHTML = '<span class="vtag">' + esc(site.tagLabel || tagLabel(site.tag) || '页面') + '</span>'
       + '<span class="coverChar">' + esc(initial(site)) + '</span>'
       + '<span class="vviews">' + icon('view') + fmtNum(site.views) + '</span>'
-      + '<span class="vkind">' + (site.pages > 1 ? site.pages + ' 页' : '单页') + '</span>';
+      + '<span class="vkind">' + (pages > 1 ? pages + ' 页' : '单页') + '</span>';
+    // 封面两级：自定义上传图 > 迷你 iframe（站点顶部实时画面，即悬停下翻的起始画面）。
+    // img/iframe 插在最前（coverChar 是 static 会被盖住，角标是 absolute 自然浮在上面）；
+    // 自定义图加载失败就移除 img，露出渐变底完成回落。
+    if (site.hasCover) {
+      const img = document.createElement('img');
+      img.className = 'vimg';
+      img.alt = '';
+      img.referrerPolicy = 'no-referrer';
+      img.addEventListener('error', () => img.remove());
+      img.src = '/api/sites/' + encodeURIComponent(site.name) + '/cover';
+      cover.insertBefore(img, cover.firstChild);
+    } else {
+      cover.appendChild(buildLiveCover(site, cover));
+    }
+    // ⚠️ 已知缺陷：封面是普通 div，**点它没有任何反应**。
+    // 整张卡片里只有下面的 `.vtitle` 是可点的链接，用户点封面/空白处会以为卡片坏了。
+    // 修法（本节未做）：把封面包进 <a href="/view/:名字">，或给卡片挂一个
+    // 「点到 a/button 以外的区域就跳转」的委托监听。
     card.appendChild(cover);
 
     const body = document.createElement('div');
@@ -514,12 +522,16 @@
 
     const author = document.createElement('div');
     author.className = 'vauthor';
+    const uname = site.author && site.author.username;
+    // 作者可能没有用户名（账号还没设置过），也可能是被删掉的用户留下的无主站点：
+    // 两种情况下 /u/:username 都打不开，所以退回首页而不是造一个死链。
+    const aname = (site.author && site.author.name) || uname || '匿名';
     const a = document.createElement('a');
-    a.href = '/u/' + encodeURIComponent(site.author.username);
-    a.innerHTML = '<span class="avatar xs">' + esc(site.author.name[0]) + '</span>';
+    a.href = uname ? '/u/' + encodeURIComponent(uname) : '/';
+    a.innerHTML = '<span class="avatar xs">' + esc(aname[0] || '?') + '</span>';
     const nm = document.createElement('span');
     nm.className = 'aname';
-    nm.textContent = site.author.name;
+    nm.textContent = aname;
     a.appendChild(nm);
     author.appendChild(a);
     body.appendChild(author);
@@ -527,6 +539,12 @@
     card.appendChild(body);
 
     // 快捷赞 / 藏
+    //
+    // ⚠️ **这两个按钮目前是假的**：只 toggle 一个 `.on` class，不发任何请求，刷新即复原。
+    // 点赞的真接口是有的（`POST/DELETE /api/sites/:名字/like`），`view.html` 里已经接上了
+    // （那边验过：200 + 计数变化 + 刷新后仍在）。这里没接的原因是**卡片拿不到"我点过没有"** ——
+    // `/api/discover` 不返回 `liked`（原版也不返回），接了会出现"我明明赞过、按钮却是灭的"。
+    // 正确修法：给 discover 的响应加一个 `liked` 字段（对登录用户），再照 view.html 的写法接。
     const ops = document.createElement('div');
     ops.className = 'vops';
     const like = document.createElement('button');
@@ -537,12 +555,11 @@
     fav.type = 'button';
     fav.className = 'op';
     fav.innerHTML = icon('fav') + ' ' + fmtNum(site.favorites);
-    // TODO 后端对接：POST/DELETE /api/sites/:name/like | /favorite
-    [['like', like], ['fav', fav]].forEach(([kind, btn]) => {
+    [like, fav].forEach((btn) => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         e.preventDefault();
-        btn.classList.toggle('on');
+        MP.toast('卡片上的快捷按钮还没接上后端（观看页里的点赞已经能用）');
       });
     });
     ops.appendChild(like);
@@ -554,38 +571,189 @@
     return card;
   };
 
+  // 迷你封面 / 悬停预览共用的虚拟视口与速度
+  const COVER_VW = 1280; // 虚拟视口宽：桌面布局能正常展开
+  // 虚拟视口高必须等于真实首屏高度（720）：iframe 里 100vh 跟着 iframe 高度走，
+  // 视口拉太高会把全屏 hero 撑出封面可见区，封面就只剩一片背景色
+  const COVER_VH = 720;
+  const COVER_SPEED = 45; // 下翻速度（屏幕像素/秒）：太快像刷屏，太慢没进展
+
+  // 封面并发闸门：封面是整站 iframe，同时开太多会把带宽切碎、每张都慢。
+  // 同一时刻最多加载 COVER_MAX 张，其余按可见顺序排队；用户最先看到的卡片
+  // 因此能独占带宽、最快出画面。加载完或超时即释放闸门给下一张。
+  const COVER_MAX = 3;
+  const COVER_DWELL = 400;    // 进入视口后停留这么久才排队（快速滚过的卡片不浪费流量）
+  const COVER_TIMEOUT = 6000; // 超过这么久还没 load 就放行下一张，避免个别慢站卡住整条队列
+  let coverBusy = 0;
+  const coverQueue = []; // 待加载的 arm 函数，FIFO ≈ 页面从上到下的可见顺序
+
+  function pumpCoverQueue() {
+    while (coverBusy < COVER_MAX && coverQueue.length) {
+      coverQueue.shift()();
+    }
+  }
+
   /**
-   * 悬停实时预览：进入封面 300ms 后挂 iframe，离开即销毁。
-   * 前端阶段站点 slug 并不存在，故用 srcdoc 生成一张预览占位。
-   * TODO 后端对接：把 iframe.src 换成 '/' + site.name + '/'
+   * 迷你 iframe 封面：封面区直接显示站点顶部画面（= 悬停下翻的起始画面）。
+   * 懒加载 + 停留节流 + 并发闸门：滚进视口且停留一小会儿，才排进队列去载入真站；
+   * 载入完成淡入（.mcover.loaded），超时则保留渐变占位、放行下一张。
+   */
+  function buildLiveCover(site, cover) {
+    const frame = document.createElement('iframe');
+    frame.className = 'mcover';
+    frame.referrerPolicy = 'no-referrer';
+    // 只给脚本不给同源：站点 JS 照常跑，但摸不到父页面和 cookie
+    frame.sandbox = 'allow-scripts';
+    frame.setAttribute('scrolling', 'no');
+    let armed = false;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      coverBusy = Math.max(0, coverBusy - 1);
+      pumpCoverQueue();
+    };
+    /** 算尺寸并载入真站（并发队列的入口，悬停兜底也会调它）。 */
+    const arm = () => {
+      if (armed) return;
+      const scale = cover.clientWidth / COVER_VW;
+      if (!scale) return; // 没布局好就先不占用闸门（悬停时会再试）
+      armed = true;
+      coverBusy += 1; // 占用一个并发槽，release 时归还
+      frame.style.width = COVER_VW + 'px';
+      frame.style.height = COVER_VH + 'px';
+      frame.style.transformOrigin = '0 0';
+      frame.style.transform = 'scale(' + scale + ')';
+      // load 标志必须在设 src 之后挂：iframe 一创建就有 about:blank 的 load，不能算数
+      const reveal = () => frame.classList.add('loaded'); // 淡入（见 style.css 的 .mcover）
+      frame.addEventListener('load', () => {
+        frame.dataset.loaded = '1';
+        reveal();
+        release();
+      }, { once: true });
+      // ?mpcover=1：服务端给入口 HTML 注入滚动代理，悬停时 postMessage 驱动内部下翻
+      frame.src = '/' + encodeURIComponent(site.name) + '/?mpcover=1';
+      // 首屏通常很快就画出来了，不必等整站（含首屏外的图片/视频）全部下完才露脸：
+      // 到点先显示，此时 iframe 底透明，没画出来的部分透出下层渐变占位，不会是白块。
+      setTimeout(reveal, 900);
+      setTimeout(release, COVER_TIMEOUT);
+    };
+    frame.arm = arm; // attachPeek 悬停兜底用
+
+    // 懒加载 + 停留节流：进入视口起算 COVER_DWELL，期间滚出去就作废
+    let dwell = null;
+    const enqueue = () => { coverQueue.push(arm); pumpCoverQueue(); };
+    if ('IntersectionObserver' in window) {
+      const io = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            if (!dwell) dwell = setTimeout(() => { io.disconnect(); enqueue(); }, COVER_DWELL);
+          } else if (dwell) {
+            clearTimeout(dwell);
+            dwell = null;
+          }
+        }
+      }, { threshold: 0.01 });
+      io.observe(cover);
+    } else {
+      setTimeout(enqueue, COVER_DWELL);
+    }
+    return frame;
+  }
+
+  /**
+   * 悬停实时预览：进入封面 300ms 后页面匀速自动向下翻（循环）。
+   *
+   * 没有自定义封面的卡片，封面本身就是 .mcover（站点顶部实时画面）——
+   * 悬停时同一个 iframe 原地开始翻，移开后停在顶部继续当封面，所见即所得；
+   * 自定义图封面的卡片没有 .mcover，才临时新建 .peek，移开即摘掉。
+   *
+   * 技术要点：沙箱 iframe（不给 allow-same-origin）里父页面碰不到它的内部滚动，
+   * 所以服务端给带 ?mpcover=1 的入口页注入了一个滚动代理脚本，悬停时父页面
+   * postMessage 让文档自己往下滚——等价于真实浏览器窗口下翻，100vh 全屏
+   * 首屏的站点也能正常预览（离开时 mpPeekStop 回顶，封面继续显示首屏）。
+   * iframe 挂在封面 div 里（.vcover 自带 overflow:hidden），缩放多出的部分被裁掉，
+   * 不会盖住卡片的标题区；pointer-events:none 保证悬停事件照常触发。
    */
   function attachPeek(card, site, cover) {
-    let iframe = null;
+    const target = cover || card;
+    let frame = null;    // 本次悬停用的 iframe（复用 .mcover 或新建 .peek）
+    let created = false; // 是否本次新建的（移开时要摘掉）
     let timer = null;
+    let kick = null;
+    let started = false;
+    /** 页面加载完（或 1.5s 兜底）才开始下翻：白屏翻动没有意义。 */
+    const start = () => {
+      if (started || !frame) return;
+      const scale = target.clientWidth / COVER_VW;
+      if (!scale) return;
+      started = true;
+      // 下翻 = 驱动 iframe 内部文档滚动；速度换算成虚拟像素，滚动手感与缩放无关
+      try {
+        frame.contentWindow.postMessage({ mpPeekSpeed: Math.round(COVER_SPEED / scale) }, '*');
+      } catch (e) { /* iframe 尚未就绪，交给 mpReady 握手补发 */ }
+    };
+    /** 悬停 300ms 后才开始：防止鼠标扫过卡片时一路触发。 */
     const open = () => {
       timer = setTimeout(() => {
-        iframe = document.createElement('iframe');
-        iframe.className = 'peek';
-        iframe.loading = 'lazy';
-        iframe.referrerPolicy = 'no-referrer';
-        iframe.sandbox = 'allow-scripts';
-        iframe.srcdoc = '<!DOCTYPE html><html><head><meta charset="utf-8"><style>'
-          + 'html,body{margin:0;height:100%;font-family:system-ui,sans-serif;'
-          + 'background:' + grad(site) + ';display:flex;align-items:center;justify-content:center;color:#fff}'
-          + '.w{text-align:center;padding:16px}'
-          + '.w b{display:block;font-size:18px}'
-          + '.w p{font-size:12px;opacity:.9;margin:6px 0 0}'
-          + '</style></head><body><div class="w"><b>' + esc(site.title || site.name)
-          + '</b><p>' + esc((site.description || '').slice(0, 40)) + '</p></div></body></html>';
-        card.appendChild(iframe);
+        const scale = target.clientWidth / COVER_VW;
+        if (!scale) return;
+        started = false;
+        frame = target.querySelector('iframe.mcover');
+        if (frame) {
+          // 封面 iframe 可能还在加载，load 后（或 1.5s 兜底）再翻
+          if (frame.dataset.loaded === '1') {
+            start();
+          } else {
+            // 懒加载还没触发（后台窗口等），悬停当场载入
+            if (frame.arm) frame.arm();
+            frame.addEventListener('load', start, { once: true });
+            kick = setTimeout(start, 1500);
+          }
+        } else {
+          created = true;
+          const f = document.createElement('iframe');
+          f.className = 'peek';
+          f.loading = 'lazy';
+          f.referrerPolicy = 'no-referrer';
+          f.sandbox = 'allow-scripts';
+          f.src = '/' + encodeURIComponent(site.name) + '/?mpcover=1';
+          f.style.width = COVER_VW + 'px';
+          f.style.height = COVER_VH + 'px';
+          f.style.transformOrigin = '0 0';
+          f.style.transform = 'scale(' + scale + ')';
+          target.appendChild(f);
+          frame = f;
+          f.addEventListener('load', start, { once: true });
+          kick = setTimeout(start, 1500);
+        }
       }, 300);
     };
+    /** 离开封面：让内部滚动停下并回顶；新建的 .peek 摘掉，复用的 .mcover 留着当封面。 */
     const close = () => {
       clearTimeout(timer);
-      if (iframe) { iframe.remove(); iframe = null; }
+      clearTimeout(kick);
+      started = false;
+      if (frame) {
+        try { frame.contentWindow.postMessage({ mpPeekStop: 1 }, '*'); } catch (e) { /* ignore */ }
+      }
+      if (frame && created) frame.remove();
+      frame = null;
+      created = false;
     };
-    (cover || card).addEventListener('mouseenter', open);
-    card.addEventListener('mouseleave', close);
+    // 注入的滚动代理就绪后会广播 mpReady；若 start() 发速度时代理还没跑起来
+    // （load / 1.5s 兜底都可能早于它执行，消息会丢），就绪这一刻把速度补发一次
+    window.addEventListener('message', (e) => {
+      const w = frame && frame.contentWindow;
+      if (started && w && e.source === w && e.data && e.data.mpReady) {
+        try {
+          const scale = target.clientWidth / COVER_VW;
+          w.postMessage({ mpPeekSpeed: Math.round(COVER_SPEED / scale) }, '*');
+        } catch (err) { /* ignore */ }
+      }
+    });
+    target.addEventListener('mouseenter', open);
+    target.addEventListener('mouseleave', close);
   }
   MP.attachPeek = attachPeek;
 
@@ -603,6 +771,11 @@
      7. 轻提示
      ---------------------------------------------------------- */
 
+  /**
+   * 页内轻提示：页面顶部居中显示一行字，1.8 秒后淡出。
+   * 节点是单例（#mpToast），连着调用只换文字并重新计时，不会叠出好几个；
+   * 它带 pointer-events:none，所以盖在什么东西上都不挡点击。没有返回值。
+   */
   MP.toast = function (msg) {
     let el = document.getElementById('mpToast');
     if (!el) {
@@ -623,16 +796,432 @@
      8. 当前登录态
      ---------------------------------------------------------- */
 
+  // undefined = 还没请求过。请求一次后缓存，避免同一页面重复打接口。
+  let sessionCache;
+
   /**
-   * 获取当前用户。
-   * 前端阶段直接返回演示用户；接后端时改回 fetch('/api/me')。
-   * @returns {Promise<object|null>}
+   * 读取当前会话：{ user, unread, unreadMessages }。
+   *   user          为 null 表示未登录
+   *   unread        未读「动态」（通知）
+   *   unreadMessages 未读「消息」（私信）
+   * 请求失败按未登录处理，不抛错。
+   * @returns {Promise<{user:object|null, unread:number, unreadMessages:number}>}
    */
-  MP.me = async function () {
-    // TODO 后端对接：
-    // const res = await fetch('/api/me');
-    // const data = await res.json();
-    // return data.user;
-    return DEMO.enabled ? MP.ME : null;
+  MP.session = async function () {
+    if (sessionCache !== undefined) return sessionCache;
+
+    try {
+      const res = await fetch('/api/me', { headers: { Accept: 'application/json' } });
+      const data = await res.json();
+      sessionCache = {
+        user: data && data.user ? data.user : null,
+        unread: Number(data && data.unread) || 0,
+        unreadMessages: Number(data && data.unreadMessages) || 0,
+      };
+    } catch {
+      sessionCache = { user: null, unread: 0, unreadMessages: 0 };
+    }
+
+    return sessionCache;
   };
+
+  /** 只取用户对象；未登录返回 null。 */
+  MP.me = async function () {
+    return (await MP.session()).user;
+  };
+
+  /** 丢弃缓存（退出登录、改完用户名之后调用）。 */
+  MP.forgetSession = function () {
+    sessionCache = undefined;
+  };
+
+  /* ----------------------------------------------------------
+     9. 登录弹窗
+     ---------------------------------------------------------- */
+
+  // 要求：所有「需要登录」的入口都在当前页上弹窗，不跳转页面；
+  // 弹窗打开时，后面页面除滚轮外全部不可操作（由 .modal-mask 的
+  // position:fixed 挡住指针事件实现，且刻意不锁 body 滚动）。
+
+  /**
+   * 需要登录才能用的路径。
+   * 这份清单必须与服务端守卫保持一致——tests/scripts/e2e-auth.mjs
+   * 会拿真实的匿名请求结果来核对，防止两边漂移。
+   */
+  const LOGIN_REQUIRED = [
+    /^\/sites(\/|$)/,
+    /^\/upload(\/|$)/,
+    /^\/account(\/|$)/,
+    /^\/settings(\/|$)/,
+    /^\/edit\//,
+    /^\/admin(\/|$)/,
+    /^\/messages(\/|$)/,
+    /^\/notifications(\/|$)/,
+    /^\/favorites(\/|$)/,
+    /^\/history(\/|$)/,
+  ];
+
+  /**
+   * 这个链接是不是「必须登录」的路径：参数是页面里的原始 href（形如 /messages，不是绝对 URL）。
+   * 清单必须与服务端守卫一致 —— 客户端少了会直接跳转，服务端少了等于没保护。
+   */
+  function needsLogin(href) {
+    return LOGIN_REQUIRED.some((re) => re.test(href));
+  }
+
+  /** 登录 / 注册表单的标记。弹窗和 /login 页共用同一份。 */
+  const AUTH_FORM_HTML = ''
+    + '<div class="modal-tabs" role="tablist">'
+    +   '<button type="button" class="mtab on" data-tab="login" role="tab" aria-selected="true">登录</button>'
+    +   '<button type="button" class="mtab" data-tab="register" role="tab" aria-selected="false">注册</button>'
+    + '</div>'
+    + '<form class="auth-login" novalidate>'
+    +   '<label class="field"><span class="label">邮箱或用户名</span>'
+    +     '<input name="loginId" type="text" autocomplete="username" placeholder="you@example.com"></label>'
+    +   '<label class="field"><span class="label">密码 <a class="forgot" href="/forgot">忘记密码？</a></span>'
+    +     '<input name="loginPassword" type="password" autocomplete="current-password" placeholder="请输入密码"></label>'
+    +   '<button type="submit" class="mbtn primary">登 录</button>'
+    +   '<p class="mswitch">还没有账号？<a href="#" data-goto="register">立即注册</a></p>'
+    + '</form>'
+    + '<form class="auth-register" novalidate hidden>'
+    +   '<label class="field"><span class="label">邮箱</span>'
+    +     '<input name="registerEmail" type="email" autocomplete="email" placeholder="you@example.com"></label>'
+    +   '<label class="field"><span class="label">邮箱验证码</span>'
+    +     '<span class="code-row">'
+    +       '<input name="registerCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位数字">'
+    +       '<button type="button" class="mbtn ghost" data-send-code disabled>发送验证码</button>'
+    +     '</span>'
+    +     '<span class="hint" data-code-hint>先填邮箱，再点「发送验证码」</span></label>'
+    +   '<label class="field"><span class="label">密码</span>'
+    +     '<input name="registerPassword" type="password" autocomplete="new-password" placeholder="至少 6 位">'
+    +     '<span class="hint">至少 6 位</span></label>'
+    +   '<button type="submit" class="mbtn primary">注 册</button>'
+    +   '<p class="mswitch">已有账号？<a href="#" data-goto="login">去登录</a></p>'
+    + '</form>'
+    + '<div class="result" data-msg hidden></div>';
+
+  /**
+   * 把登录 / 注册表单渲染进 container 并接好逻辑。
+   * 抽出来是为了让弹窗与 /login 页共用同一份实现，避免两份逻辑漂移。
+   *
+   * @param {HTMLElement} container
+   * @param {{initialTab?: 'login'|'register', onSuccess?: (user:object)=>void}} [opts]
+   */
+  function mountAuthForm(container, opts) {
+    const o = opts || {};
+    container.innerHTML = AUTH_FORM_HTML;
+
+    const tabLogin = container.querySelector('[data-tab="login"]');
+    const tabReg = container.querySelector('[data-tab="register"]');
+    const loginForm = container.querySelector('.auth-login');
+    const regForm = container.querySelector('.auth-register');
+    const msg = container.querySelector('[data-msg]');
+
+    /** 在表单下方显示一行结果：ok 决定用成功样式还是错误样式，text 作为纯文本写入。 */
+    function showMsg(ok, text) {
+      msg.hidden = false;
+      msg.className = 'result ' + (ok ? 'ok' : 'err');
+      msg.textContent = text;
+    }
+
+    /**
+     * 切换登录 / 注册页签：显示对应表单、同步 aria-selected、顺手清掉上一条结果提示。
+     * 只切显示，不清空另一个表单已填的内容（来回切不丢输入）；除 'register' 以外的值都按登录处理。
+     * 切换后会向 container 派发冒泡的 'auth:tab' 事件，弹窗靠它把标题改成注册 / 登录。
+     */
+    function switchTab(which) {
+      const isLogin = which !== 'register';
+      tabLogin.classList.toggle('on', isLogin);
+      tabReg.classList.toggle('on', !isLogin);
+      tabLogin.setAttribute('aria-selected', isLogin ? 'true' : 'false');
+      tabReg.setAttribute('aria-selected', isLogin ? 'false' : 'true');
+      loginForm.hidden = !isLogin;
+      regForm.hidden = isLogin;
+      msg.hidden = true;
+      container.dispatchEvent(new CustomEvent('auth:tab', { detail: which, bubbles: true }));
+    }
+
+    tabLogin.addEventListener('click', () => switchTab('login'));
+    tabReg.addEventListener('click', () => switchTab('register'));
+    container.querySelectorAll('[data-goto]').forEach((a) => {
+      a.addEventListener('click', (e) => { e.preventDefault(); switchTab(a.dataset.goto); });
+    });
+
+    /**
+     * 往鉴权接口发 JSON POST 并解析 JSON 返回。
+     * 不看 HTTP 状态码：业务失败也是 200 + { ok:false, message }，由调用方判 data.ok；
+     * 网络异常或响应不是 JSON 时会抛，调用方要自己 catch（现在每个调用点都有 try/catch）。
+     */
+    async function post(url, payload) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      return res.json();
+    }
+
+    /**
+     * 登录 / 注册成功后的公共收尾：先让会话缓存作废（否则顶栏还按未登录渲染），
+     * 再把用户对象交给调用方 —— 弹窗就是在这个回调里关掉自己并跳转 / 刷新页面的。
+     */
+    function done(user) {
+      // 会话变了，丢掉缓存，免得顶栏还显示旧状态
+      MP.forgetSession();
+      if (o.onSuccess) o.onSuccess(user);
+    }
+
+
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = loginForm.querySelector('button[type="submit"]');
+      btn.disabled = true;
+      try {
+        const data = await post('/api/auth/login', {
+          login: loginForm.elements.loginId.value,
+          password: loginForm.elements.loginPassword.value,
+        });
+        if (data.ok) {
+          showMsg(true, '登录成功…');
+          done(data.user);
+        } else {
+          showMsg(false, data.message || '登录失败');
+        }
+      } catch (err) {
+        showMsg(false, '网络出问题了：' + err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    const sendBtn = regForm.querySelector('[data-send-code]');
+    const codeHint = regForm.querySelector('[data-code-hint]');
+    const emailInput = regForm.elements.registerEmail;
+    /** 邮箱格式粗校验，只用来控制「发送验证码」按不按得动；真正的校验在服务端。 */
+    const emailOk = () => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailInput.value.trim());
+
+    let countdown = 0;
+    let timer = null;
+
+    /**
+     * 验证码发出去之后的重发倒计时：按钮禁用、每秒改一次文案，归零后按邮箱是否合法恢复可点。
+     * 陷阱：它只覆盖闭包里的 timer，倒计时没走完再调一次会同时跑两个 interval
+     *（目前撞不上，倒计时期间按钮是禁用的）；要提前收尾只能用返回的 destroy()，而且只清得掉最后一个。
+     */
+    function startCountdown(seconds) {
+      countdown = seconds;
+      sendBtn.disabled = true;
+      timer = setInterval(() => {
+        countdown -= 1;
+        if (countdown <= 0) {
+          clearInterval(timer);
+          sendBtn.disabled = !emailOk();
+          sendBtn.textContent = '重新发送';
+        } else {
+          sendBtn.textContent = countdown + ' 秒';
+        }
+      }, 1000);
+    }
+
+    emailInput.addEventListener('input', () => {
+      if (countdown <= 0) sendBtn.disabled = !emailOk();
+    });
+
+    sendBtn.addEventListener('click', async () => {
+      if (!emailOk()) { showMsg(false, '先填一个正确的邮箱'); return; }
+      sendBtn.disabled = true;
+      try {
+        const data = await post('/api/auth/send-code', {
+          purpose: 'register',
+          email: emailInput.value.trim(),
+        });
+        if (data.ok) {
+          codeHint.textContent = data.dev
+            ? '验证码已生成（未配置 SMTP，请到服务器控制台查看）'
+            : '验证码已发送，10 分钟内有效';
+          startCountdown(60);
+        } else {
+          codeHint.textContent = data.message || '发送失败';
+          sendBtn.disabled = false;
+        }
+      } catch (err) {
+        codeHint.textContent = '网络出问题了：' + err.message;
+        sendBtn.disabled = false;
+      }
+    });
+
+    regForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = regForm.querySelector('button[type="submit"]');
+      btn.disabled = true;
+
+      if (!/^\d{6}$/.test(regForm.elements.registerCode.value.trim())) {
+        showMsg(false, '请输入 6 位邮箱验证码');
+        btn.disabled = false;
+        return;
+      }
+
+      try {
+        const data = await post('/api/auth/register', {
+          email: emailInput.value.trim(),
+          code: regForm.elements.registerCode.value.trim(),
+          password: regForm.elements.registerPassword.value,
+        });
+        if (data.ok) {
+          showMsg(true, '注册成功…');
+          done(data.user);
+        } else {
+          showMsg(false, data.message || '注册失败');
+        }
+      } catch (err) {
+        showMsg(false, '网络出问题了：' + err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    switchTab(o.initialTab === 'register' ? 'register' : 'login');
+
+    return {
+      switchTab,
+      destroy() { if (timer) clearInterval(timer); },
+    };
+  }
+
+  // 同一时刻只允许一个登录弹窗
+  let authModal = null;
+
+  /**
+   * 在当前页弹出登录窗。
+   * @param {{next?: string}} [opts] next 是登录成功后要去的地址；
+   *        留空则留在当前页并刷新。
+   *
+   * 同一时刻只认一个弹窗：已经开着就直接把原来那个返回（顺手聚焦第一个输入框），
+   * 不会再建第二个，新传的 next 也会被忽略。
+   */
+  function openLoginModal(opts) {
+    const o = opts || {};
+    if (authModal) {
+      const focus = authModal.querySelector('input');
+      if (focus) focus.focus();
+      return authModal;
+    }
+
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask';
+    mask.innerHTML = ''
+      + '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="mpAuthTitle">'
+      +   '<button class="modal-x" type="button" data-close aria-label="关闭">×</button>'
+      +   '<h2 class="modal-title" id="mpAuthTitle">登录 MinePage</h2>'
+      +   '<div data-form></div>'
+      +   '<p class="modal-foot">登录即代表你同意 <a href="#">用户协议</a> 与 <a href="#">隐私政策</a></p>'
+      + '</div>';
+
+    document.body.appendChild(mask);
+    authModal = mask;
+
+    const titleEl = mask.querySelector('#mpAuthTitle');
+    mask.addEventListener('auth:tab', (e) => {
+      titleEl.textContent = e.detail === 'register' ? '注册 MinePage' : '登录 MinePage';
+    });
+
+    mountAuthForm(mask.querySelector('[data-form]'), {
+      onSuccess(user) {
+        closeLoginModal();
+        if (o.next) { location.href = o.next; return; }
+        // 没指定去处：刷新当前页，让内容和顶栏都反映登录后的状态
+        location.reload();
+      },
+    });
+
+    mask.querySelector('[data-close]').addEventListener('click', () => closeLoginModal());
+    // 刻意不做「点遮罩空白就关闭」：
+    //   1. 与 B 站的登录弹窗一致（它只有 X 能关）；
+    //   2. 要求是「除滚轮外其他都不可操作」，点外面不该产生任何效果；
+    //   3. 用户可能已经填了邮箱和密码，误点外面丢掉太亏。
+    // 关闭方式只有两个：右上角 X，以及 Esc。
+
+    /** Esc 关闭用：监听挂在 document 上，句柄存在弹窗元素上，由 closeLoginModal 负责摘掉。 */
+    const onKey = (e) => { if (e.key === 'Escape') closeLoginModal(); };
+    mask.__onKey = onKey;
+    document.addEventListener('keydown', onKey);
+
+    // 刻意不锁 body 滚动：要求是「除滚轮外都不可操作」。
+    // 遮罩是 fixed 且自身不滚动，滚轮会冒泡到文档，后面页面照常滚。
+    const first = mask.querySelector('input');
+    if (first) setTimeout(() => first.focus(), 30);
+
+    return mask;
+  }
+
+  /**
+   * 关闭登录弹窗：摘掉 Esc 监听并移除遮罩；没有弹窗时什么都不做。
+   * 要关弹窗请走 MP.auth.close（就是这个函数），别自己删 .modal-mask：
+   * authModal 这个单例标记会留在原地，之后再点登录会被当成「已经开着」而直接返回。
+   */
+  function closeLoginModal() {
+    if (!authModal) return;
+    if (authModal.__onKey) document.removeEventListener('keydown', authModal.__onKey);
+    authModal.remove();
+    authModal = null;
+  }
+
+  /**
+   * 全局点击拦截：需要登录的链接在未登录时改为弹窗，而不是跳转页面。
+   *
+   * 关键点：preventDefault() 必须同步调用，而会话检查是异步的。
+   * 所以策略是「先一律拦住，拿到会话之后再决定跳转还是弹窗」。
+   *
+   * 它注册在捕获阶段，会比页面里自己的 click 处理器先跑，所以开头要先看 e.defaultPrevented：
+   * 已经被别人处理过的点击，这里不再插手。
+   * 带修饰键的点击（新标签页 / 下载）、# 锚点、http(s): 等外链一律放过，交给浏览器原生行为。
+   * 整个文档只装一次（用 window.__mpAuthGuard 做标记），重复调用直接返回。
+   */
+  function installAuthGuard() {
+    if (window.__mpAuthGuard) return;
+    window.__mpAuthGuard = true;
+
+    document.addEventListener('click', (e) => {
+      if (e.defaultPrevented || e.button !== 0) return;
+      // 带修饰键的点击（新标签页、下载等）保持浏览器原生行为
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+
+      const target = e.target instanceof Element ? e.target : e.target.parentElement;
+      if (!target) return;
+
+      // 显式要求登录的触发器（顶栏「登录 / 注册」）
+      const opener = target.closest('[data-auth-open]');
+      if (opener) {
+        e.preventDefault();
+        openLoginModal({ next: opener.getAttribute('data-auth-next') || '' });
+        return;
+      }
+
+      const link = target.closest('a[href]');
+      if (!link) return;
+
+      const href = link.getAttribute('href');
+      if (!href || href.charAt(0) === '#' || /^[a-z][a-z0-9+.-]*:/i.test(href)) return;
+      if (!needsLogin(href)) return;
+
+      e.preventDefault();
+      MP.session()
+        .then((session) => {
+          if (session.user) { location.href = href; return; }
+          openLoginModal({ next: href });
+        })
+        .catch(() => { location.href = href; });
+    }, true);
+  }
+
+  MP.auth = {
+    LOGIN_REQUIRED,
+    needsLogin,
+    mountForm: mountAuthForm,
+    openLogin: openLoginModal,
+    close: closeLoginModal,
+  };
+
+  // 每个加载了 app.js 的页面都装上拦截
+  installAuthGuard();
 })();

@@ -8,210 +8,25 @@
 </head>
 <body>
 <main class="page narrow">
-  <div style="display:flex;justify-content:center;margin:6px 0 22px">
-    <a class="tlogo" href="/" id="brand"></a>
+  <div class="panel" style="max-width:440px;margin:26px auto">
+    <h1 class="center" style="margin:0 0 20px">登录 MinePage</h1>
+    <div id="authForm"></div>
   </div>
-
-  <div class="panel">
-    <h1 class="center" style="margin-bottom:4px">登录 MinePage</h1>
-    <p class="sub center">登录，或者注册一个新账号。</p>
-
-    <div class="tabs">
-      <button type="button" class="tab active" id="tabLogin">登录</button>
-      <button type="button" class="tab" id="tabRegister">注册</button>
-    </div>
-
-    <form id="loginForm" novalidate>
-      <label class="field">
-        <span class="label">邮箱或用户名</span>
-        <input id="loginId" type="text" autocomplete="username" placeholder="you@example.com">
-      </label>
-      <label class="field">
-        <span class="label">密码</span>
-        <input id="loginPassword" type="password" autocomplete="current-password">
-      </label>
-      <button type="submit" class="block" id="loginSubmit">登录</button>
-      <p class="hint center"><a href="/forgot">忘记密码？</a></p>
-    </form>
-
-    <form id="registerForm" novalidate hidden>
-      <label class="field">
-        <span class="label">邮箱</span>
-        <input id="registerEmail" type="email" autocomplete="email" placeholder="you@example.com">
-      </label>
-      <label class="field">
-        <span class="label">邮箱验证码</span>
-        <div class="code-row">
-          <input id="registerCode" inputmode="numeric" autocomplete="one-time-code"
-                 maxlength="6" placeholder="6 位数字">
-          <button type="button" class="ghost" id="sendCode" disabled>发送验证码</button>
-        </div>
-        <span class="hint" id="codeHint">先填邮箱，再点「发送验证码」</span>
-      </label>
-      <label class="field">
-        <span class="label">密码</span>
-        <input id="registerPassword" type="password" autocomplete="new-password">
-        <span class="hint">至少 6 位</span>
-      </label>
-      <button type="submit" class="block" id="registerSubmit">注册</button>
-    </form>
-  </div>
-
-  <div id="msg" class="result" hidden></div>
 </main>
 
 <script src="/_assets/app.js"></script>
 <script>
-document.getElementById('brand').innerHTML = MP.icon('logo') + 'MinePage';
+// 表单本身来自 app.js 的共享组件：弹窗与这个页面用的是同一份实现，
+// 所以两边的校验、倒计时、错误提示不可能出现不一致。
+MP.topbar({ active: '' });
 
-const tabLogin = document.getElementById('tabLogin');
-const tabRegister = document.getElementById('tabRegister');
-const loginForm = document.getElementById('loginForm');
-const registerForm = document.getElementById('registerForm');
-const msg = document.getElementById('msg');
-
-function switchTab(which) {
-  const isLogin = which === 'login';
-  tabLogin.classList.toggle('active', isLogin);
-  tabRegister.classList.toggle('active', !isLogin);
-  loginForm.hidden = !isLogin;
-  registerForm.hidden = isLogin;
-  msg.hidden = true;
-}
-
-tabLogin.addEventListener('click', () => switchTab('login'));
-tabRegister.addEventListener('click', () => switchTab('register'));
-
-function showMsg(ok, text) {
-  msg.hidden = false;
-  msg.className = 'result ' + (ok ? 'ok' : 'err');
-  msg.textContent = text;
-}
-
-async function post(url, payload) {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  return res.json();
-}
-
-loginForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const button = document.getElementById('loginSubmit');
-  button.disabled = true;
-
-  try {
-    const data = await post('/api/auth/login', {
-      login: document.getElementById('loginId').value,
-      password: document.getElementById('loginPassword').value,
-    });
-
-    if (data.ok) {
-      showMsg(true, '登录成功，正在跳转…');
-      location.href = data.user && data.user.isAdmin ? '/admin' : '/';
-    } else {
-      showMsg(false, data.message || '登录失败');
-    }
-  } catch (err) {
-    showMsg(false, '网络出问题了：' + err.message);
-  } finally {
-    button.disabled = false;
-  }
+MP.auth.mountForm(document.getElementById('authForm'), {
+  initialTab: location.search.includes('tab=register') ? 'register' : 'login',
+  /** 登录 / 注册成功后的去处：管理员进后台，普通用户回首页。 */
+  onSuccess(user) {
+    location.href = user && user.isAdmin ? '/admin' : '/';
+  },
 });
-
-// ---------------- 注册：发送邮箱验证码 ----------------
-
-const sendCodeBtn = document.getElementById('sendCode');
-const codeHint = document.getElementById('codeHint');
-const registerEmail = document.getElementById('registerEmail');
-const registerCode = document.getElementById('registerCode');
-
-const emailOk = () => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(registerEmail.value.trim());
-
-let countdown = 0;
-let timer = null;
-
-function startCountdown(seconds) {
-  countdown = seconds;
-  sendCodeBtn.disabled = true;
-  timer = setInterval(() => {
-    countdown -= 1;
-    if (countdown <= 0) {
-      clearInterval(timer);
-      sendCodeBtn.disabled = !emailOk();
-      sendCodeBtn.textContent = '重新发送';
-    } else {
-      sendCodeBtn.textContent = countdown + ' 秒';
-    }
-  }, 1000);
-}
-
-registerEmail.addEventListener('input', () => {
-  if (countdown <= 0) sendCodeBtn.disabled = !emailOk();
-});
-
-sendCodeBtn.addEventListener('click', async () => {
-  if (!emailOk()) {
-    showMsg(false, '先填一个正确的邮箱');
-    return;
-  }
-
-  sendCodeBtn.disabled = true;
-  try {
-    const data = await post('/api/auth/send-code', {
-      purpose: 'register',
-      email: registerEmail.value.trim(),
-    });
-
-    if (data.ok) {
-      codeHint.textContent = data.dev
-        ? '验证码已生成（未配置 SMTP，请到服务器控制台查看）'
-        : '验证码已发送，10 分钟内有效';
-      startCountdown(60);
-    } else {
-      codeHint.textContent = data.message || '发送失败';
-      sendCodeBtn.disabled = false;
-    }
-  } catch (err) {
-    codeHint.textContent = '网络出问题了：' + err.message;
-    sendCodeBtn.disabled = false;
-  }
-});
-
-registerForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const button = document.getElementById('registerSubmit');
-  button.disabled = true;
-
-  if (!/^\d{6}$/.test(registerCode.value.trim())) {
-    showMsg(false, '请输入 6 位邮箱验证码');
-    button.disabled = false;
-    return;
-  }
-
-  try {
-    const data = await post('/api/auth/register', {
-      email: registerEmail.value.trim(),
-      code: registerCode.value.trim(),
-      password: document.getElementById('registerPassword').value,
-    });
-
-    if (data.ok) {
-      showMsg(true, '注册成功，正在跳转…');
-      location.href = '/';
-    } else {
-      showMsg(false, data.message || '注册失败');
-    }
-  } catch (err) {
-    showMsg(false, '网络出问题了：' + err.message);
-  } finally {
-    button.disabled = false;
-  }
-});
-
-if (location.search.includes('tab=register')) switchTab('register');
 </script>
 </body>
 </html>
