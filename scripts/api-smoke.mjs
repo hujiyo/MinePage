@@ -304,6 +304,13 @@ async function run() {
 
   const profile = await api('/api/u/smoke-a/profile');
   check('创作者主页接口 200', profile.res.status === 200, `status=${profile.res.status}`);
+  check('创作者资料来自已设置的用户名和简介',
+    profile.body?.user?.username === 'smoke-a' && profile.body?.user?.bio === '我是冒烟测试账号');
+  check('匿名查看创作者主页不算本人', profile.body?.isOwn === false);
+  const ownProfile = await api('/api/u/smoke-a/profile', { cookie: a.cookie });
+  check('本人查看主页识别 isOwn', ownProfile.body?.isOwn === true);
+  const missingProfile = await api('/api/u/no-such-creator/profile');
+  check('不存在的创作者返回 404', missingProfile.res.status === 404);
 
   // ---------------------------------------------------------- 4. 站点与文件
   console.log('\n站点与文件');
@@ -481,6 +488,9 @@ async function run() {
 
   const follow = await api(`/api/users/${a.user.id}/follow`, { cookie: b.cookie, method: 'POST' });
   check('关注成功', follow.body?.ok === true, JSON.stringify(follow.body));
+  const followedProfile = await api('/api/u/smoke-a/profile', { cookie: b.cookie });
+  check('关注状态与粉丝数从数据库读回',
+    followedProfile.body?.isFollowing === true && followedProfile.body?.stats?.followers === 1);
   const followers = await api(`/api/users/${a.user.id}/follow-list?type=followers`);
   check(
     '粉丝列表 1 人（JOIN users）',
@@ -489,6 +499,9 @@ async function run() {
   );
   const unfollow = await api(`/api/users/${a.user.id}/follow`, { cookie: b.cookie, method: 'DELETE' });
   check('取消关注成功', unfollow.body?.ok === true, JSON.stringify(unfollow.body));
+  const unfollowedProfile = await api('/api/u/smoke-a/profile', { cookie: b.cookie });
+  check('取消关注后主页状态与粉丝数归零',
+    unfollowedProfile.body?.isFollowing === false && unfollowedProfile.body?.stats?.followers === 0);
 
   const history = await api('/api/history', { body: { site: SITE }, cookie: b.cookie, method: 'POST' });
   check('记录浏览历史成功', history.body?.ok === true, JSON.stringify(history.body));
@@ -541,6 +554,7 @@ async function run() {
     `status=${creator.res.status} ${JSON.stringify(creatorStats)}`,
   );
   check('创作者主页带自己的站点', creator.body?.sites?.some((s) => s.name === SITE), JSON.stringify(creator.body?.sites?.map((s) => s.name)));
+  check('创作者作品返回数据库中的文件数', creator.body?.sites?.some((s) => s.name === SITE && s.fileCount >= 2));
 
   // ---------------------------------------------------------- 6. 权限边界
   console.log('\n权限边界');
