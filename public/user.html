@@ -11,6 +11,7 @@
   <div id="notFound" class="empty" hidden>
     没有这个创作者。TA 可能还没设置用户名，或者账号已注销。<br><br><a href="/">回社区逛逛</a>
   </div>
+  <div id="loadError" class="empty" hidden></div>
 
   <div id="page" hidden>
     <section class="uspace">
@@ -25,7 +26,6 @@
       </div>
       <div class="utabs" id="utabs">
         <a data-tab="works" class="on">作品</a>
-        <a data-tab="favs">收藏</a>
         <a data-tab="about">关于</a>
       </div>
     </section>
@@ -33,11 +33,6 @@
     <section id="tabWorks">
       <div class="chips" id="chips" style="margin:16px 0 4px"></div>
       <div class="cards" id="cards"></div>
-    </section>
-
-    <section id="tabFavs" hidden>
-      <div class="chips" id="favChips" style="margin:16px 0 4px"></div>
-      <div class="cards" id="favCards"></div>
     </section>
 
     <section id="tabAbout" hidden>
@@ -58,6 +53,7 @@ MP.topbar();
 const USERNAME = decodeURIComponent(location.pathname.replace(/^\/u\//, '').replace(/\/+$/, ''));
 
 const notFoundBox = document.getElementById('notFound');
+const loadErrorBox = document.getElementById('loadError');
 const pageBox = document.getElementById('page');
 const avatarBox = document.getElementById('avatar');
 const nameBox = document.getElementById('pName');
@@ -65,45 +61,43 @@ const statsBox = document.getElementById('pStats');
 const actionsBox = document.getElementById('actions');
 const chipsBox = document.getElementById('chips');
 const cardsBox = document.getElementById('cards');
-const favChipsBox = document.getElementById('favChips');
-const favCardsBox = document.getElementById('favCards');
 const aboutBio = document.getElementById('aboutBio');
 const aboutStats = document.getElementById('aboutStats');
 
 let profile = null;   // 当前创作者
 let tag = '';         // 作品标签筛选
-let favFolder = 0;    // 收藏夹下标
 let following = false;
 let isOwn = false;
+let followPending = false;
 
-// TODO 后端对接：替换为 fetch('/api/u/:name/profile')（接口已有，前端尚未接线）
 /**
- * 拉取这个创作者的公开资料：{ user, sites, stats }。
- * 演示数据已删除、接口尚未接线，这里恒返回 null，页面会显示「没有这个创作者」的空态；
- * 接线时返回 null 的条件改成「接口 404」，isOwn 也要改由返回的 profile 数据判断。
+ * 拉取真实创作者资料；404 表示用户不存在，其他错误交给启动流程显示。
  */
-function loadProfile() {
-  return null;
+async function loadProfile() {
+  const res = await fetch('/api/u/' + encodeURIComponent(USERNAME) + '/profile', {
+    headers: { Accept: 'application/json' },
+  });
+  const data = await res.json().catch(() => null);
+  if (res.status === 404) return null;
+  if (!res.ok || !data?.ok || !data.user || !Array.isArray(data.sites)) {
+    throw new Error(data?.message || '创作者资料加载失败，稍后再试。');
+  }
+  return data;
 }
-
-// 收藏夹（接口尚未接线；收藏夹分组后端暂无模型，见 favorites.html 顶部 TODO）
-const FAV_FOLDERS = [];
 
 // ---------------------------------------------------------------- 头部
 
 /**
  * 渲染创作者主页的头部与「关于」页：页面标题、头像首字、展示名、简介、统计条和关于页的数字。
- * 只处理头部这一块，作品列表和收藏夹在 renderChips / renderWorks / renderFavs 里。
- * 会顺带刷新全局 isOwn，而 renderActions 依赖它，所以本函数必须跑在那之前（启动分支就是这么做的）。
+ * 只处理头部与关于页；作品由 renderWorks 渲染。
  */
 function renderProfile() {
   const { user, stats } = profile;
-  // isOwn 尚无法判断（未接 /api/me 与 profile），接真实接口后由 profile 数据决定；先按「看别人」渲染
-  isOwn = false;
+  const name = user.username;
 
-  document.title = user.name + ' · MinePage';
-  avatarBox.textContent = user.name.charAt(0).toUpperCase();
-  nameBox.textContent = user.name;
+  document.title = name + ' · MinePage';
+  avatarBox.textContent = name.charAt(0).toUpperCase();
+  nameBox.textContent = name;
   document.getElementById('aboutBio').textContent = user.bio || '这个人很懒，什么都没写。';
 
   statsBox.innerHTML = [
@@ -116,16 +110,14 @@ function renderProfile() {
   renderActions();
 
   aboutStats.innerHTML = [
-    ['获得点赞', MP.fmtNum(stats.likes)],
-    ['被收藏', MP.fmtNum(stats.favorites)],
+    ['粉丝', MP.fmtNum(stats.followers)],
+    ['总浏览', MP.fmtNum(stats.views)],
     ['作品数', stats.sites],
   ].map(([label, val]) => '<div class="stat"><b>' + val + '</b><span>' + label + '</span></div>').join('');
 }
 
 /**
- * 重建头部右侧的操作区：看自己的主页只给「编辑资料」，看别人的给「关注」+「私信」。
- * 关注按钮只翻转本地变量 following 再重绘，**不发请求**（见函数内 TODO），刷新即复原。
- * isOwn 由 renderProfile 赋值，本函数不能先于它单独调用，否则会按「不是自己」渲染。
+ * 重建头部操作区：自己的主页显示编辑资料，别人的主页显示真实关注状态。
  */
 function renderActions() {
   actionsBox.textContent = '';
@@ -144,18 +136,42 @@ function renderActions() {
   btn.type = 'button';
   btn.className = following ? 'ghost' : '';
   btn.textContent = following ? '已关注' : '+ 关注';
-  // TODO 后端对接：POST/DELETE /api/users/:id/follow
-  btn.addEventListener('click', () => {
-    following = !following;
-    renderActions();
-    MP.toast(following ? '已关注' : '已取消关注');
+  btn.disabled = followPending;
+  btn.addEventListener('click', async () => {
+    if (followPending) return;
+    followPending = true;
+    btn.disabled = true;
+    try {
+      if (!(await MP.me())) {
+        MP.auth.openLogin({});
+        return;
+      }
+      const res = await fetch('/api/users/' + profile.user.id + '/follow', {
+        method: following ? 'DELETE' : 'POST',
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok) {
+        if (res.status === 401) {
+          MP.forgetSession();
+          MP.auth.openLogin({});
+        } else {
+          MP.toast(data?.message || '操作失败，稍后再试');
+        }
+        return;
+      }
+      following = data.following === true;
+      profile.stats.followers = data.followers;
+      followPending = false;
+      renderProfile();
+      MP.toast(following ? '已关注' : '已取消关注');
+    } catch {
+      MP.toast('连不上服务器，稍后再试');
+    } finally {
+      followPending = false;
+      btn.disabled = false;
+    }
   });
   actionsBox.appendChild(btn);
-
-  const msg = document.createElement('a');
-  msg.href = '/messages';
-  msg.innerHTML = '<button type="button" class="ghost">' + MP.icon('message') + ' 私信</button>';
-  actionsBox.appendChild(msg);
 }
 
 // ---------------------------------------------------------------- 作品
@@ -196,26 +212,15 @@ function chip(label, active, onClick) {
  */
 function renderWorks() {
   const sites = tag ? profile.sites.filter((s) => s.tag === tag) : profile.sites;
-  MP.renderCards(cardsBox, sites);
-}
-
-/**
- * 渲染「收藏」页：收藏夹 chips + 当前收藏夹里的站点卡片。
- * FAV_FOLDERS 尚未接线（恒为空数组），显示空态；接线后 favFolder 存下标，点 chips 改它再整体重绘。
- */
-function renderFavs() {
-  favChipsBox.textContent = '';
-  const cur = FAV_FOLDERS[favFolder];
-  if (!cur) {
-    favCardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">还没有收藏的页面</div>';
+  if (!sites.length && !tag) {
+    cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">还没有公开作品</div>';
     return;
   }
-  FAV_FOLDERS.forEach((f, i) => {
-    favChipsBox.appendChild(chip(f.name + ' ' + f.sites.length, favFolder === i, () => {
-      favFolder = i; renderFavs();
-    }));
-  });
-  MP.renderCards(favCardsBox, cur.sites);
+  const { id, username } = profile.user;
+  MP.renderCards(cardsBox, sites.map((site) => ({
+    ...site,
+    author: { id, name: username, username },
+  })));
 }
 
 // ---------------------------------------------------------------- Tab 切换
@@ -226,22 +231,31 @@ document.getElementById('utabs').addEventListener('click', (e) => {
   document.querySelectorAll('#utabs a').forEach((x) => x.classList.toggle('on', x === a));
   const tab = a.dataset.tab;
   document.getElementById('tabWorks').hidden = tab !== 'works';
-  document.getElementById('tabFavs').hidden = tab !== 'favs';
   document.getElementById('tabAbout').hidden = tab !== 'about';
 });
 
 // ---------------------------------------------------------------- 启动
 
-profile = loadProfile();
-if (!profile) {
-  notFoundBox.hidden = false;
-} else {
-  pageBox.hidden = false;
-  renderProfile();
-  renderChips();
-  renderWorks();
-  renderFavs();
+async function boot() {
+  try {
+    profile = await loadProfile();
+    if (!profile) {
+      notFoundBox.hidden = false;
+      return;
+    }
+    isOwn = profile.isOwn === true;
+    following = profile.isFollowing === true;
+    pageBox.hidden = false;
+    renderProfile();
+    renderChips();
+    renderWorks();
+  } catch (error) {
+    loadErrorBox.textContent = error.message || '创作者资料加载失败，稍后再试。';
+    loadErrorBox.hidden = false;
+  }
 }
+
+boot();
 </script>
 </body>
 </html>
