@@ -23,7 +23,7 @@
 <script>
 MP.topbar({ active: 'dynamic' });
 
-// TODO 后端对接：替换为 fetch('/api/notifications')；通知接口后端已有（含已读上报），前端尚未接线
+// 通知由 GET /api/notifications 读取；点击按钮后用 POST /api/notifications/seen 标记已读。
 let items = [];
 
 const TABS = [
@@ -42,10 +42,13 @@ const TYPE_TEXT = {
 };
 
 let tab = 'all';
+let loadError = '';
 
 const tabsBox = document.getElementById('tabs');
 const listBox = document.getElementById('list');
 const emptyBox = document.getElementById('empty');
+const seenBtn = document.getElementById('seen');
+const emptyText = emptyBox.textContent;
 
 /** 把毫秒时间戳转成「刚刚 / N 分钟前 / N 小时前 / N 天前」，超过 30 天就直接显示日期。 */
 function fmtTime(ts) {
@@ -144,26 +147,59 @@ function renderItem(it) {
 
 /**
  * 按当前标签过滤后重画列表，并切换空态提示与列表容器的显隐。
- * 数据源是页内那个演示数组 items，**不发任何请求**：后端其实已经有 GET /api/notifications
- * （见文件顶部的 TODO）。页面右上角那个「全部标为已读」也一样，只改内存、不调
- * POST /api/notifications/seen，所以刷新后未读高亮必然复原。
+ * 数据源是 GET /api/notifications 返回的 items；筛选仅在页面内进行。
  */
 function render() {
   listBox.textContent = '';
+  emptyBox.textContent = loadError || emptyText;
   const list = items.filter(match);
-  emptyBox.hidden = list.length > 0;
+  emptyBox.hidden = !loadError && list.length > 0;
   list.forEach((it) => listBox.appendChild(renderItem(it)));
-  listBox.hidden = list.length === 0;
+  listBox.hidden = !!loadError || list.length === 0;
 }
 
-document.getElementById('seen').addEventListener('click', () => {
-  items.forEach((it) => { it.unread = false; });
-  render();
-  MP.toast('已全部标为已读');
+seenBtn.addEventListener('click', async () => {
+  seenBtn.disabled = true;
+  try {
+    const res = await fetch('/api/notifications/seen', { method: 'POST' });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.ok) {
+      MP.toast(data?.message || '标记失败，稍后再试');
+      return;
+    }
+    items.forEach((it) => { it.unread = false; });
+    MP.forgetSession();
+    document.querySelector('.tacts a[href="/notifications"] .dot')?.remove();
+    render();
+    MP.toast('已全部标为已读');
+  } catch {
+    MP.toast('连不上服务器，稍后再试');
+  } finally {
+    seenBtn.disabled = !items.some((it) => it.unread);
+  }
 });
 
+/** 进入页面后读取真实通知；失败时显示错误，不把失败伪装成“没有通知”。 */
+async function boot() {
+  seenBtn.disabled = true;
+  try {
+    const res = await fetch('/api/notifications', { headers: { Accept: 'application/json' } });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.ok || !Array.isArray(data.items)) {
+      throw new Error(data?.message || '加载失败，稍后再试');
+    }
+    loadError = '';
+    items = data.items;
+    seenBtn.disabled = !items.some((it) => it.unread);
+    render();
+  } catch (error) {
+    loadError = error.message || '连不上服务器，稍后再试';
+    render();
+  }
+}
+
 renderTabs();
-render();
+boot();
 </script>
 </body>
 </html>
