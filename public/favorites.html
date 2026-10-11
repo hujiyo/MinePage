@@ -62,7 +62,7 @@ function buildFolders(sites) {
   });
   return Array.from(map.entries())
     .map(([name, arr]) => ({ name, sites: arr, latest: arr[0].favoritedAt }))
-    .sort((a, b) => b.latest - a.latest);
+    .sort((a, b) => Date.parse(b.latest) - Date.parse(a.latest));
 }
 
 /**
@@ -89,8 +89,7 @@ function renderFolders() {
 
 /**
  * 刷新右侧「当前收藏夹」的标题、条数和卡片区；卡片交给 app.js 的 MP.renderCards 渲染。
- * 卡片渲染完再往每张卡的 .vops 里补一个「移除」按钮（renderCards 本身不支持扩展按钮），
- * 点击调 DELETE /api/sites/:name/favorite，成功后整个列表重拉（收藏夹分组可能变化）。
+ * 卡片上的收藏按钮取消成功后重拉列表，因为当前收藏夹可能变空。
  */
 function renderSites() {
   const f = FOLDERS[cur];
@@ -102,30 +101,10 @@ function renderSites() {
   }
   folderName.textContent = f.name;
   folderCount.textContent = '共 ' + f.sites.length + ' 个页面';
-  MP.renderCards(cardsBox, f.sites);
-
-  const cards = cardsBox.querySelectorAll('.vcard');
-  f.sites.forEach((s, i) => {
-    const ops = cards[i] && cards[i].querySelector('.vops');
-    if (!ops) return;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'op';
-    btn.title = '取消收藏';
-    btn.textContent = '移除';
-    btn.addEventListener('click', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const res = await fetch('/api/sites/' + encodeURIComponent(s.name) + '/favorite', { method: 'DELETE' });
-      const d = await res.json().catch(() => null);
-      if (!res.ok || !d || !d.ok) {
-        MP.toast((d && d.message) || '移除失败，稍后再试');
-        return;
-      }
-      MP.toast('已取消收藏「' + (s.title || s.name) + '」');
-      boot();   // 重拉：当前夹可能变空、其它夹计数也会变
-    });
-    ops.appendChild(btn);
+  MP.renderCards(cardsBox, f.sites, {
+    onFavoriteChange: (site) => {
+      if (!site.favorited) boot();
+    },
   });
 }
 

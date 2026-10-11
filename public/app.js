@@ -468,7 +468,7 @@
    * 字段兼容：页数优先接口给的 fileCount，缺了退到 pages，再退 1；标签中文名优先 site.tagLabel，
    * 没有才用 tagLabel(site.tag) 去查词表。
    * opt.peek=false 时这张卡不挂悬停预览（卡片多的列表页更省）。
-   * 右下角赞 / 藏两个按钮目前只切自己的 .on 样式，不发请求（见函数里的 TODO）。
+   * 右下角的赞与收藏读取当前用户状态，点击后写入数据库。
    */
   MP.vcard = function (site, opt) {
     const o = opt || {};
@@ -498,10 +498,17 @@
     } else {
       cover.appendChild(buildLiveCover(site, cover));
     }
-    // ⚠️ 已知缺陷：封面是普通 div，**点它没有任何反应**。
-    // 整张卡片里只有下面的 `.vtitle` 是可点的链接，用户点封面/空白处会以为卡片坏了。
-    // 修法（本节未做）：把封面包进 <a href="/view/:名字">，或给卡片挂一个
-    // 「点到 a/button 以外的区域就跳转」的委托监听。
+    const viewHref = '/view/' + encodeURIComponent(site.name);
+    cover.tabIndex = 0;
+    cover.setAttribute('role', 'link');
+    cover.setAttribute('aria-label', '观看 ' + (site.title || site.name));
+    cover.addEventListener('click', () => { location.href = viewHref; });
+    cover.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        location.href = viewHref;
+      }
+    });
     card.appendChild(cover);
 
     const body = document.createElement('div');
@@ -509,7 +516,7 @@
 
     const title = document.createElement('a');
     title.className = 'vtitle';
-    title.href = '/view/' + encodeURIComponent(site.name);
+    title.href = viewHref;
     title.textContent = site.title || site.name;
     body.appendChild(title);
 
@@ -538,30 +545,69 @@
 
     card.appendChild(body);
 
-    // 快捷赞 / 藏
-    //
-    // ⚠️ **这两个按钮目前是假的**：只 toggle 一个 `.on` class，不发任何请求，刷新即复原。
-    // 点赞的真接口是有的（`POST/DELETE /api/sites/:名字/like`），`view.html` 里已经接上了
-    // （那边验过：200 + 计数变化 + 刷新后仍在）。这里没接的原因是**卡片拿不到"我点过没有"** ——
-    // `/api/discover` 不返回 `liked`（原版也不返回），接了会出现"我明明赞过、按钮却是灭的"。
-    // 正确修法：给 discover 的响应加一个 `liked` 字段（对登录用户），再照 view.html 的写法接。
+    // 快捷赞 / 藏：服务端列表已带当前用户状态，写入成功后才更新本卡片。
     const ops = document.createElement('div');
     ops.className = 'vops';
     const like = document.createElement('button');
     like.type = 'button';
     like.className = 'op';
-    like.innerHTML = icon('like') + ' ' + fmtNum(site.likes);
     const fav = document.createElement('button');
     fav.type = 'button';
     fav.className = 'op';
-    fav.innerHTML = icon('fav') + ' ' + fmtNum(site.favorites);
-    [like, fav].forEach((btn) => {
+    function updateActions() {
+      like.classList.toggle('on', !!site.liked);
+      fav.classList.toggle('on', !!site.favorited);
+      like.setAttribute('aria-pressed', String(!!site.liked));
+      fav.setAttribute('aria-pressed', String(!!site.favorited));
+      like.innerHTML = icon('like') + ' ' + fmtNum(site.likes);
+      fav.innerHTML = icon('fav') + ' ' + fmtNum(site.favorites);
+      const numbers = meta.querySelectorAll('span');
+      numbers[0].innerHTML = icon('like') + fmtNum(site.likes);
+      numbers[1].innerHTML = icon('fav') + fmtNum(site.favorites);
+    }
+    async function toggleAction(kind, btn) {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      const active = kind === 'like' ? !!site.liked : !!site.favorited;
+      try {
+        const res = await fetch('/api/sites/' + encodeURIComponent(site.name) + '/' + kind, {
+          method: active ? 'DELETE' : 'POST',
+          headers: { Accept: 'application/json', ...(kind === 'favorite' ? { 'Content-Type': 'application/json' } : {}) },
+          ...(kind === 'favorite' && !active ? { body: '{}' } : {}),
+        });
+        const data = await res.json().catch(() => null);
+        if (res.status === 401) {
+          MP.forgetSession();
+          MP.auth.openLogin({});
+          return;
+        }
+        if (!res.ok || !data?.ok) {
+          MP.toast(data?.message || '操作失败，稍后再试');
+          return;
+        }
+        if (kind === 'like') {
+          site.liked = data.liked;
+          site.likes = data.likes;
+        } else {
+          site.favorited = data.favorited;
+          site.favorites = data.favorites;
+        }
+        updateActions();
+        if (kind === 'favorite' && o.onFavoriteChange) o.onFavoriteChange(site);
+      } catch {
+        MP.toast('连不上服务器，稍后再试');
+      } finally {
+        btn.disabled = false;
+      }
+    }
+    [[like, 'like'], [fav, 'favorite']].forEach(([btn, kind]) => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         e.preventDefault();
-        MP.toast('卡片上的快捷按钮还没接上后端（观看页里的点赞已经能用）');
+        toggleAction(kind, btn);
       });
     });
+    updateActions();
     ops.appendChild(like);
     ops.appendChild(fav);
     card.appendChild(ops);
