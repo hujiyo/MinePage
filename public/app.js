@@ -501,7 +501,7 @@
     // ⚠️ 已知缺陷：封面是普通 div，**点它没有任何反应**。
     // 整张卡片里只有下面的 `.vtitle` 是可点的链接，用户点封面/空白处会以为卡片坏了。
     // 修法（本节未做）：把封面包进 <a href="/view/:名字">，或给卡片挂一个
-    // 「点到 a/button 以外的区域就跳转」的委托监听。详见 backend/docs/02-flows.md。
+    // 「点到 a/button 以外的区域就跳转」的委托监听。
     card.appendChild(cover);
 
     const body = document.createElement('div');
@@ -545,7 +545,6 @@
     // （那边验过：200 + 计数变化 + 刷新后仍在）。这里没接的原因是**卡片拿不到"我点过没有"** ——
     // `/api/discover` 不返回 `liked`（原版也不返回），接了会出现"我明明赞过、按钮却是灭的"。
     // 正确修法：给 discover 的响应加一个 `liked` 字段（对登录用户），再照 view.html 的写法接。
-    // 详见 backend/docs/02-flows.md 的 D1 与分类总表下面那张问题表。
     const ops = document.createElement('div');
     ops.className = 'vops';
     const like = document.createElement('button');
