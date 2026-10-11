@@ -324,6 +324,31 @@ async function run() {
   const anonUpload = await api('/api/upload', { body: { html: '<p>x</p>', name: 'nobody-site' }, method: 'POST' });
   check('未登录上传 → 401', anonUpload.res.status === 401, `status=${anonUpload.res.status}`);
 
+  const badZip = await api('/api/sites/smoke-zip-invalid/zip', {
+    cookie: a.cookie, method: 'POST', raw: Buffer.from('not a zip'), type: 'application/zip',
+  });
+  check('无效 ZIP 返回 400', badZip.res.status === 400, `status=${badZip.res.status}`);
+  const missingBadZip = await api('/api/sites/smoke-zip-invalid', { cookie: a.cookie });
+  check('无效 ZIP 不创建站点', missingBadZip.res.status === 404, `status=${missingBadZip.res.status}`);
+
+  const skippedZip = Buffer.from('UEsDBBQAAAAAAJKrS105nPsGBAAAAAQAAAAJAAAALkRTX1N0b3JlanVua1BLAQIUABQAAAAAAJKrS105nPsGBAAAAAQAAAAJAAAAAAAAAAAAAACAAQAAAAAuRFNfU3RvcmVQSwUGAAAAAAEAAQA3AAAAKwAAAAAA', 'base64');
+  const noFiles = await api('/api/sites/smoke-zip-empty/zip', {
+    cookie: a.cookie, method: 'POST', raw: skippedZip, type: 'application/zip',
+  });
+  check('全被跳过的 ZIP 返回 400', noFiles.res.status === 400, `status=${noFiles.res.status}`);
+  const missingEmptyZip = await api('/api/sites/smoke-zip-empty', { cookie: a.cookie });
+  check('全被跳过的 ZIP 不创建站点', missingEmptyZip.res.status === 404, `status=${missingEmptyZip.res.status}`);
+
+  const goodZip = Buffer.from('UEsDBBQAAAAAAI2rS10Zc+inDwAAAA8AAAAKAAAAaW5kZXguaHRtbDxoMT56aXAtb2s8L2gxPlBLAwQUAAAAAACNq0tdWXGH4gYAAAAGAAAADAAAAGFzc2V0cy9hLmNzc2JvZHl7fVBLAQIUABQAAAAAAI2rS10Zc+inDwAAAA8AAAAKAAAAAAAAAAAAAACAAQAAAABpbmRleC5odG1sUEsBAhQAFAAAAAAAjatLXVlxh+IGAAAABgAAAAwAAAAAAAAAAAAAAIABNwAAAGFzc2V0cy9hLmNzc1BLBQYAAAAAAgACAHIAAABnAAAAAAA=', 'base64');
+  const goodZipUpload = await api('/api/sites/smoke-zip-good/zip', {
+    cookie: a.cookie, method: 'POST', raw: goodZip, type: 'application/zip',
+  });
+  check('有效 ZIP 发布 2 个文件', goodZipUpload.res.status === 201 && goodZipUpload.body?.saved === 2,
+    `status=${goodZipUpload.res.status} ${JSON.stringify(goodZipUpload.body)}`);
+  const goodZipPage = await api('/smoke-zip-good/');
+  check('ZIP 首页可访问', goodZipPage.res.status === 200 && goodZipPage.text.includes('zip-ok'));
+  await api('/api/sites/smoke-zip-good', { cookie: a.cookie, method: 'DELETE' });
+
   const html1 = '<!doctype html><meta charset="utf-8"><title>冒烟</title><h1>第一版</h1>';
   const upload = await api('/api/upload', { body: { html: html1, name: SITE }, cookie: a.cookie, method: 'POST' });
   check('上传站点 201', upload.res.status === 201, `status=${upload.res.status} ${JSON.stringify(upload.body)}`);
