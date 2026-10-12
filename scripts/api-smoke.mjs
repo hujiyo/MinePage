@@ -349,6 +349,39 @@ async function run() {
   check('ZIP 首页可访问', goodZipPage.res.status === 200 && goodZipPage.text.includes('zip-ok'));
   await api('/api/sites/smoke-zip-good', { cookie: a.cookie, method: 'DELETE' });
 
+  const nestedName = 'smoke-nested-entry';
+  const nestedHtml = '<!doctype html><head><link rel="stylesheet" href="assets/a.css"></head><h1>nested-ok</h1>';
+  const nestedIndex = await api(`/api/sites/${nestedName}/files?path=dist/index.html`, {
+    cookie: a.cookie, method: 'POST', raw: nestedHtml, type: 'application/octet-stream',
+  });
+  const nestedCss = await api(`/api/sites/${nestedName}/files?path=dist/assets/a.css`, {
+    cookie: a.cookie, method: 'POST', raw: 'body{color:red}', type: 'application/octet-stream',
+  });
+  check('子目录入口与资源上传成功', nestedIndex.res.status === 201 && nestedCss.res.status === 201);
+  const nestedRedirect = await api(`/${nestedName}/?mpcover=1`, { redirect: 'manual' });
+  check('根地址跳转到真实入口且保留封面参数',
+    nestedRedirect.res.status === 302 && nestedRedirect.res.headers.get('location') === `/${nestedName}/dist/index.html?mpcover=1`);
+  const nestedNoSlash = await api(`/${nestedName}`, { redirect: 'manual' });
+  check('无斜杠地址也跳转到真实入口',
+    nestedNoSlash.res.status === 302 && nestedNoSlash.res.headers.get('location') === `/${nestedName}/dist/index.html`);
+  const nestedPage = await api(`/${nestedName}/`);
+  check('子目录首页可访问且最终地址正确', nestedPage.res.status === 200 &&
+    nestedPage.text.includes('nested-ok') && new URL(nestedPage.res.url).pathname === `/${nestedName}/dist/index.html`);
+  const nestedCssPath = new URL('assets/a.css', nestedPage.res.url).pathname;
+  const resolvedCss = await api(nestedCssPath);
+  check('子目录首页的相对 CSS 可访问', nestedCssPath === `/${nestedName}/dist/assets/a.css` &&
+    resolvedCss.res.status === 200 && resolvedCss.text === 'body{color:red}');
+  const nestedCover = await api(`/${nestedName}/?mpcover=1`);
+  check('子目录封面仍注入滚动代理', nestedCover.res.status === 200 && nestedCover.text.includes('mpReady'));
+  const nestedViews = await api(`/api/sites/${nestedName}/stats`);
+  check('两次入口请求各只增加一次浏览', nestedViews.body?.stats?.views === 2,
+    JSON.stringify(nestedViews.body?.stats));
+  await api(`/${nestedName}/dist/index.html`);
+  const refreshedViews = await api(`/api/sites/${nestedName}/stats`);
+  check('直接刷新子目录入口仍计一次浏览', refreshedViews.body?.stats?.views === 3,
+    JSON.stringify(refreshedViews.body?.stats));
+  await api(`/api/sites/${nestedName}`, { cookie: a.cookie, method: 'DELETE' });
+
   const html1 = '<!doctype html><meta charset="utf-8"><title>冒烟</title><h1>第一版</h1>';
   const upload = await api('/api/upload', { body: { html: html1, name: SITE }, cookie: a.cookie, method: 'POST' });
   check('上传站点 201', upload.res.status === 201, `status=${upload.res.status} ${JSON.stringify(upload.body)}`);
@@ -415,6 +448,10 @@ async function run() {
     type: 'text/css; charset=utf-8',
   });
   check('上传子目录文件成功', putCss.res.status === 201 || putCss.res.status === 200, `status=${putCss.res.status}`);
+
+  const rootNoSlash = await api(`/${SITE}`, { redirect: 'manual' });
+  check('根目录入口补结尾斜杠', rootNoSlash.res.status === 302 &&
+    rootNoSlash.res.headers.get('location') === `/${SITE}/`);
 
   const files = await api(`/api/sites/${SITE}/files`, { cookie: a.cookie });
   const fileList = files.body?.files ?? [];

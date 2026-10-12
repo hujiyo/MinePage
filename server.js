@@ -1910,19 +1910,28 @@ async function handleSite(req, res, [name, rest = '']) {
     return;
   }
 
-  // /站点名 和 /站点名/ 都算入口页（走 pickEntryPath 识别）；其余去掉开头的 / 得到站点内路径
+  // 让浏览器的最终 URL 与入口文件所在目录一致，相对 CSS/JS/图片才能正确解析。
+  // 根目录入口需要结尾斜杠；子目录入口直接跳到真实文件路径。
+  const url = new URL(req.url, 'http://internal');
   const isRoot = !rest || rest === '/';
   const filePath = isRoot ? await pickEntryPath(site.id) : rest.slice(1);
+  if (isRoot && (!url.pathname.endsWith('/') || filePath.includes('/'))) {
+    const target = filePath.includes('/') ? `/${name}/${filePath}` : `/${name}/`;
+    sendRedirect(res, target + url.search);
+    return;
+  }
+
+  // 子目录入口经过重定向后是文件 URL，直接访问或刷新它仍算一次浏览。
+  const isEntryRequest = isRoot || (/\.html?$/i.test(filePath) && filePath === await pickEntryPath(site.id));
 
   // 广场迷你封面专用（?mpcover=1）：给入口 HTML 注入滚动代理脚本，
   // 父页面才能 postMessage 驱动内部下翻；/view/站名 等直接访问不带参，不受影响
-  const forCover =
-    isRoot && new URL(req.url, 'http://internal').searchParams.get('mpcover') === '1';
+  const forCover = isEntryRequest && url.searchParams.get('mpcover') === '1';
 
   const content = await getSiteFile(site.id, filePath);
   if (content) {
-    // 浏览量简单版：只有入口页 +1，站内 css / js 等子资源不算
-    if (isRoot) await incrementViews(site.id);
+    // 只有入口页 +1，站内 css / js 等子资源不算
+    if (isEntryRequest) await incrementViews(site.id);
     const out = forCover && /\.html?$/i.test(filePath) ? injectPeekProxy(content) : content;
     serveSiteFile(req, res, filePath, out);
     return;
