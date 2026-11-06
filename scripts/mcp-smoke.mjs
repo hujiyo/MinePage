@@ -103,10 +103,19 @@ async function call(token, name, toolArgs = {}) {
 
 // ---------------------------------------------------------------- 隔离模式
 
-/** 用「不是站主」的密钥去操作别人的站点，八种操作必须全部被拒。 */
+/**
+ * 跨账号隔离。
+ *
+ * 站名只在各自用户名下唯一，所以「别人的站名」在本账号里根本查不到：
+ * 读/改类工具应当报「没有找到」；write_file / delete_site 这类会建站的工具
+ * 只会作用在自己名下，绝不可能碰到别人的同名站点。
+ */
 async function runIsolation(token, siteName) {
   if (!siteName) throw new Error('--isolation 后面要跟一个站点名');
   console.log(`\n跨账号隔离：用别人的密钥操作 "${siteName}"，应当全部被拒\n`);
+
+  const rejected = (result) => result.isError
+    && (result.text.includes('不是你自己的站点') || result.text.includes('没有找到'));
 
   for (const [tool, toolArgs, label] of [
     ['get_site', { name: siteName }, 'get_site 拒绝'],
@@ -114,14 +123,27 @@ async function runIsolation(token, siteName) {
     ['read_file', { name: siteName, path: 'index.html' }, 'read_file 拒绝'],
     ['update_site_html', { name: siteName, html: '<p>x</p>' }, 'update_site_html 拒绝'],
     ['update_site_meta', { name: siteName, title: 'x' }, 'update_site_meta 拒绝'],
-    ['write_file', { name: siteName, path: 'evil.html', content: 'x' }, 'write_file 拒绝'],
     ['delete_file', { name: siteName, path: 'index.html' }, 'delete_file 拒绝'],
     ['delete_site', { name: siteName }, 'delete_site 拒绝'],
   ]) {
     const result = await call(token, tool, toolArgs);
-    const rejected = result.isError && result.text.includes('不是你自己的站点');
-    check(label, rejected, result.text.slice(0, 80));
+    check(label, rejected(result), result.text.slice(0, 80));
   }
+
+  // write_file 会在本账号下另起一个同名站点，而不是写进别人的站
+  const write = await call(token, 'write_file', { name: siteName, path: 'index.html', content: '<h1>mine</h1>' });
+  check('write_file 建的是自己名下的同名站点', !write.isError && write.data?.siteCreated === true, write.text);
+  check(
+    '自己的同名站点地址在自己的用户名下',
+    typeof write.data?.url === 'string' && write.data.url.includes(`/qwq/`),
+    write.data?.url,
+  );
+
+  const mine = await call(token, 'read_file', { name: siteName, path: 'index.html' });
+  check('读到的是自己写的内容', mine.data?.content === '<h1>mine</h1>', mine.text.slice(0, 80));
+
+  // 清掉这个临时站点，免得污染下次跑
+  await call(token, 'delete_site', { name: siteName });
 }
 
 // ---------------------------------------------------------------- 封禁联动
@@ -251,13 +273,10 @@ async function runMain(cookie, token) {
 
   const created = await call(token, 'create_site', { html: '<!DOCTYPE html><h1>v1</h1>', name: 'smoke-single' });
   check('create_site 成功', !created.isError && created.data.name === 'smoke-single', created.text);
-  check('create_site 给出访问地址', created.data?.url?.endsWith('/smoke-single'), created.data?.url);
+  check('create_site 给出用户空间下的访问地址', /\/qwq\/[a-z0-9-]+\/smoke-single$/.test(created.data?.url ?? ''), created.data?.url);
 
   const dup = await call(token, 'create_site', { html: '<h1>x</h1>', name: 'smoke-single' });
   check('重名建站被拒', dup.isError && dup.text.includes('已经被占用'), dup.text);
-
-  const reserved = await call(token, 'create_site', { html: '<h1>x</h1>', name: 'mcp' });
-  check('保留名被拒', reserved.isError, reserved.text);
 
   const badName = await call(token, 'create_site', { html: '<h1>x</h1>', name: 'A B' });
   check('非法站名被拒', badName.isError, badName.text);

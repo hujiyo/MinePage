@@ -24,9 +24,11 @@ import {
   MYSQL_HOST,
   MYSQL_PORT,
   MYSQL_DATABASE,
+  USER_SPACE_PREFIX,
+  MAX_SITES_PER_USER,
 } from './lib/config.js';
-import { checkName } from './lib/names.js';
-import { absoluteUrlForSite } from './lib/addressing.js';
+import { checkName, checkUsername } from './lib/names.js';
+import { absoluteUrlForSite, urlForSite, urlForView } from './lib/addressing.js';
 import { closeDb } from './lib/db.js';
 import { buildCookie, parseCookies, looksLikeEmail, verifyPassword } from './lib/auth.js';
 import {
@@ -35,6 +37,7 @@ import {
   countUsers,
   createSession,
   createUser,
+  deleteAccount,
   deleteExpiredSessions,
   deleteOtherSessions,
   deleteSession,
@@ -55,10 +58,12 @@ import { createMcpToken, listMcpTokens, revokeMcpToken } from './lib/mcp/tokens.
 import {
   countSiteFiles,
   countSites,
+  countSitesByOwner,
   createSite,
   deleteSite,
-  findSiteByName,
-  findSiteHeaderByName,
+  findSiteByUsername,
+  findSiteHeaderById,
+  findSiteHeaderByUsername,
   getSiteFile,
   isValidSitePath,
   isValidSiteTag,
@@ -76,6 +81,15 @@ import {
   SITE_TAGS,
 } from './lib/sites.js';
 import { parseZip } from './lib/zip.js';
+import {
+  createBanner,
+  deleteBanner,
+  findBannerById,
+  listAllBanners,
+  listPublicBanners,
+  MAX_BANNERS,
+  updateBanner,
+} from './lib/banners.js';
 import {
   addComment,
   countComments,
@@ -124,32 +138,6 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 // 现在平台上有了登录 Cookie，这道墙不再是「保险」而是「必需品」。
 const SANDBOX_CSP =
   'sandbox allow-scripts allow-forms allow-popups allow-downloads allow-top-navigation-by-user-activation';
-
-// 迷你封面滚动代理：注入到带 ?mpcover=1 的入口页。
-// 封面 iframe 是沙箱（opaque origin），父页面摸不到它的内部滚动，
-// 只能 postMessage 让页面自己滚 —— 等价于真实浏览器窗口往下翻，
-// 「100vh 全屏首屏」这类内容高度跟着视口走的站点也能正常预览下翻。
-// mpPeekSpeed：匀速下翻（px/s，到底循环）；mpPeekStop：停下回顶；mpPeekTo：滚到指定位置。
-// 一律 behavior:'instant'：模板常设 scroll-behavior:smooth，平滑滚动既拖慢步进又会卡在半路。
-const MPEEK_PROXY =
-  '<script>(function(){var s=0,sp=0,raf=0,last=0;' +
-  'function tick(t){if(!sp)return;var dt=Math.min((t-last)/1000,0.1);last=t;' +
-  'var max=document.documentElement.scrollHeight-window.innerHeight;' +
-  'if(max<=0){raf=requestAnimationFrame(tick);return;}' +
-  's+=sp*dt;if(s>=max)s=0;window.scrollTo({top:s,behavior:"instant"});raf=requestAnimationFrame(tick);}' +
-  'window.addEventListener("message",function(e){var d=e.data||{};' +
-  'if(d.mpPeekSpeed!=null){sp=d.mpPeekSpeed;last=performance.now();if(sp&&!raf)raf=requestAnimationFrame(tick);}' +
-  'else if(d.mpPeekStop){sp=0;if(raf)cancelAnimationFrame(raf);raf=0;window.scrollTo({top:0,behavior:"instant"});}' +
-  'else if(d.mpPeekTo!=null){window.scrollTo({top:d.mpPeekTo,behavior:"instant"});}});' +
-  'parent.postMessage({mpReady:1},"*");})();</script>';
-
-// 把代理脚本插到最后一个 </body> 前，找不到就追加到末尾；Buffer 进 Buffer 出，string 进 string 出
-function injectPeekProxy(html) {
-  const s = html.toString('utf8');
-  const i = s.toLowerCase().lastIndexOf('</body');
-  const out = i === -1 ? s + MPEEK_PROXY : s.slice(0, i) + MPEEK_PROXY + s.slice(i);
-  return Buffer.isBuffer(html) ? Buffer.from(out, 'utf8') : out;
-}
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -465,11 +453,12 @@ async function handleAsset(req, res, [file]) {
 
   try {
     const data = await fs.readFile(path.join(PUBLIC_DIR, file));
-    const ext = path.extname(file).toLowerCase();
-    sendWithGzip(req, res, 200, {
-      'Content-Type': MIME_TYPES[ext] ?? 'application/octet-stream',
+    res.writeHead(200, {
+      'Content-Type': MIME_TYPES[path.extname(file).toLowerCase()] ?? 'application/octet-stream',
+      'Content-Length': data.length,
       'Cache-Control': 'no-cache',
-    }, data, ext);
+    });
+    res.end(data);
   } catch {
     sendHtml(res, 404, messagePage('404', '找不到这个文件。'));
   }
@@ -588,6 +577,12 @@ async function handleRegister(req, res) {
     sendJson(res, 400, { ok: false, message: '邮箱格式不对' });
     return;
   }
+  // 用户名就是 /qwq/<用户名>/ 这段路径，注册时必须定下来
+  const checkedUsername = checkUsername(body.username);
+  if (!checkedUsername.ok) {
+    sendJson(res, 400, { ok: false, message: checkedUsername.reason });
+    return;
+  }
   if (password.length < PASSWORD_MIN) {
     sendJson(res, 400, { ok: false, message: `密码至少 ${PASSWORD_MIN} 位` });
     return;
@@ -600,6 +595,10 @@ async function handleRegister(req, res) {
     sendJson(res, 409, { ok: false, message: '这个邮箱已经注册过了' });
     return;
   }
+  if (await findUserByLogin(checkedUsername.name)) {
+    sendJson(res, 409, { ok: false, message: '这个用户名已经被使用了' });
+    return;
+  }
 
   const verified = await consumeCode(email, 'register', code);
   if (!verified.ok) {
@@ -607,7 +606,16 @@ async function handleRegister(req, res) {
     return;
   }
 
-  const user = await createUser({ email, password });
+  let user;
+  try {
+    user = await createUser({ email, username: checkedUsername.name, password });
+  } catch (err) {
+    if (err.code === 'NAME_TAKEN' || err.code === 'BAD_NAME') {
+      sendJson(res, 409, { ok: false, message: err.message });
+      return;
+    }
+    throw err;
+  }
   const token = await createSession(user.id);
   setSessionCookie(res, token, SESSION_TTL_DAYS * 86400);
 
@@ -725,7 +733,7 @@ async function handleAccountUsername(req, res) {
   if (!body) return;
 
   try {
-    const username = await setUsername(user.id, body.username ?? null);
+    const username = await setUsername(user.id, body.username);
     sendJson(res, 200, { ok: true, username });
   } catch (err) {
     if (err.code === 'BAD_NAME') {
@@ -779,6 +787,33 @@ async function handleAccountBio(req, res) {
   }
 }
 
+/**
+ * 注销账号：确认密码后删号。
+ * sites / site_files / 社交数据 / 会话 / MCP 密钥全部由外键级联清空，
+ * 用户空间 /qwq/<用户名>/ 下的一切随之消失。
+ */
+async function handleAccountDelete(req, res) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const row = await findUserById(user.id);
+  if (!row || !verifyPassword(String(body.password ?? ''), row.password_hash)) {
+    sendJson(res, 400, { ok: false, message: '密码不对' });
+    return;
+  }
+  if (row.is_admin === 1) {
+    sendJson(res, 400, { ok: false, message: '管理员账号不能自助注销' });
+    return;
+  }
+
+  await deleteAccount(user.id);
+  setSessionCookie(res, '', 0);
+  sendJson(res, 200, { ok: true });
+}
+
 // ---------------------------------------------------------------- 站点接口
 
 async function handleMySites(req, res) {
@@ -788,6 +823,8 @@ async function handleMySites(req, res) {
   const sites = (await listSitesByOwner(user.id)).map((s) => ({
     id: s.id,
     name: s.name,
+    url: urlForSite(user.username, s.name),
+    viewUrl: urlForView(user.username, s.name),
     title: s.title,
     description: s.description,
     tag: s.tag,
@@ -800,7 +837,13 @@ async function handleMySites(req, res) {
     updatedAt: s.updated_at,
   }));
 
-  sendJson(res, 200, { ok: true, sites });
+  sendJson(res, 200, {
+    ok: true,
+    username: user.username,
+    prefix: USER_SPACE_PREFIX,
+    quota: MAX_SITES_PER_USER,
+    sites,
+  });
 }
 
 async function handleUpload(req, res) {
@@ -832,11 +875,11 @@ async function handleUpload(req, res) {
       ok: true,
       name: site.name,
       size: site.size,
-      url: absoluteUrlForSite(originOf(req), site.name),
+      url: absoluteUrlForSite(originOf(req), user.username, site.name),
     });
   } catch (err) {
-    if (err.code === 'NAME_TAKEN') {
-      sendJson(res, 409, { ok: false, message: err.message });
+    if (err.code === 'NAME_TAKEN' || err.code === 'QUOTA_EXCEEDED') {
+      sendJson(res, err.code === 'NAME_TAKEN' ? 409 : 429, { ok: false, message: err.message });
       return;
     }
     console.error('[upload]', err);
@@ -847,7 +890,7 @@ async function handleUpload(req, res) {
 // ---------------------------------------------------------------- 站点多文件接口
 
 /** 上传/覆盖站点里的一个文件。站点不存在时自动创建（入口页待补 index.html）。 */
-async function handleSiteFileUpload(req, res, [name]) {
+async function handleSiteFileUpload(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
@@ -867,14 +910,20 @@ async function handleSiteFileUpload(req, res, [name]) {
     return;
   }
 
-  let site = await findSiteHeaderByName(checked.name);
+  let site = await findSiteHeaderByUsername(username, checked.name);
   if (!site) {
+    // 建站只能建在自己名下：路径里的用户名必须就是自己，
+    // 否则站点会建到自己的 id 上、地址却挂在别人名下
+    if (username !== user.username) {
+      sendJson(res, 403, { ok: false, message: '只能往自己的用户名下建站点' });
+      return;
+    }
     try {
       await createSite({ name: checked.name, html: '', ownerId: user.id });
-      site = await findSiteHeaderByName(checked.name);
+      site = await findSiteHeaderByUsername(username, checked.name);
     } catch (err) {
-      if (err.code === 'NAME_TAKEN') {
-        sendJson(res, 409, { ok: false, message: err.message });
+      if (err.code === 'NAME_TAKEN' || err.code === 'QUOTA_EXCEEDED') {
+        sendJson(res, err.code === 'NAME_TAKEN' ? 409 : 429, { ok: false, message: err.message });
         return;
       }
       console.error('[site-file-upload]', err);
@@ -899,7 +948,7 @@ async function handleSiteFileUpload(req, res, [name]) {
     sendJson(res, 409, { ok: false, message: `站点文件太多啦，上限 ${MAX_FILES_PER_SITE} 个` });
     return;
   }
-  // 单站总容量：把被覆盖文件的旧体积扣掉只算增量，超 512 MB 拒收
+  // 单站总容量：把被覆盖文件的旧体积扣掉只算增量，超上限拒收
   const usedBytes = await totalSiteFileSize(site.id, filePath);
   if (usedBytes + content.length > MAX_SITE_TOTAL_BYTES) {
     sendJson(res, 413, {
@@ -914,12 +963,12 @@ async function handleSiteFileUpload(req, res, [name]) {
 }
 
 /**
- * POST /api/sites/:name/zip：zip 直传整包发布（Netlify Drop 式交互）。
+ * POST /api/sites/:用户名/:站名/zip：zip 直传整包发布（Netlify Drop 式交互）。
  * body 是 zip 字节流（≤ MAX_ZIP_BYTES），服务端零依赖解压后逐个入库：
  * 路径过滤（非法/垃圾/隐藏文件）→ 文件数与总容量校验 → upsert。
- * 跳过的条目在响应里列出前 20 条，方便前端提示"这些没进来"。
+ * 跳过的条目在响应里列出前 20 条，方便前端提示「这些没进来」。
  */
-async function handleSiteZipUpload(req, res, [name]) {
+async function handleSiteZipUpload(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
@@ -932,9 +981,14 @@ async function handleSiteZipUpload(req, res, [name]) {
   const zipBuf = await readFileBody(req, res, MAX_ZIP_BYTES);
   if (!zipBuf) return;
 
-  const site = await findSiteHeaderByName(checked.name);
-  if (site && site.owner_id !== user.id && !user.isAdmin) {
+  const site = await findSiteHeaderByUsername(username, checked.name);
+  if (site && (site.owner_id !== user.id || username !== user.username) && !user.isAdmin) {
     sendJson(res, 403, { ok: false, message: '只能操作自己的站点' });
+    return;
+  }
+  // 建站只能建在自己名下：路径里的用户名必须就是自己
+  if (!site && username !== user.username) {
+    sendJson(res, 403, { ok: false, message: '只能往自己的用户名下建站点' });
     return;
   }
 
@@ -974,8 +1028,9 @@ async function handleSiteZipUpload(req, res, [name]) {
       });
       return;
     }
-    if (err.code === 'FORBIDDEN' || err.code === 'NAME_TAKEN') {
-      sendJson(res, err.code === 'FORBIDDEN' ? 403 : 409, { ok: false, message: err.message });
+    if (err.code === 'FORBIDDEN' || err.code === 'NAME_TAKEN' || err.code === 'QUOTA_EXCEEDED') {
+      const status = err.code === 'FORBIDDEN' ? 403 : (err.code === 'NAME_TAKEN' ? 409 : 429);
+      sendJson(res, status, { ok: false, message: err.message });
       return;
     }
     console.error('[site-zip-upload]', err);
@@ -984,11 +1039,11 @@ async function handleSiteZipUpload(req, res, [name]) {
 }
 
 /** 列出站点里的全部文件（不含内容）。站点的主人或管理员可看。 */
-async function handleSiteFilesList(req, res, [name]) {
+async function handleSiteFilesList(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await findSiteHeaderByName(name);
+  const site = await findSiteHeaderByUsername(username, name);
   if (!site) {
     sendJson(res, 404, { ok: false, message: '没有这个站点' });
     return;
@@ -1008,8 +1063,8 @@ async function handleSiteFilesList(req, res, [name]) {
 // ---------------------------------------------------------------- 站点管理接口（个人中心 / 编辑页用）
 
 /** 取一个站点（含 html），归属或管理员才放行；失败时已回响应并返回 null。 */
-async function ownSiteOrRespond(req, res, user, name) {
-  const site = await findSiteByName(name);
+async function ownSiteOrRespond(req, res, user, username, name) {
+  const site = await findSiteByUsername(username, name);
   if (!site) {
     sendJson(res, 404, { ok: false, message: '没有这个站点' });
     return null;
@@ -1022,11 +1077,11 @@ async function ownSiteOrRespond(req, res, user, name) {
 }
 
 /** 站点详情：单页站带 html，多页站带文件数。 */
-async function handleSiteDetail(req, res, [name]) {
+async function handleSiteDetail(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, username, name);
   if (!site) return;
 
   const fileCount = await countSiteFiles(site.id);
@@ -1035,6 +1090,8 @@ async function handleSiteDetail(req, res, [name]) {
     site: {
       id: site.id,
       name: site.name,
+      url: urlForSite(user.username, site.name),
+      viewUrl: urlForView(user.username, site.name),
       status: site.status,
       kind: fileCount > 0 ? 'multi' : 'single',
       fileCount,
@@ -1052,11 +1109,11 @@ async function handleSiteDetail(req, res, [name]) {
 }
 
 /** 保存站点元信息（标题 / 简介 / 内容标签，编辑页「站点设置」用）。 */
-async function handleSiteSaveMeta(req, res, [name]) {
+async function handleSiteSaveMeta(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, username, name);
   if (!site) return;
 
   const body = await readBody(req, res);
@@ -1084,11 +1141,11 @@ async function handleSiteSaveMeta(req, res, [name]) {
 }
 
 /** 保存单页站的 HTML（编辑页的「保存」按钮）。 */
-async function handleSiteSaveHtml(req, res, [name]) {
+async function handleSiteSaveHtml(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, username, name);
   if (!site) return;
 
   if (await countSiteFiles(site.id) > 0) {
@@ -1117,11 +1174,11 @@ async function handleSiteSaveHtml(req, res, [name]) {
 }
 
 /** 删除整个站点（site_files 由外键级联清掉）。 */
-async function handleSiteDelete(req, res, [name]) {
+async function handleSiteDelete(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, username, name);
   if (!site) return;
 
   await deleteSite(site.id);
@@ -1129,11 +1186,11 @@ async function handleSiteDelete(req, res, [name]) {
 }
 
 /** 取一个站点文件的内容（文本文件才能在编辑页里编辑）。 */
-async function handleSiteFileContent(req, res, [name]) {
+async function handleSiteFileContent(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, username, name);
   if (!site) return;
 
   const filePath = new URL(req.url, 'http://internal').searchParams.get('path');
@@ -1162,11 +1219,11 @@ async function handleSiteFileContent(req, res, [name]) {
 }
 
 /** 删除站点里的一个文件。 */
-async function handleSiteFileDelete(req, res, [name]) {
+async function handleSiteFileDelete(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await ownSiteOrRespond(req, res, user, name);
+  const site = await ownSiteOrRespond(req, res, user, username, name);
   if (!site) return;
 
   const filePath = new URL(req.url, 'http://internal').searchParams.get('path');
@@ -1186,9 +1243,9 @@ async function handleSiteFileDelete(req, res, [name]) {
 
 // ---------------------------------------------------------------- 社区互动接口（阶段 1 数据层）
 
-/** 按名字取站点头部，不存在时已回 404 并返回 null。 */
-async function siteHeaderOrRespond(res, name) {
-  const site = await findSiteHeaderByName(name);
+/** 按「作者用户名 + 站名」取站点头部，不存在时已回 404 并返回 null。 */
+async function siteHeaderOrRespond(res, username, name) {
+  const site = await findSiteHeaderByUsername(username, name);
   if (!site) {
     sendJson(res, 404, { ok: false, message: '没有这个站点' });
     return null;
@@ -1206,8 +1263,8 @@ function activeSiteOrRespond(res, site) {
 }
 
 /** 互动数字汇总。公开接口，登录后附带「我是否赞过 / 藏过」。 */
-async function handleSiteStats(req, res, [name]) {
-  const site = await siteHeaderOrRespond(res, name);
+async function handleSiteStats(req, res, [username, name]) {
+  const site = await siteHeaderOrRespond(res, username, name);
   if (!site) return;
 
   const viewer = await currentUser(req);
@@ -1227,48 +1284,48 @@ async function handleSiteStats(req, res, [name]) {
       author: authorRow
         ? {
             id: authorRow.id,
-            name: authorRow.username || String(authorRow.email).split('@')[0],
-            username: authorRow.username ?? null,
+            name: authorRow.username,
+            username: authorRow.username,
           }
         : null,
     },
   });
 }
 
-async function handleSiteLike(req, res, [name]) {
+async function handleSiteLike(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, username, name);
   if (!site || !activeSiteOrRespond(res, site)) return;
 
   await likeSite(site.id, user.id);
   sendJson(res, 200, { ok: true, liked: true, likes: await countLikes(site.id) });
 }
 
-async function handleSiteUnlike(req, res, [name]) {
+async function handleSiteUnlike(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, username, name);
   if (!site) return;
 
   await unlikeSite(site.id, user.id);
   sendJson(res, 200, { ok: true, liked: false, likes: await countLikes(site.id) });
 }
 
-async function handleSiteCommentsList(req, res, [name]) {
-  const site = await siteHeaderOrRespond(res, name);
+async function handleSiteCommentsList(req, res, [username, name]) {
+  const site = await siteHeaderOrRespond(res, username, name);
   if (!site) return;
 
   sendJson(res, 200, { ok: true, total: await countComments(site.id), comments: await listComments(site.id) });
 }
 
-async function handleSiteCommentAdd(req, res, [name]) {
+async function handleSiteCommentAdd(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, username, name);
   if (!site || !activeSiteOrRespond(res, site)) return;
 
   const body = await readBody(req, res);
@@ -1303,18 +1360,18 @@ async function handleSiteCommentAdd(req, res, [name]) {
       replyTo,
       content,
       createdAt: new Date().toISOString(),
-      author: { id: user.id, name: user.username ?? user.email.split('@')[0], username: user.username ?? null },
+      author: { id: user.id, name: user.username, username: user.username },
     },
     total: await countComments(site.id),
   });
 }
 
 /** 删评论：作者本人或管理员。删掉的评论若有回复，回复一并级联删除。 */
-async function handleSiteCommentDelete(req, res, [name, id]) {
+async function handleSiteCommentDelete(req, res, [username, name, id]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, username, name);
   if (!site) return;
 
   const comment = await getComment(Number(id));
@@ -1331,11 +1388,11 @@ async function handleSiteCommentDelete(req, res, [name, id]) {
   sendJson(res, 200, { ok: true, total: await countComments(site.id) });
 }
 
-async function handleSiteFavorite(req, res, [name]) {
+async function handleSiteFavorite(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, username, name);
   if (!site || !activeSiteOrRespond(res, site)) return;
 
   const body = await readBody(req, res);
@@ -1352,11 +1409,11 @@ async function handleSiteFavorite(req, res, [name]) {
   sendJson(res, 200, { ok: true, favorited: true, favorites: await countFavorites(site.id) });
 }
 
-async function handleSiteUnfavorite(req, res, [name]) {
+async function handleSiteUnfavorite(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await siteHeaderOrRespond(res, name);
+  const site = await siteHeaderOrRespond(res, username, name);
   if (!site) return;
 
   await unfavoriteSite(site.id, user.id);
@@ -1431,8 +1488,7 @@ async function handleFollowList(req, res, [id]) {
 /** tag key -> 中文标签。 */
 const tagLabelOf = (key) => SITE_TAGS.find((t) => t.key === key)?.label ?? '';
 
-/** 社区发现流：公开上线站点 + 互动数字。?q= 模糊搜索，?tag= 标签筛选，?sort= 排序，
- *  ?page= 页码（从 1 起）、?size= 每页条数（默认 10，夹在 1..50）。 */
+/** 社区发现流：公开上线站点 + 互动数字。?q= 模糊搜索，?tag= 标签筛选，?sort= 排序。 */
 async function handleDiscover(req, res) {
   const viewer = await currentUser(req);
   const url = new URL(req.url, 'http://localhost');
@@ -1458,7 +1514,13 @@ async function handleDiscover(req, res) {
 
 // ---------------------------------------------------------------- 创作者主页（阶段 3）
 
-/** /u/:用户名 创作者公开主页。 */
+/**
+ * /qwq/:用户名 创作者公开主页。
+ *
+ * 没有另设 /u/:用户名：用户空间入口就是这一个地址，少一次跳转，
+ * 也让「用户的所有东西都挂在 /qwq/<用户名> 下」这条规则没有例外。
+ * 用户空间下恰好两段时是主页，三段时是站点（见 handleRequest 末尾）。
+ */
 async function handleUserPage(req, res) {
   await sendPage(res, 'user.html');
 }
@@ -1491,10 +1553,6 @@ async function handleViewPage(req, res) {
 
 /** 通知列表页。 */
 async function handleNotificationsPage(req, res) {
-  if (!(await currentUser(req))) {
-    sendRedirect(res, '/login');
-    return;
-  }
   await sendPage(res, 'notifications.html');
 }
 
@@ -1558,7 +1616,7 @@ async function handleHistoryList(req, res) {
   sendJson(res, 200, { ok: true, sites: withTagLabel(await listHistory(user.id)) });
 }
 
-/** 记录浏览历史（观看页打开时调用）。 */
+/** 记录浏览历史（观看页打开时调用）。body: { username, site } */
 async function handleHistoryRecord(req, res) {
   const user = await requireLogin(req, res);
   if (!user) return;
@@ -1566,7 +1624,7 @@ async function handleHistoryRecord(req, res) {
   const body = await readBody(req, res);
   if (!body) return;
 
-  const site = await findSiteHeaderByName(String(body.site ?? ''));
+  const site = await findSiteHeaderByUsername(String(body.username ?? ''), String(body.site ?? ''));
   if (!site) {
     sendJson(res, 404, { ok: false, message: '没有这个站点' });
     return;
@@ -1576,12 +1634,12 @@ async function handleHistoryRecord(req, res) {
   sendJson(res, 200, { ok: true });
 }
 
-/** 删除单条浏览历史。 */
-async function handleHistoryDelete(req, res, [name]) {
+/** 删除单条浏览历史（/api/history/:用户名/:站名）。 */
+async function handleHistoryDelete(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const site = await findSiteHeaderByName(name);
+  const site = await findSiteHeaderByUsername(username, name);
   if (site) await removeHistory(user.id, site.id);
   sendJson(res, 200, { ok: true });
 }
@@ -1600,7 +1658,10 @@ async function handleFavoritesList(req, res) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  sendJson(res, 200, { ok: true, sites: withTagLabel(await withViewerFlags(await listFavorites(user.id), user.id)) });
+  sendJson(res, 200, {
+    ok: true,
+    sites: withTagLabel(await withViewerFlags(await listFavorites(user.id), user.id)),
+  });
 }
 
 /** 用户搜索（搜索下拉的「用户」分区用）。 */
@@ -1640,8 +1701,8 @@ async function handleMessagesWith(req, res, [id]) {
     ok: true,
     user: {
       id: other.id,
-      name: other.username ?? other.email.split('@')[0],
-      username: other.username ?? null,
+      name: other.username,
+      username: other.username,
       bio: other.bio ?? '',
     },
     messages,
@@ -1818,7 +1879,120 @@ async function handleAdminDeleteSite(req, res, [id]) {
   sendJson(res, 200, { ok: true, id: Number(id) });
 }
 
-// ---------------------------------------------------------------- 用户站点
+// ---------------------------------------------------------------- 首页轮播位
+
+/** 首页轮播数据：公开接口，只回启用中且站点在线的。 */
+async function handleBannersPublic(req, res) {
+  sendJson(res, 200, { ok: true, banners: await listPublicBanners() });
+}
+
+/** 后台：全部轮播位（含停用），连同可选的站点清单一起给，方便下拉选。 */
+async function handleAdminBanners(req, res) {
+  if (!(await requireAdmin(req, res))) return;
+
+  sendJson(res, 200, {
+    ok: true,
+    max: MAX_BANNERS,
+    banners: await listAllBanners(),
+    // 可选的站点：只列在线的，按作者名+站名排，下拉里好找
+    sites: (await listAllSites({ limit: 500 }))
+      .filter((s) => s.status === 'active')
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        owner: s.owner_username ?? '',
+        label: `/${s.owner_username ?? '?'}/${s.name}`,
+      })),
+  });
+}
+
+/** 解析一条轮播位的请求体；不合法时已回响应并返回 null。 */
+function parseBannerBody(body) {
+  const siteId = Number(body.siteId);
+  if (!Number.isInteger(siteId) || siteId <= 0) {
+    return { error: '先选一个页面' };
+  }
+
+  const title = String(body.title ?? '').trim();
+  const subtitle = String(body.subtitle ?? '').trim();
+  if (title.length > 120) return { error: '标题最多 120 字' };
+  if (subtitle.length > 200) return { error: '副标题最多 200 字' };
+
+  const sortOrder = Number(body.sortOrder);
+  return {
+    value: {
+      siteId,
+      title,
+      subtitle,
+      sortOrder: Number.isFinite(sortOrder) ? Math.trunc(sortOrder) : 0,
+      enabled: body.enabled === undefined ? true : Boolean(body.enabled),
+    },
+  };
+}
+
+async function handleAdminBannerCreate(req, res) {
+  if (!(await requireAdmin(req, res))) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const parsed = parseBannerBody(body);
+  if (parsed.error) {
+    sendJson(res, 400, { ok: false, message: parsed.error });
+    return;
+  }
+  if (!(await findSiteHeaderById(parsed.value.siteId))) {
+    sendJson(res, 404, { ok: false, message: '没有这个页面' });
+    return;
+  }
+
+  try {
+    const banner = await createBanner(parsed.value);
+    sendJson(res, 201, { ok: true, banner });
+  } catch (err) {
+    if (err.code === 'TOO_MANY_BANNERS') {
+      sendJson(res, 409, { ok: false, message: err.message });
+      return;
+    }
+    throw err;
+  }
+}
+
+async function handleAdminBannerUpdate(req, res, [id]) {
+  if (!(await requireAdmin(req, res))) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const parsed = parseBannerBody(body);
+  if (parsed.error) {
+    sendJson(res, 400, { ok: false, message: parsed.error });
+    return;
+  }
+  if (!(await findSiteHeaderById(parsed.value.siteId))) {
+    sendJson(res, 404, { ok: false, message: '没有这个页面' });
+    return;
+  }
+
+  const changes = await updateBanner(Number(id), parsed.value);
+  if (changes === 0) {
+    sendJson(res, 404, { ok: false, message: '没有这个轮播位' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, banner: await findBannerById(Number(id)) });
+}
+
+async function handleAdminBannerDelete(req, res, [id]) {
+  if (!(await requireAdmin(req, res))) return;
+
+  if (await deleteBanner(Number(id)) === 0) {
+    sendJson(res, 404, { ok: false, message: '没有这个轮播位' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, id: Number(id) });
+}
 
 function serveSiteFile(req, res, filePath, content) {
   const ext = path.extname(filePath).toLowerCase();
@@ -1898,11 +2072,11 @@ async function pickEntryPath(siteId) {
   return best ? best.path : 'index.html';
 }
 
-async function handleSite(req, res, [name, rest = '']) {
-  const site = await findSiteHeaderByName(name);
+async function handleSite(req, res, [username, name, rest = '']) {
+  const site = await findSiteHeaderByUsername(username, name);
 
   if (!site) {
-    sendHtml(res, 404, messagePage('404', `没有找到 "${name}" 这个页面。`));
+    sendHtml(res, 404, messagePage('404', `没有找到 /${username}/${name} 这个页面。`));
     return;
   }
   if (site.status !== 'active') {
@@ -1914,35 +2088,33 @@ async function handleSite(req, res, [name, rest = '']) {
   // 根目录入口需要结尾斜杠；子目录入口直接跳到真实文件路径。
   const url = new URL(req.url, 'http://internal');
   const isRoot = !rest || rest === '/';
-  const filePath = isRoot ? await pickEntryPath(site.id) : rest.slice(1);
+  const entryPath = isRoot ? await pickEntryPath(site.id) : null;
+  const filePath = isRoot ? entryPath : rest.slice(1);
   if (isRoot && (!url.pathname.endsWith('/') || filePath.includes('/'))) {
-    const target = filePath.includes('/') ? `/${name}/${filePath}` : `/${name}/`;
+    const target = filePath.includes('/')
+      ? `/${USER_SPACE_PREFIX}/${username}/${filePath}`
+      : `/${USER_SPACE_PREFIX}/${username}/${name}/`;
     sendRedirect(res, target + url.search);
     return;
   }
 
   // 子目录入口经过重定向后是文件 URL，直接访问或刷新它仍算一次浏览。
-  const isEntryRequest = isRoot || (/\.html?$/i.test(filePath) && filePath === await pickEntryPath(site.id));
-
-  // 广场迷你封面专用（?mpcover=1）：给入口 HTML 注入滚动代理脚本，
-  // 父页面才能 postMessage 驱动内部下翻；/view/站名 等直接访问不带参，不受影响
-  const forCover = isEntryRequest && url.searchParams.get('mpcover') === '1';
+  const isEntryRequest = isRoot || (/\.html?$/i.test(filePath) && filePath === entryPath);
 
   const content = await getSiteFile(site.id, filePath);
   if (content) {
-    // 只有入口页 +1，站内 css / js 等子资源不算
+    // 浏览量简单版：只有入口页 +1，站内 css / js 等子资源不算
     if (isEntryRequest) await incrementViews(site.id);
-    const out = forCover && /\.html?$/i.test(filePath) ? injectPeekProxy(content) : content;
-    serveSiteFile(req, res, filePath, out);
+    serveSiteFile(req, res, filePath, content);
     return;
   }
 
   // 老的「单 HTML 文件」站点：内容存在 sites.html 里，只兜入口页
   if (isRoot) {
-    const legacy = await findSiteByName(name);
+    const legacy = await findSiteByUsername(username, name);
     if (legacy && legacy.html && legacy.html.trim() !== '') {
       await incrementViews(site.id);
-      sendHtml(res, 200, forCover ? injectPeekProxy(legacy.html) : legacy.html, {
+      sendHtml(res, 200, legacy.html, {
         'Content-Security-Policy': SANDBOX_CSP,
         'Cache-Control': 'no-cache',
       });
@@ -1955,11 +2127,13 @@ async function handleSite(req, res, [name, rest = '']) {
 
 // ---------------------------------------------------------------- 路由表
 
+// 用户空间前缀来自配置，路由用字符串拼出来，避免两处各写一遍 qwq
+const P = USER_SPACE_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 const ROUTES = [
   ['GET', /^\/$/, handleRoot],
   ['GET', /^\/upload$/, handleUploadPage],
-  ['GET', /^\/u\/([a-z0-9-]+)\/*$/, handleUserPage],
-  ['GET', /^\/view\/([a-z0-9-]+)\/*$/, handleViewPage],
+  ['GET', new RegExp(`^\\/view\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/?$`), handleViewPage],
   ['GET', /^\/notifications$/, handleNotificationsPage],
   ['GET', /^\/favorites$/, handleFavoritesPage],
   ['GET', /^\/history$/, handleHistoryPage],
@@ -1975,7 +2149,8 @@ const ROUTES = [
 
   ['GET', /^\/api\/me$/, handleMe],
   ['GET', /^\/api\/discover$/, handleDiscover],
-  ['GET', /^\/api\/u\/([a-z0-9-]+)\/profile$/, handleCreatorProfile],
+  ['GET', /^\/api\/banners$/, handleBannersPublic],
+  ['GET', new RegExp(`^\\/api\\/u\\/([a-z0-9-]+)\\/profile$`), handleCreatorProfile],
   ['GET', /^\/api\/notifications$/, handleNotificationsList],
   ['POST', /^\/api\/notifications\/seen$/, handleNotificationsSeen],
   ['POST', /^\/api\/auth\/register$/, handleRegister],
@@ -1989,28 +2164,30 @@ const ROUTES = [
   ['POST', /^\/api\/account\/username$/, handleAccountUsername],
   ['POST', /^\/api\/account\/password$/, handleAccountPassword],
   ['POST', /^\/api\/account\/bio$/, handleAccountBio],
+  ['POST', /^\/api\/account\/delete$/, handleAccountDelete],
 
   ['GET', /^\/api\/sites$/, handleMySites],
   ['POST', /^\/api\/upload$/, handleUpload],
-  ['GET', /^\/api\/sites\/([a-z0-9-]+)$/, handleSiteDetail],
-  ['PUT', /^\/api\/sites\/([a-z0-9-]+)$/, handleSiteSaveHtml],
-  ['PUT', /^\/api\/sites\/([a-z0-9-]+)\/meta$/, handleSiteSaveMeta],
-  ['DELETE', /^\/api\/sites\/([a-z0-9-]+)$/, handleSiteDelete],
-  ['GET', /^\/api\/sites\/([a-z0-9-]+)\/files$/, handleSiteFilesList],
-  ['POST', /^\/api\/sites\/([a-z0-9-]+)\/files$/, handleSiteFileUpload],
-  ['POST', /^\/api\/sites\/([a-z0-9-]+)\/zip$/, handleSiteZipUpload],
-  ['GET', /^\/api\/sites\/([a-z0-9-]+)\/files\/content$/, handleSiteFileContent],
-  ['DELETE', /^\/api\/sites\/([a-z0-9-]+)\/files$/, handleSiteFileDelete],
+  // 管理接口也带用户名：站名只在作者名下唯一，光凭站名定位不了
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)$`), handleSiteDetail],
+  ['PUT', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)$`), handleSiteSaveHtml],
+  ['PUT', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/meta$`), handleSiteSaveMeta],
+  ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)$`), handleSiteDelete],
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files$`), handleSiteFilesList],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files$`), handleSiteFileUpload],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/zip$`), handleSiteZipUpload],
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files\\/content$`), handleSiteFileContent],
+  ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files$`), handleSiteFileDelete],
 
-  // 社区互动（阶段 1 数据层）
-  ['GET', /^\/api\/sites\/([a-z0-9-]+)\/stats$/, handleSiteStats],
-  ['POST', /^\/api\/sites\/([a-z0-9-]+)\/like$/, handleSiteLike],
-  ['DELETE', /^\/api\/sites\/([a-z0-9-]+)\/like$/, handleSiteUnlike],
-  ['GET', /^\/api\/sites\/([a-z0-9-]+)\/comments$/, handleSiteCommentsList],
-  ['POST', /^\/api\/sites\/([a-z0-9-]+)\/comments$/, handleSiteCommentAdd],
-  ['DELETE', /^\/api\/sites\/([a-z0-9-]+)\/comments\/(\d+)$/, handleSiteCommentDelete],
-  ['POST', /^\/api\/sites\/([a-z0-9-]+)\/favorite$/, handleSiteFavorite],
-  ['DELETE', /^\/api\/sites\/([a-z0-9-]+)\/favorite$/, handleSiteUnfavorite],
+  // 社区互动：站名只在作者名下唯一，所以公开接口一律带用户名
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/stats$`), handleSiteStats],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/like$`), handleSiteLike],
+  ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/like$`), handleSiteUnlike],
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/comments$`), handleSiteCommentsList],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/comments$`), handleSiteCommentAdd],
+  ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/comments\\/(\\d+)$`), handleSiteCommentDelete],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/favorite$`), handleSiteFavorite],
+  ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/favorite$`), handleSiteUnfavorite],
   ['POST', /^\/api\/users\/(\d+)\/follow$/, handleUserFollow],
   ['DELETE', /^\/api\/users\/(\d+)\/follow$/, handleUserUnfollow],
   ['GET', /^\/api\/users\/(\d+)\/social$/, handleUserSocial],
@@ -2021,7 +2198,7 @@ const ROUTES = [
   ['GET', /^\/api\/history$/, handleHistoryList],
   ['POST', /^\/api\/history$/, handleHistoryRecord],
   ['DELETE', /^\/api\/history$/, handleHistoryClear],
-  ['DELETE', /^\/api\/history\/([a-z0-9-]+)$/, handleHistoryDelete],
+  ['DELETE', /^\/api\/history\/([a-z0-9-]+)\/([a-z0-9-]+)$/, handleHistoryDelete],
   ['GET', /^\/api\/favorites$/, handleFavoritesList],
   ['GET', /^\/api\/messages$/, handleConversations],
   ['GET', /^\/api\/messages\/(\d+)$/, handleMessagesWith],
@@ -2032,6 +2209,10 @@ const ROUTES = [
   ['GET', /^\/api\/admin\/sites$/, handleAdminSites],
   ['POST', /^\/api\/admin\/sites\/(\d+)\/status$/, handleAdminSiteStatus],
   ['DELETE', /^\/api\/admin\/sites\/(\d+)$/, handleAdminDeleteSite],
+  ['GET', /^\/api\/admin\/banners$/, handleAdminBanners],
+  ['POST', /^\/api\/admin\/banners$/, handleAdminBannerCreate],
+  ['PUT', /^\/api\/admin\/banners\/(\d+)$/, handleAdminBannerUpdate],
+  ['DELETE', /^\/api\/admin\/banners\/(\d+)$/, handleAdminBannerDelete],
 
   // MCP：运行时用密钥，管理用登录态，两条路互不相交
   ['POST', /^\/mcp$/, handleMcpPost],
@@ -2044,7 +2225,7 @@ const ROUTES = [
 async function handleRequest(req, res) {
   const { pathname } = new URL(req.url, 'http://internal');
 
-  if ((req.method === 'GET' || req.method === 'HEAD') && pathname === '/favicon.ico') {
+  if (req.method === 'GET' && pathname === '/favicon.ico') {
     res.writeHead(204);
     res.end();
     return;
@@ -2071,13 +2252,19 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // 平台自己的路由都没命中，最后才考虑用户站点
-  // /站点名 或 /站点名/任意/相对/路径.css
-  // HEAD 也放行：探测站点/资源是否存在时不用拿整包；响应体由 Node 按 HEAD 自动省略
-  if (req.method === 'GET' || req.method === 'HEAD') {
-    const m = pathname.match(/^\/([a-z0-9-]+)(\/.*)?$/);
+  // 平台自己的路由都没命中，最后才考虑用户空间
+  if (req.method === 'GET') {
+    // /<前缀>/<用户名> → 创作者主页（两段即主页，三段起是站点）
+    const userSpace = pathname.match(new RegExp(`^\\/${P}\\/([a-z0-9-]+)\\/?$`));
+    if (userSpace) {
+      await handleUserPage(req, res);
+      return;
+    }
+
+    // /<前缀>/<用户名>/<站名> 或 …/站内/相对/路径.css
+    const m = pathname.match(new RegExp(`^\\/${P}\\/([a-z0-9-]+)\\/([a-z0-9-]+)(\\/.*)?$`));
     if (m) {
-      await handleSite(req, res, [m[1], m[2] ?? '']);
+      await handleSite(req, res, [m[1], m[2], m[3] ?? '']);
       return;
     }
   }

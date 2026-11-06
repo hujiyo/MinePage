@@ -10,199 +10,172 @@
 <main class="page wide">
   <h1>私信</h1>
   <p class="sub">和创作者直接沟通，注意保护个人隐私。</p>
+
   <div class="msgLayout" style="margin-top:16px">
     <div class="msgList" id="convList"></div>
+
     <div class="chatBox">
       <div class="chatHead" id="chatHead"></div>
       <div class="chatBody" id="chatBody"></div>
       <form class="chatFoot" id="chatForm">
-        <input id="chatInput" type="text" maxlength="500" placeholder="输入消息，回车发送…" autocomplete="off" disabled>
-        <button id="sendButton" type="submit" disabled>发送</button>
+        <input id="chatInput" type="text" maxlength="500" placeholder="输入消息，回车发送…" autocomplete="off">
+        <button type="submit">发送</button>
       </form>
     </div>
   </div>
 </main>
+
 <script src="/_assets/app.js"></script>
 <script>
 MP.topbar({ active: 'messages' });
+
+// ?to=<用户 id> 直接从创作者主页 / 观看页的「私信」跳进来
+const TO = Number(new URLSearchParams(location.search).get('to') || 0);
 
 const convBox = document.getElementById('convList');
 const headBox = document.getElementById('chatHead');
 const bodyBox = document.getElementById('chatBody');
 const input = document.getElementById('chatInput');
-const sendButton = document.getElementById('sendButton');
-const target = Number(new URLSearchParams(location.search).get('to'));
-let conversations = [];
-let selectedId = null;
-let thread = null;
-let loadingThread = 0;
-let sending = false;
 
-function formatTime(value) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { dateStyle: 'short', timeStyle: 'short' });
-}
+let me = null;
+let convs = [];      // [{ user, lastMessage, unread }]
+let curId = TO || 0; // 当前会话的对方 id
+let curUser = null;  // 当前会话的对方资料
+let messages = [];   // [{ id, fromMe, content, at }]
 
-async function api(url, options) {
-  const res = await fetch(url, { ...options, headers: { Accept: 'application/json', ...options?.headers } });
-  const data = await res.json().catch(() => null);
-  if (!res.ok || !data?.ok) {
-    if (res.status === 401) {
-      MP.forgetSession();
-      MP.auth.openLogin({});
-    }
-    throw new Error(data?.message || '请求失败，稍后再试');
-  }
-  return data;
-}
+// ---------------------------------------------------------------- 会话列表
 
-function setComposerEnabled(enabled) {
-  input.disabled = !enabled || sending;
-  sendButton.disabled = !enabled || sending;
-}
-
-function showBody(message) {
-  bodyBox.textContent = '';
-  const empty = document.createElement('div');
-  empty.className = 'empty';
-  empty.textContent = message;
-  bodyBox.appendChild(empty);
-}
-
-function renderConversations() {
+function renderConvs() {
   convBox.textContent = '';
-  const items = conversations.slice();
-  if (thread && !items.some((c) => c.user.id === thread.user.id)) {
-    items.unshift({ user: thread.user, lastMessage: null, unread: 0 });
-  }
-  if (!items.length) {
-    convBox.innerHTML = '<div class="empty">暂无会话</div>';
+
+  if (!convs.length) {
+    convBox.innerHTML = '<div class="empty" style="padding:24px 14px">还没有私信。去创作者主页点「私信」开始聊天。</div>';
     return;
   }
-  items.forEach((c) => {
+
+  convs.forEach((c) => {
     const item = document.createElement('div');
-    item.className = 'msgItem' + (c.user.id === selectedId ? ' on' : '');
-    item.tabIndex = 0;
-    item.setAttribute('role', 'button');
-    item.setAttribute('aria-label', '查看与' + c.user.name + '的私信');
-    item.innerHTML = '<span class="avatar sm">' + MP.esc(c.user.name.charAt(0)) + '</span>'
-      + '<div class="mi"><div class="nm"><span>' + MP.esc(c.user.name) + (c.unread ? ' <b>· ' + Number(c.unread) + ' 条未读</b>' : '') + '</span>'
-      + '<time>' + MP.esc(formatTime(c.lastMessage?.at)) + '</time></div>'
-      + '<div class="pv">' + MP.esc(c.lastMessage?.content || '开始新会话') + '</div></div>';
-    item.addEventListener('click', () => selectConversation(c.user.id));
-    item.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        selectConversation(c.user.id);
-      }
-    });
+    item.className = 'msgItem' + (c.user.id === curId ? ' on' : '');
+    item.innerHTML = '<span class="avatar sm">' + MP.esc(String(c.user.name || '?').charAt(0)) + '</span>'
+      + '<div class="mi"><div class="nm"><span>' + MP.esc(c.user.name) + '</span>'
+      + '<time>' + MP.esc(MP.timeAgo(c.lastMessage?.at)) + '</time></div>'
+      + '<div class="pv">' + MP.esc(c.lastMessage?.content || '') + '</div></div>';
+    item.addEventListener('click', () => openConv(c.user.id));
     convBox.appendChild(item);
   });
 }
 
-function renderThread() {
-  if (!thread) return;
-  const user = thread.user;
-  headBox.textContent = user.name;
-  if (user.username) {
-    const small = document.createElement('small');
-    const link = document.createElement('a');
-    link.href = '/u/' + encodeURIComponent(user.username);
-    link.textContent = '查看主页';
-    small.appendChild(link);
-    headBox.appendChild(small);
-  }
-  bodyBox.textContent = '';
-  if (!thread.messages.length) {
-    showBody('还没有消息，发一条开始聊天');
+// ---------------------------------------------------------------- 单个会话
+
+function renderChat() {
+  if (!curUser) {
+    headBox.textContent = '';
+    bodyBox.innerHTML = '<div class="empty">选一个会话开始聊天。</div>';
     return;
   }
-  thread.messages.forEach((message) => {
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble' + (message.fromMe ? ' me' : '');
-    const avatar = document.createElement('span');
-    avatar.className = 'avatar xs';
-    avatar.textContent = message.fromMe ? '我' : user.name.charAt(0);
-    const content = document.createElement('div');
-    content.className = 'btxt';
-    content.textContent = message.content;
-    const time = document.createElement('span');
-    time.className = 'bt';
-    time.textContent = formatTime(message.at);
-    bubble.append(avatar, content, time);
-    bodyBox.appendChild(bubble);
+
+  headBox.innerHTML = MP.esc(curUser.name)
+    + '<small><a href="/qwq/' + encodeURIComponent(curUser.username) + '">查看主页</a></small>';
+
+  bodyBox.textContent = '';
+  if (!messages.length) {
+    bodyBox.innerHTML = '<div class="empty">还没有消息，打个招呼吧。</div>';
+    return;
+  }
+
+  messages.forEach((m) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'bubble' + (m.fromMe ? ' me' : '');
+    const av = document.createElement('span');
+    av.className = 'avatar xs';
+    av.textContent = String(m.fromMe ? me.name : curUser.name).charAt(0);
+    const txt = document.createElement('div');
+    txt.className = 'btxt';
+    txt.textContent = m.content;
+    const t = document.createElement('span');
+    t.className = 'bt';
+    t.textContent = MP.fmtTime(m.at);
+    wrap.appendChild(av);
+    wrap.appendChild(txt);
+    wrap.appendChild(t);
+    bodyBox.appendChild(wrap);
   });
   bodyBox.scrollTop = bodyBox.scrollHeight;
 }
 
-async function loadConversations() {
-  const data = await api('/api/messages');
-  conversations = data.conversations;
-  renderConversations();
-}
+/** 打开与某人的会话：拉历史（服务端顺手把对方发来的标为已读）。 */
+async function openConv(userId) {
+  curId = userId;
+  renderConvs();
 
-async function selectConversation(id) {
-  selectedId = id;
-  thread = null;
-  const request = ++loadingThread;
-  setComposerEnabled(false);
-  headBox.textContent = '';
-  showBody('正在加载消息…');
-  renderConversations();
   try {
-    const data = await api('/api/messages/' + id);
-    if (request !== loadingThread) return;
-    thread = data;
-    renderThread();
-    setComposerEnabled(true);
-    try {
-      await loadConversations();
-    } catch {
-      MP.toast('会话列表刷新失败，稍后再试');
-    }
-  } catch (error) {
-    if (request !== loadingThread) return;
-    showBody(error.message || '消息加载失败，稍后再试');
+    const data = await MP.api('/api/messages/' + userId);
+    curUser = data.user;
+    messages = data.messages;
+    // 拉完顺便更新左侧列表的未读小红点
+    const conv = convs.find((c) => c.user.id === userId);
+    if (conv) conv.unread = 0;
+    renderChat();
+    refreshConvs();
+  } catch (err) {
+    curUser = null;
+    messages = [];
+    headBox.textContent = '';
+    bodyBox.innerHTML = '<div class="empty">' + MP.esc(err.message) + '</div>';
   }
 }
 
-document.getElementById('chatForm').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const content = input.value.trim();
-  if (!content || !thread || sending) return;
-  const id = selectedId;
-  sending = true;
-  setComposerEnabled(true);
+/** 只刷新左栏（不丢当前会话选中态）。 */
+async function refreshConvs() {
   try {
-    await api('/api/messages/' + id, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
-    });
+    const data = await MP.api('/api/messages');
+    convs = data.conversations;
+    renderConvs();
+  } catch { /* 静默：左栏刷新失败不影响正在看的会话 */ }
+}
+
+// ---------------------------------------------------------------- 发送
+
+document.getElementById('chatForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text || !curUser) return;
+
+  input.disabled = true;
+  try {
+    const data = await MP.api('/api/messages/' + curUser.id, { method: 'POST', body: { content: text } });
+    messages.push({ id: data.id, fromMe: true, content: text, at: data.at });
     input.value = '';
-    await selectConversation(id);
-    input.focus();
-  } catch (error) {
-    MP.toast(error.message || '发送失败，稍后再试');
+    renderChat();
+    refreshConvs();
+  } catch (err) {
+    MP.toast(err.message);
   } finally {
-    sending = false;
-    setComposerEnabled(Boolean(thread));
+    input.disabled = false;
+    input.focus();
   }
 });
 
-async function boot() {
-  showBody('正在加载会话…');
-  try {
-    await loadConversations();
-    const first = Number.isSafeInteger(target) && target > 0 ? target : conversations[0]?.user.id;
-    if (first) await selectConversation(first);
-    else showBody('暂无消息，从创作者主页可以发起私信');
-  } catch (error) {
-    showBody(error.message || '会话加载失败，稍后再试');
-  }
-}
+// ---------------------------------------------------------------- 启动
 
-boot();
+(async () => {
+  me = await MP.requireLogin();
+  if (!me) return;
+  if (TO === me.id) {
+    bodyBox.innerHTML = '<div class="empty">不能和自己私信。</div>';
+    return;
+  }
+
+  await refreshConvs();
+
+  if (curId) {
+    await openConv(curId);
+  } else if (convs.length) {
+    await openConv(convs[0].user.id);
+  } else {
+    renderChat();
+  }
+})();
 </script>
 </body>
 </html>

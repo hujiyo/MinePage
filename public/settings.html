@@ -336,15 +336,13 @@ tokenLabel.addEventListener('keydown', (e) => {
 
 (async () => {
   try {
-    const res = await fetch('/api/me');
-    const data = await res.json();
-
-    if (!data.user) {
-      location.href = '/login';
+    const me = await MP.me();
+    if (!me) {
+      location.href = '/login?next=' + encodeURIComponent(location.pathname);
       return;
     }
 
-    who.textContent = '登录账号：' + data.user.email;
+    who.textContent = '登录账号：' + me.email;
     form.hidden = false;
 
     mcpSection.hidden = false;

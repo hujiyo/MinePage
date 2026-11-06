@@ -12,6 +12,34 @@
   <p class="sub" id="summary"></p>
 
   <section class="panel">
+    <h2>首页轮播</h2>
+    <p class="muted" style="font-size:13px;margin:0 0 14px">
+      最多 <b id="bannerMax">10</b> 个位置，按列表顺序自动轮播。标题和副标题留空就跟随站点自己的标题和简介；
+      站点被删除或下线时，这一位自动从首页消失。
+    </p>
+
+    <div id="bannersBox" class="bannerRows"></div>
+
+    <form id="bannerForm" novalidate style="margin-top:14px">
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <label class="field" style="flex:1;min-width:240px;margin:0">
+          <span class="label">页面</span>
+          <select id="bannerSite"></select>
+        </label>
+        <label class="field" style="flex:1;min-width:180px;margin:0">
+          <span class="label">标题（可空）</span>
+          <input id="bannerTitle" type="text" maxlength="120" placeholder="跟随站点标题">
+        </label>
+        <label class="field" style="flex:1;min-width:180px;margin:0">
+          <span class="label">副标题（可空）</span>
+          <input id="bannerSubtitle" type="text" maxlength="200" placeholder="跟随站点简介">
+        </label>
+        <button type="submit" id="bannerAdd">添加轮播位</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
     <h2>用户</h2>
     <table>
       <thead>
@@ -189,10 +217,10 @@ function renderSites(sites) {
 
     const nameCell = document.createElement('td');
     const link = document.createElement('a');
-    link.href = '/' + site.name;
+    link.href = '/qwq/' + encodeURIComponent(site.owner_username) + '/' + encodeURIComponent(site.name);
     link.target = '_blank';
     link.rel = 'noopener';
-    link.textContent = '/' + site.name;
+    link.textContent = '/' + site.owner_username + '/' + site.name;
     nameCell.appendChild(link);
     row.appendChild(nameCell);
 
@@ -265,16 +293,203 @@ async function setSiteStatus(id, status) {
  * 只是前端确认，后端不做二次询问，删掉的页面和文件都找不回来。
  */
 async function removeSite(site) {
-  if (!confirm('确定删除 /' + site.name + ' 吗？删了就找不回来了。')) return;
+  if (!confirm('确定删除 /' + site.owner_username + '/' + site.name + ' 吗？删了就找不回来了。')) return;
 
   try {
     await api('/api/admin/sites/' + site.id, { method: 'DELETE' });
-    showMsg(true, '已删除 /' + site.name);
+    showMsg(true, '已删除 /' + site.owner_username + '/' + site.name);
     await loadAll();
   } catch (err) {
     showMsg(false, err.message);
   }
 }
+
+// ---------------------------------------------------------------- 首页轮播位
+
+const bannersBox = document.getElementById('bannersBox');
+const bannerForm = document.getElementById('bannerForm');
+const bannerSite = document.getElementById('bannerSite');
+const bannerTitle = document.getElementById('bannerTitle');
+const bannerSubtitle = document.getElementById('bannerSubtitle');
+const bannerAdd = document.getElementById('bannerAdd');
+const bannerMax = document.getElementById('bannerMax');
+
+let bannerState = { banners: [], sites: [], max: 10 };
+
+/** 下拉里每个站点一行：/用户名/站名。站点很多时浏览器自带的筛选够用。 */
+function renderBannerSiteOptions(sites) {
+  bannerSite.textContent = '';
+  if (!sites.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '还没有可选的在线页面';
+    bannerSite.appendChild(opt);
+    bannerAdd.disabled = true;
+    return;
+  }
+  bannerAdd.disabled = false;
+  sites.forEach((s) => {
+    const opt = document.createElement('option');
+    opt.value = String(s.id);
+    opt.textContent = s.label + (s.title ? ' · ' + s.title : '');
+    bannerSite.appendChild(opt);
+  });
+}
+
+/** 一行一个轮播位：顺序、指向的页面、标题覆盖、启用开关、上移下移、删除。 */
+function renderBanners() {
+  bannersBox.textContent = '';
+  bannerMax.textContent = bannerState.max;
+
+  if (!bannerState.banners.length) {
+    bannersBox.innerHTML = '<div class="empty" style="padding:16px 0">还没有配置轮播位，首页不会显示轮播。</div>';
+    return;
+  }
+
+  bannerState.banners.forEach((b, i) => {
+    const row = document.createElement('div');
+    row.className = 'bannerRow';
+
+    const order = document.createElement('span');
+    order.className = 'bOrder';
+    order.textContent = String(i + 1);
+    row.appendChild(order);
+
+    const main = document.createElement('div');
+    main.className = 'bMain';
+    const link = document.createElement('a');
+    link.href = b.site.url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = '/' + b.site.owner + '/' + b.site.name;
+    main.appendChild(link);
+
+    const meta = document.createElement('div');
+    meta.className = 'muted';
+    meta.style.fontSize = '12px';
+    meta.textContent = (b.title || b.site.title || b.site.name)
+      + (b.subtitle || b.site.description ? ' · ' + (b.subtitle || b.site.description) : '')
+      + (b.site.status === 'active' ? '' : ' · 站点已下线，首页不显示');
+    main.appendChild(meta);
+    row.appendChild(main);
+
+    const enabledWrap = document.createElement('label');
+    enabledWrap.className = 'bToggle';
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.checked = b.enabled;
+    toggle.addEventListener('change', () => saveBanner(b, { enabled: toggle.checked }));
+    enabledWrap.appendChild(toggle);
+    enabledWrap.appendChild(document.createTextNode(' 启用'));
+    row.appendChild(enabledWrap);
+
+    const actions = document.createElement('div');
+    actions.className = 'row';
+    actions.style.cssText = 'gap:6px;flex:none';
+
+    const up = tinyButton('↑', 'ghost', () => moveBanner(i, -1));
+    up.disabled = i === 0;
+    const down = tinyButton('↓', 'ghost', () => moveBanner(i, 1));
+    down.disabled = i === bannerState.banners.length - 1;
+    actions.appendChild(up);
+    actions.appendChild(down);
+    actions.appendChild(tinyButton('删除', 'danger', () => removeBanner(b)));
+    row.appendChild(actions);
+
+    bannersBox.appendChild(row);
+  });
+}
+
+async function loadBanners() {
+  const data = await api('/api/admin/banners');
+  bannerState = data;
+  renderBannerSiteOptions(data.sites);
+  renderBanners();
+}
+
+/** 改一条：整条 PUT，字段原样回传（服务端只覆盖传了的字段）。 */
+async function saveBanner(banner, patch) {
+  try {
+    await api('/api/admin/banners/' + banner.id, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        siteId: banner.siteId,
+        title: banner.title,
+        subtitle: banner.subtitle,
+        sortOrder: banner.sortOrder,
+        enabled: banner.enabled,
+        ...patch,
+      }),
+    });
+    showMsg(true, '已保存');
+    await loadBanners();
+  } catch (err) {
+    showMsg(false, err.message);
+  }
+}
+
+/** 上移 / 下移：交换 sortOrder 后逐条保存。 */
+async function moveBanner(index, delta) {
+  const target = index + delta;
+  if (target < 0 || target >= bannerState.banners.length) return;
+
+  const list = bannerState.banners.slice();
+  [list[index], list[target]] = [list[target], list[index]];
+
+  try {
+    await Promise.all(list.map((b, i) => api('/api/admin/banners/' + b.id, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        siteId: b.siteId, title: b.title, subtitle: b.subtitle, sortOrder: i, enabled: b.enabled,
+      }),
+    })));
+    await loadBanners();
+  } catch (err) {
+    showMsg(false, err.message);
+  }
+}
+
+async function removeBanner(banner) {
+  if (!confirm('确定删除这一位 /' + banner.site.owner + '/' + banner.site.name + ' 的轮播吗？')) return;
+  try {
+    await api('/api/admin/banners/' + banner.id, { method: 'DELETE' });
+    showMsg(true, '已删除这一位');
+    await loadBanners();
+  } catch (err) {
+    showMsg(false, err.message);
+  }
+}
+
+bannerForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const siteId = Number(bannerSite.value);
+  if (!siteId) { showMsg(false, '先选一个页面'); return; }
+
+  bannerAdd.disabled = true;
+  try {
+    await api('/api/admin/banners', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        siteId,
+        title: bannerTitle.value,
+        subtitle: bannerSubtitle.value,
+        sortOrder: bannerState.banners.length,
+        enabled: true,
+      }),
+    });
+    bannerTitle.value = '';
+    bannerSubtitle.value = '';
+    showMsg(true, '已添加轮播位');
+    await loadBanners();
+  } catch (err) {
+    showMsg(false, err.message);
+  } finally {
+    bannerAdd.disabled = false;
+  }
+});
 
 /**
  * 拉取后台概览并整体刷新：GET /api/me、/api/admin/users、/api/admin/sites 三个并发，
@@ -298,6 +513,7 @@ async function loadAll() {
 
     renderUsers(users.users);
     renderSites(sites.sites);
+    await loadBanners();
   } catch (err) {
     showMsg(false, err.message);
   }

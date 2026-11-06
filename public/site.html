@@ -105,9 +105,11 @@
 <script>
 MP.topbar({ active: 'create' });
 
-// /edit/:name
+// /edit/:name  ——  站名只在作者名下唯一，作者就是当前登录账号
 const siteName = decodeURIComponent(location.pathname.split('/')[2] || '');
-document.getElementById('siteName').textContent = siteName ? '/' + siteName : '';
+document.getElementById('siteName').textContent = siteName ? siteName : '';
+
+let API_BASE = '';   // /api/sites/<用户名>/<站名>，拿到登录态后填
 
 let site = null;        // 站点详情
 let editingPath = null; // 多页站里正在编辑的文件路径
@@ -160,7 +162,16 @@ async function loadSite() {
     return;
   }
 
-  const res = await fetch('/api/sites/' + encodeURIComponent(siteName));
+  // 先拿到自己的用户名，拼出 /api/sites/<用户名>/<站名>
+  const me = await (await fetch('/api/me')).json();
+  const username = me?.user?.username;
+  if (!username) {
+    showMsg(false, '先登录再来编辑。');
+    return;
+  }
+  API_BASE = '/api/sites/' + encodeURIComponent(username) + '/' + encodeURIComponent(siteName);
+
+  const res = await fetch(API_BASE);
   const data = await res.json();
 
   if (!data.ok) {
@@ -177,7 +188,7 @@ async function loadSite() {
   const tagText = site.tagLabel ? ' · ' + escapeHtml(site.tagLabel) : '';
   document.getElementById('siteMeta').innerHTML =
     kind + tagText + ' · ' + status + ' · ' + fmtSize(site.size)
-    + ' · <a href="/' + encodeURIComponent(site.name) + '/" target="_blank" rel="noopener">访问站点</a>';
+    + ' · <a href="' + site.url + '/" target="_blank" rel="noopener">访问站点</a>';
 
   document.getElementById('singleSection').hidden = site.kind !== 'single';
   document.getElementById('multiSection').hidden = site.kind !== 'multi';
@@ -233,7 +244,7 @@ document.getElementById('metaSave').addEventListener('click', async (e) => {
   button.disabled = true;
 
   try {
-    const res = await fetch('/api/sites/' + encodeURIComponent(siteName) + '/meta', {
+    const res = await fetch(API_BASE + '/meta', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -358,15 +369,15 @@ document.getElementById('htmlSave').addEventListener('click', async (e) => {
   button.disabled = true;
 
   try {
-    const res = await fetch('/api/sites/' + encodeURIComponent(siteName), {
+    const res = await fetch(API_BASE, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ html: document.getElementById('htmlEditor').value }),
     });
     const data = await res.json();
     if (data.ok) {
-      showMsg(true, '已保存（' + fmtSize(data.size) + '）。<a href="/'
-        + encodeURIComponent(siteName) + '/" target="_blank" rel="noopener">查看效果</a>');
+      showMsg(true, '已保存（' + fmtSize(data.size) + '）。<a href="' + site.url
+        + '/" target="_blank" rel="noopener">查看效果</a>');
     } else {
       showMsg(false, escapeHtml(data.message || '保存失败'));
     }
@@ -386,7 +397,7 @@ document.getElementById('htmlSave').addEventListener('click', async (e) => {
  * 没有 try/catch，网络异常会变成未处理的 rejection。
  */
 async function loadFiles() {
-  const res = await fetch('/api/sites/' + encodeURIComponent(siteName) + '/files');
+  const res = await fetch(API_BASE + '/files');
   const data = await res.json();
   if (!data.ok) {
     showMsg(false, escapeHtml(data.message || '文件列表加载失败'));
@@ -440,7 +451,7 @@ async function loadFiles() {
     delBtn.addEventListener('click', async () => {
       if (!confirm('确定删除 ' + file.path + ' ？')) return;
       const res2 = await fetch(
-        '/api/sites/' + encodeURIComponent(siteName) + '/files?path='
+        API_BASE + '/files?path='
         + encodeURIComponent(file.path),
         { method: 'DELETE' },
       );
@@ -478,7 +489,7 @@ function closeFileEditor() {
  */
 async function openFileEditor(filePath) {
   const res = await fetch(
-    '/api/sites/' + encodeURIComponent(siteName) + '/files/content?path='
+    API_BASE + '/files/content?path='
     + encodeURIComponent(filePath),
   );
   const data = await res.json();
@@ -506,7 +517,7 @@ document.getElementById('fileSave').addEventListener('click', async (e) => {
 
   try {
     const res = await fetch(
-      '/api/sites/' + encodeURIComponent(siteName) + '/files?path='
+      API_BASE + '/files?path='
       + encodeURIComponent(editingPath),
       {
         method: 'POST',
@@ -557,7 +568,7 @@ addSubmit.addEventListener('click', async () => {
 
   try {
     const res = await fetch(
-      '/api/sites/' + encodeURIComponent(siteName) + '/files?path='
+      API_BASE + '/files?path='
       + encodeURIComponent(file.name),
       {
         method: 'POST',

@@ -8,6 +8,8 @@
 </head>
 <body>
 <main class="page wide">
+  <div id="bannerArea"></div>
+
   <div class="homeGrid">
     <div>
       <div class="secHead">
@@ -16,7 +18,7 @@
       </div>
       <div class="chips" id="chips" style="margin-bottom:14px"></div>
       <div class="cards" id="cards"></div>
-      <div class="pager" id="pager"></div>
+      <div class="pager" id="pager" hidden></div>
     </div>
 
     <aside class="homeSide">
@@ -47,22 +49,80 @@ const params = new URLSearchParams(location.search);
 const q = (params.get('q') || '').trim();
 const sortRank = params.get('sort') === 'rank';
 let tag = '';
-let page = 1;
-const SITE_PAGE_SIZE = 10; // 发现流每页卡片数（封面是整站 iframe，页大了首屏会很慢）
+let page = Math.max(1, Number(params.get('page')) || 1);
 
+const bannerArea = document.getElementById('bannerArea');
 const chipsBox = document.getElementById('chips');
 const cardsBox = document.getElementById('cards');
 const pagerBox = document.getElementById('pager');
 const feedTitle = document.getElementById('feedTitle');
 const rankBox = document.getElementById('rank');
 
+// ---------------------------------------------------------------- 轮播位
+// 内容全部来自管理后台配置（/api/banners）：只返回启用中、且站点仍在线的。
+// 只有一条时不自动轮播，也不显示圆点。
+
+async function mountBanner() {
+  if (q) return;   // 搜索结果页不显示轮播，把版面让给结果
+
+  let list = [];
+  try {
+    list = (await MP.api('/api/banners')).banners;
+  } catch { return; }
+  if (!list.length) return;
+
+  const el = document.createElement('div');
+  el.className = 'banner';
+  let idx = 0;
+  let timer = null;
+
+  function paint() {
+    const b = list[idx];
+    const title = b.title || b.site.title || b.site.name;
+    const sub = b.subtitle || b.site.description || '';
+    el.style.background = MP.grad(b.site);
+    el.innerHTML =
+      '<div class="bcover"><span class="bchar">' + MP.esc(MP.initial(b.site)) + '</span></div>'
+      + '<div class="binfo"><b>' + MP.esc(title) + '</b><span>' + MP.esc(sub) + '</span></div>'
+      + (list.length > 1
+        ? '<button type="button" class="bnav prev" title="上一张">' + MP.icon('left') + '</button>'
+          + '<button type="button" class="bnav next" title="下一张">' + MP.icon('right') + '</button>'
+          + '<div class="bdots">' + list.map((_, i) =>
+            '<i class="' + (i === idx ? 'on' : '') + '" data-i="' + i + '"></i>').join('') + '</div>'
+        : '');
+
+    el.querySelector('.prev')?.addEventListener('click', (e) => { e.stopPropagation(); go(idx - 1); });
+    el.querySelector('.next')?.addEventListener('click', (e) => { e.stopPropagation(); go(idx + 1); });
+    el.querySelectorAll('.bdots i').forEach((d) => {
+      d.addEventListener('click', (e) => { e.stopPropagation(); go(Number(d.dataset.i)); });
+    });
+  }
+
+  function go(i) {
+    idx = (i + list.length) % list.length;
+    paint();
+    restart();
+  }
+  function restart() {
+    if (timer) clearInterval(timer);
+    if (list.length < 2) return;
+    timer = setInterval(() => { idx = (idx + 1) % list.length; paint(); }, 4500);
+  }
+
+  el.addEventListener('mouseenter', () => { if (timer) clearInterval(timer); timer = null; });
+  el.addEventListener('mouseleave', restart);
+  el.addEventListener('click', () => {
+    location.href = '/view/' + encodeURIComponent(list[idx].site.owner)
+      + '/' + encodeURIComponent(list[idx].site.name);
+  });
+
+  paint();
+  restart();
+  bannerArea.appendChild(el);
+}
+
 // ---------------------------------------------------------------- 分类 chips
 
-/**
- * 渲染分类 chips（词表来自 MP.TAGS，其中 '' 是「全部」、'hot' 是伪标签）。
- * 点击会改全局 tag、重绘自身并调用 reload() 重新拉列表——本函数只管视图，
- * 真正带参数的请求在 reload() 里，伪标签 hot 在那里被映射成 sort=views。
- */
 function renderChips() {
   chipsBox.textContent = '';
   MP.TAGS.forEach((t) => {
@@ -74,137 +134,88 @@ function renderChips() {
   });
 }
 
-// ---------------------------------------------------------------- 侧栏
+// ---------------------------------------------------------------- 侧栏热门榜单
 
-/**
- * 用现有发现接口查询按浏览量排序的前十个公开站点。
- */
-async function renderSide() {
-  rankBox.innerHTML = '<div class="empty">榜单加载中…</div>';
+async function renderRank() {
+  rankBox.textContent = '';
   try {
-    const res = await fetch('/api/discover?sort=views&page=1&size=10', { headers: { Accept: 'application/json' } });
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data?.ok || !Array.isArray(data.sites)) throw new Error(data?.message || '榜单加载失败');
-    rankBox.textContent = '';
-    if (!data.sites.length) {
-      rankBox.innerHTML = '<div class="empty">暂无公开作品</div>';
-      return;
-    }
-    data.sites.forEach((site, index) => {
-      const item = document.createElement('a');
-      item.className = 'rankItem';
-      item.href = '/view/' + encodeURIComponent(site.name);
-      const number = document.createElement('span');
-      number.className = 'no';
-      number.textContent = String(index + 1);
-      const name = document.createElement('span');
-      name.className = 'rw';
-      name.textContent = site.title || site.name;
-      const views = document.createElement('span');
-      views.className = 'rv';
-      views.textContent = MP.fmtNum(site.views) + ' 浏览';
-      item.append(number, name, views);
-      rankBox.appendChild(item);
+    const data = await MP.api('/api/discover?sort=views&size=10');
+    data.sites.forEach((s, i) => {
+      const row = document.createElement('div');
+      row.className = 'rankItem';
+      row.innerHTML = '<span class="no">' + (i + 1) + '</span>'
+        + '<span class="rw">' + MP.esc(s.title || s.name) + '</span>'
+        + '<span class="rv">' + MP.fmtNum(s.views) + '</span>';
+      row.addEventListener('click', () => { location.href = MP.viewUrl(s); });
+      rankBox.appendChild(row);
     });
-  } catch (error) {
-    rankBox.textContent = '';
-    const empty = document.createElement('div');
-    empty.className = 'empty';
-    empty.textContent = error.message || '榜单加载失败';
-    rankBox.appendChild(empty);
+    if (!data.sites.length) {
+      rankBox.innerHTML = '<div class="empty">还没有上榜的页面。</div>';
+    }
+  } catch (err) {
+    rankBox.innerHTML = '<div class="empty">' + MP.esc(err.message) + '</div>';
   }
+}
+
+// ---------------------------------------------------------------- 翻页
+
+function renderPager(total, pages) {
+  pagerBox.textContent = '';
+  if (pages <= 1) { pagerBox.hidden = true; return; }
+  pagerBox.hidden = false;
+
+  const makeBtn = (label, target, disabled) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.disabled = disabled;
+    b.addEventListener('click', () => { page = target; reload(); });
+    return b;
+  };
+
+  pagerBox.appendChild(makeBtn('上一页', page - 1, page <= 1));
+
+  const info = document.createElement('span');
+  info.className = 'muted';
+  info.textContent = page + ' / ' + pages + '（共 ' + total + ' 个）';
+  pagerBox.appendChild(info);
+
+  pagerBox.appendChild(makeBtn('下一页', page + 1, page >= pages));
 }
 
 // ---------------------------------------------------------------- 列表
 
-/**
- * 数据源：GET /api/discover（真实接口）
- *
- * 参数映射说明 —— 服务端对非法参数**不报错，只静默退化**，
- * 所以这里必须显式映射，不能直接透传：
- *
- *   q                直传
- *   tag=真实标签      直传（服务端白名单校验）
- *   tag='hot'        前端伪标签，服务端 SITE_TAGS 里没有 hot。
- *                    直接透传会被当成"不筛选"而返回全部（看着像成功），
- *                    所以换成 sort=views。「热门」的真正语义待定。
- *   ?sort=rank       服务端排序白名单是 views/likes/favorites/comments/newest，
- *                    **没有 rank**。同样会静默退化为默认排序，所以也映射到 views，
- *                    以保持「排行榜」这个入口原本的可见行为。
- */
 async function reload() {
-  const sort = (tag === 'hot' || sortRank) ? 'views' : '';
-  const query = new URLSearchParams();
-  if (q) query.set('q', q);
-  if (tag && tag !== 'hot') query.set('tag', tag);
-  if (sort) query.set('sort', sort);
-  query.set('page', String(page));
-  query.set('size', SITE_PAGE_SIZE);
-
-  feedTitle.textContent = q ? '搜索：' + q : (tag === 'hot' ? '热门' : '推荐');
+  feedTitle.textContent = q ? '搜索：' + q : (sortRank ? '按浏览量' : '推荐');
   cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">加载中…</div>';
-  pagerBox.textContent = '';
+
+  const search = new URLSearchParams();
+  if (q) search.set('q', q);
+  if (tag) search.set('tag', tag);
+  if (sortRank) search.set('sort', 'views');
+  search.set('page', String(page));
+  search.set('size', '12');
 
   try {
-    const res = await fetch('/api/discover?' + query.toString(), { headers: { Accept: 'application/json' } });
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.message || '加载失败');
-    MP.renderCards(cardsBox, data.sites || []);
-    renderPager(data);
-  } catch (err) {
-    cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">'
-      + '加载失败：' + MP.esc(err.message) + '，刷新试试。</div>';
-  }
-}
-
-/**
- * 渲染底部翻页器。数据来自接口的 total / page / pages 字段。
- * 只有一页时不渲染任何东西。页码窗口最多 7 个，超出用省略号——
- * 467 个站按 10 条一页有 47 页，直接把页码铺出来会把页面撑爆。
- */
-function renderPager(data) {
-  pagerBox.textContent = '';
-  const pages = data.pages || 1;
-  const cur = data.page || 1;
-  if (pages <= 1) return;
-
-  const slot = (label, to, opt) => {
-    const o = opt || {};
-    const el = document.createElement(o.disabled || o.active ? 'span' : 'button');
-    if (el.tagName === 'BUTTON') el.type = 'button';
-    el.className = 'pg' + (o.active ? ' active' : '') + (o.disabled ? ' disabled' : '');
-    el.textContent = label;
-    if (!o.disabled && !o.active && to != null) {
-      el.addEventListener('click', () => { page = to; reload(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+    const data = await MP.api('/api/discover?' + search.toString());
+    // 页码越界（比如从第 5 页切到只有 2 页的标签）时退回第一页
+    if (!data.sites.length && page > 1) { page = 1; await reload(); return; }
+    if (!data.sites.length) {
+      cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">没有找到相关页面，换个关键词试试。</div>';
+      pagerBox.hidden = true;
+      return;
     }
-    pagerBox.appendChild(el);
-  };
-  const dots = () => {
-    const s = document.createElement('span');
-    s.className = 'pg dots';
-    s.textContent = '…';
-    pagerBox.appendChild(s);
-  };
-
-  slot('上一页', cur - 1, { disabled: cur <= 1 });
-
-  if (pages <= 7) {
-    for (let i = 1; i <= pages; i += 1) slot(String(i), i, { active: i === cur });
-  } else {
-    const start = Math.max(2, cur - 2);
-    const end = Math.min(pages - 1, cur + 2);
-    slot('1', 1, { active: cur === 1 });
-    if (start > 2) dots();
-    for (let i = start; i <= end; i += 1) slot(String(i), i, { active: i === cur });
-    if (end < pages - 1) dots();
-    slot(String(pages), pages, { active: cur === pages });
+    MP.renderCards(cardsBox, data.sites);
+    renderPager(data.total, data.pages);
+  } catch (err) {
+    cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">' + MP.esc(err.message) + '</div>';
+    pagerBox.hidden = true;
   }
-
-  slot('下一页', cur + 1, { disabled: cur >= pages });
 }
 
+mountBanner();
 renderChips();
-renderSide();
+renderRank();
 reload();
 </script>
 </body>
