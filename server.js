@@ -62,6 +62,7 @@ import {
   createSite,
   deleteSite,
   findSiteByUsername,
+  findSiteHeaderById,
   findSiteHeaderByUsername,
   getSiteFile,
   isValidSitePath,
@@ -80,6 +81,15 @@ import {
   SITE_TAGS,
 } from './lib/sites.js';
 import { parseZip } from './lib/zip.js';
+import {
+  createBanner,
+  deleteBanner,
+  findBannerById,
+  listAllBanners,
+  listPublicBanners,
+  MAX_BANNERS,
+  updateBanner,
+} from './lib/banners.js';
 import {
   addComment,
   countComments,
@@ -1869,7 +1879,120 @@ async function handleAdminDeleteSite(req, res, [id]) {
   sendJson(res, 200, { ok: true, id: Number(id) });
 }
 
-// ---------------------------------------------------------------- 用户站点
+// ---------------------------------------------------------------- 首页轮播位
+
+/** 首页轮播数据：公开接口，只回启用中且站点在线的。 */
+async function handleBannersPublic(req, res) {
+  sendJson(res, 200, { ok: true, banners: await listPublicBanners() });
+}
+
+/** 后台：全部轮播位（含停用），连同可选的站点清单一起给，方便下拉选。 */
+async function handleAdminBanners(req, res) {
+  if (!(await requireAdmin(req, res))) return;
+
+  sendJson(res, 200, {
+    ok: true,
+    max: MAX_BANNERS,
+    banners: await listAllBanners(),
+    // 可选的站点：只列在线的，按作者名+站名排，下拉里好找
+    sites: (await listAllSites({ limit: 500 }))
+      .filter((s) => s.status === 'active')
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        owner: s.owner_username ?? '',
+        label: `/${s.owner_username ?? '?'}/${s.name}`,
+      })),
+  });
+}
+
+/** 解析一条轮播位的请求体；不合法时已回响应并返回 null。 */
+function parseBannerBody(body) {
+  const siteId = Number(body.siteId);
+  if (!Number.isInteger(siteId) || siteId <= 0) {
+    return { error: '先选一个页面' };
+  }
+
+  const title = String(body.title ?? '').trim();
+  const subtitle = String(body.subtitle ?? '').trim();
+  if (title.length > 120) return { error: '标题最多 120 字' };
+  if (subtitle.length > 200) return { error: '副标题最多 200 字' };
+
+  const sortOrder = Number(body.sortOrder);
+  return {
+    value: {
+      siteId,
+      title,
+      subtitle,
+      sortOrder: Number.isFinite(sortOrder) ? Math.trunc(sortOrder) : 0,
+      enabled: body.enabled === undefined ? true : Boolean(body.enabled),
+    },
+  };
+}
+
+async function handleAdminBannerCreate(req, res) {
+  if (!(await requireAdmin(req, res))) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const parsed = parseBannerBody(body);
+  if (parsed.error) {
+    sendJson(res, 400, { ok: false, message: parsed.error });
+    return;
+  }
+  if (!(await findSiteHeaderById(parsed.value.siteId))) {
+    sendJson(res, 404, { ok: false, message: '没有这个页面' });
+    return;
+  }
+
+  try {
+    const banner = await createBanner(parsed.value);
+    sendJson(res, 201, { ok: true, banner });
+  } catch (err) {
+    if (err.code === 'TOO_MANY_BANNERS') {
+      sendJson(res, 409, { ok: false, message: err.message });
+      return;
+    }
+    throw err;
+  }
+}
+
+async function handleAdminBannerUpdate(req, res, [id]) {
+  if (!(await requireAdmin(req, res))) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const parsed = parseBannerBody(body);
+  if (parsed.error) {
+    sendJson(res, 400, { ok: false, message: parsed.error });
+    return;
+  }
+  if (!(await findSiteHeaderById(parsed.value.siteId))) {
+    sendJson(res, 404, { ok: false, message: '没有这个页面' });
+    return;
+  }
+
+  const changes = await updateBanner(Number(id), parsed.value);
+  if (changes === 0) {
+    sendJson(res, 404, { ok: false, message: '没有这个轮播位' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, banner: await findBannerById(Number(id)) });
+}
+
+async function handleAdminBannerDelete(req, res, [id]) {
+  if (!(await requireAdmin(req, res))) return;
+
+  if (await deleteBanner(Number(id)) === 0) {
+    sendJson(res, 404, { ok: false, message: '没有这个轮播位' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, id: Number(id) });
+}
 
 function serveSiteFile(req, res, filePath, content) {
   const ext = path.extname(filePath).toLowerCase();
@@ -2026,6 +2149,7 @@ const ROUTES = [
 
   ['GET', /^\/api\/me$/, handleMe],
   ['GET', /^\/api\/discover$/, handleDiscover],
+  ['GET', /^\/api\/banners$/, handleBannersPublic],
   ['GET', new RegExp(`^\\/api\\/u\\/([a-z0-9-]+)\\/profile$`), handleCreatorProfile],
   ['GET', /^\/api\/notifications$/, handleNotificationsList],
   ['POST', /^\/api\/notifications\/seen$/, handleNotificationsSeen],
@@ -2085,6 +2209,10 @@ const ROUTES = [
   ['GET', /^\/api\/admin\/sites$/, handleAdminSites],
   ['POST', /^\/api\/admin\/sites\/(\d+)\/status$/, handleAdminSiteStatus],
   ['DELETE', /^\/api\/admin\/sites\/(\d+)$/, handleAdminDeleteSite],
+  ['GET', /^\/api\/admin\/banners$/, handleAdminBanners],
+  ['POST', /^\/api\/admin\/banners$/, handleAdminBannerCreate],
+  ['PUT', /^\/api\/admin\/banners\/(\d+)$/, handleAdminBannerUpdate],
+  ['DELETE', /^\/api\/admin\/banners\/(\d+)$/, handleAdminBannerDelete],
 
   // MCP：运行时用密钥，管理用登录态，两条路互不相交
   ['POST', /^\/mcp$/, handleMcpPost],
