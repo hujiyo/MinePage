@@ -11,7 +11,6 @@
   <div id="notFound" class="empty" hidden>
     没有这个创作者。TA 可能还没设置用户名，或者账号已注销。<br><br><a href="/">回社区逛逛</a>
   </div>
-  <div id="loadError" class="empty" hidden></div>
 
   <div id="page" hidden>
     <section class="uspace">
@@ -26,6 +25,7 @@
       </div>
       <div class="utabs" id="utabs">
         <a data-tab="works" class="on">作品</a>
+        <a data-tab="favs">收藏</a>
         <a data-tab="about">关于</a>
       </div>
     </section>
@@ -33,6 +33,11 @@
     <section id="tabWorks">
       <div class="chips" id="chips" style="margin:16px 0 4px"></div>
       <div class="cards" id="cards"></div>
+    </section>
+
+    <section id="tabFavs" hidden>
+      <div class="chips" id="favChips" style="margin:16px 0 4px"></div>
+      <div class="cards" id="favCards"></div>
     </section>
 
     <section id="tabAbout" hidden>
@@ -49,11 +54,10 @@
 <script>
 MP.topbar();
 
-// URL 里的用户名：/u/:用户名
-const USERNAME = decodeURIComponent(location.pathname.replace(/^\/u\//, '').replace(/\/+$/, ''));
+// URL 里的用户名：/qwq/:用户名（用户空间入口就是主页，没有 /u/ 这层）
+const USERNAME = decodeURIComponent(location.pathname.split('/').filter(Boolean)[1] || '');
 
 const notFoundBox = document.getElementById('notFound');
-const loadErrorBox = document.getElementById('loadError');
 const pageBox = document.getElementById('page');
 const avatarBox = document.getElementById('avatar');
 const nameBox = document.getElementById('pName');
@@ -61,65 +65,51 @@ const statsBox = document.getElementById('pStats');
 const actionsBox = document.getElementById('actions');
 const chipsBox = document.getElementById('chips');
 const cardsBox = document.getElementById('cards');
-const aboutBio = document.getElementById('aboutBio');
+const favTab = document.querySelector('#utabs a[data-tab="favs"]');
+const favChipsBox = document.getElementById('favChips');
+const favCardsBox = document.getElementById('favCards');
 const aboutStats = document.getElementById('aboutStats');
 
-let profile = null;   // 当前创作者
+let profile = null;   // 当前创作者（服务端返回的资料 + 站点）
+let me = null;        // 当前登录用户（可能为 null）
 let tag = '';         // 作品标签筛选
-let following = false;
-let isOwn = false;
-let followPending = false;
+let favFolders = [];  // 自己的收藏夹（按后端 folder 分组）
+let favFolder = 0;
 
-/**
- * 拉取真实创作者资料；404 表示用户不存在，其他错误交给启动流程显示。
- */
-async function loadProfile() {
-  const res = await fetch('/api/u/' + encodeURIComponent(USERNAME) + '/profile', {
-    headers: { Accept: 'application/json' },
-  });
-  const data = await res.json().catch(() => null);
-  if (res.status === 404) return null;
-  if (!res.ok || !data?.ok || !data.user || !Array.isArray(data.sites)) {
-    throw new Error(data?.message || '创作者资料加载失败，稍后再试。');
-  }
-  return data;
-}
+const sum = (list, key) => list.reduce((n, s) => n + (s[key] || 0), 0);
 
 // ---------------------------------------------------------------- 头部
 
-/**
- * 渲染创作者主页的头部与「关于」页：页面标题、头像首字、展示名、简介、统计条和关于页的数字。
- * 只处理头部与关于页；作品由 renderWorks 渲染。
- */
 function renderProfile() {
-  const { user, stats } = profile;
-  const name = user.username;
+  const { user, stats, sites } = profile;
+  const isOwn = Boolean(me && me.id === user.id);
 
-  document.title = name + ' · MinePage';
-  avatarBox.textContent = name.charAt(0).toUpperCase();
-  nameBox.textContent = name;
+  document.title = user.username + ' · MinePage';
+  avatarBox.textContent = String(user.username || '?').charAt(0).toUpperCase();
+  nameBox.textContent = user.username;
   document.getElementById('aboutBio').textContent = user.bio || '这个人很懒，什么都没写。';
 
   statsBox.innerHTML = [
     ['粉丝', MP.fmtNum(stats.followers)],
-    ['关注', stats.following],
+    ['关注', MP.fmtNum(stats.following)],
     ['作品', stats.sites],
     ['总浏览', MP.fmtNum(stats.views)],
   ].map(([label, val]) => '<span><b>' + val + '</b> ' + label + '</span>').join('');
 
-  renderActions();
+  renderActions(isOwn);
 
+  // 点赞 / 被收藏没有聚合接口，按 TA 的公开站点求和（同一份数据，不额外请求）
   aboutStats.innerHTML = [
-    ['粉丝', MP.fmtNum(stats.followers)],
-    ['总浏览', MP.fmtNum(stats.views)],
+    ['获得点赞', MP.fmtNum(sum(sites, 'likes'))],
+    ['被收藏', MP.fmtNum(sum(sites, 'favorites'))],
     ['作品数', stats.sites],
   ].map(([label, val]) => '<div class="stat"><b>' + val + '</b><span>' + label + '</span></div>').join('');
+
+  // 收藏夹是私密的，只有本人能看；别人的主页不显示这个标签
+  favTab.hidden = !isOwn;
 }
 
-/**
- * 重建头部操作区：自己的主页显示编辑资料，别人的主页显示真实关注状态。
- */
-function renderActions() {
+function renderActions(isOwn) {
   actionsBox.textContent = '';
 
   if (isOwn) {
@@ -134,77 +124,38 @@ function renderActions() {
 
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.className = following ? 'ghost' : '';
-  btn.textContent = following ? '已关注' : '+ 关注';
-  btn.disabled = followPending;
+  btn.className = profile.isFollowing ? 'ghost' : '';
+  btn.textContent = profile.isFollowing ? '已关注' : '+ 关注';
   btn.addEventListener('click', async () => {
-    if (followPending) return;
-    followPending = true;
+    if (!(await MP.me())) {
+      location.href = '/login?next=' + encodeURIComponent(location.pathname);
+      return;
+    }
     btn.disabled = true;
     try {
-      if (!(await MP.me())) {
-        MP.auth.openLogin({});
-        return;
-      }
-      const res = await fetch('/api/users/' + profile.user.id + '/follow', {
-        method: following ? 'DELETE' : 'POST',
+      const { following, followers } = await MP.api('/api/users/' + profile.user.id + '/follow', {
+        method: profile.isFollowing ? 'DELETE' : 'POST',
       });
-      const data = await res.json().catch(() => null);
-      if (!res.ok || !data?.ok) {
-        if (res.status === 401) {
-          MP.forgetSession();
-          MP.auth.openLogin({});
-        } else {
-          MP.toast(data?.message || '操作失败，稍后再试');
-        }
-        return;
-      }
-      following = data.following === true;
-      profile.stats.followers = data.followers;
-      followPending = false;
+      profile.isFollowing = following;
+      profile.stats.followers = followers;
       renderProfile();
       MP.toast(following ? '已关注' : '已取消关注');
-    } catch {
-      MP.toast('连不上服务器，稍后再试');
+    } catch (err) {
+      MP.toast(err.message);
     } finally {
-      followPending = false;
       btn.disabled = false;
     }
   });
   actionsBox.appendChild(btn);
 
-  const message = document.createElement('a');
-  message.href = '/messages?to=' + profile.user.id;
-  message.className = 'badge';
-  message.style.padding = '6px 14px';
-  message.textContent = '私信';
-  actionsBox.appendChild(message);
+  const msg = document.createElement('a');
+  msg.href = '/messages?to=' + profile.user.id;
+  msg.innerHTML = '<button type="button" class="ghost">' + MP.icon('message') + ' 私信</button>';
+  actionsBox.appendChild(msg);
 }
 
 // ---------------------------------------------------------------- 作品
 
-/**
- * 重建作品标签筛选条：只列出这个创作者真的有作品的标签（带条数），并高亮当前选中的 tag。
- * 点击会先改全局 tag，再同时重绘筛选条和作品列表——只重绘其中一个会让选中态和列表对不上。
- */
-function renderChips() {
-  chipsBox.textContent = '';
-  chipsBox.appendChild(chip('全部 ' + profile.sites.length, tag === '', () => {
-    tag = ''; renderChips(); renderWorks();
-  }));
-  MP.TAGS.forEach((t) => {
-    const count = profile.sites.filter((s) => s.tag === t.key).length;
-    if (!count) return;
-    chipsBox.appendChild(chip(t.label + ' ' + count, tag === t.key, () => {
-      tag = t.key; renderChips(); renderWorks();
-    }));
-  });
-}
-
-/**
- * 造一个可点的筛选标签（span.chip，active 控制高亮），返回未挂载的节点给调用方插入。
- * 文字用 textContent 写入，不必再转义；点击行为完全由 onClick 参数决定。
- */
 function chip(label, active, onClick) {
   const el = document.createElement('span');
   el.className = 'chip' + (active ? ' active' : '');
@@ -213,56 +164,97 @@ function chip(label, active, onClick) {
   return el;
 }
 
-/**
- * 把当前创作者的作品按 tag 过滤后交给 MP.renderCards 渲染（tag 是空串表示不筛选）。
- * 依赖全局 profile 已就绪；过滤后为空时由 MP.renderCards 自己渲染「没有找到相关页面」占位。
- */
+function renderChips() {
+  chipsBox.textContent = '';
+  const sites = profile.sites;
+  chipsBox.appendChild(chip('全部 ' + sites.length, tag === '', () => {
+    tag = ''; renderChips(); renderWorks();
+  }));
+  MP.TAGS.forEach((t) => {
+    if (!t.key) return;
+    const count = sites.filter((s) => s.tag === t.key).length;
+    if (!count) return;
+    chipsBox.appendChild(chip(t.label + ' ' + count, tag === t.key, () => {
+      tag = t.key; renderChips(); renderWorks();
+    }));
+  });
+}
+
 function renderWorks() {
   const sites = tag ? profile.sites.filter((s) => s.tag === tag) : profile.sites;
-  if (!sites.length && !tag) {
-    cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">还没有公开作品</div>';
+  if (!sites.length) {
+    cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">'
+      + (tag ? '这个标签下还没有页面。' : '还没有发布任何页面。') + '</div>';
     return;
   }
-  const { id, username } = profile.user;
-  MP.renderCards(cardsBox, sites.map((site) => ({
-    ...site,
-    author: { id, name: username, username },
-  })));
+  MP.renderCards(cardsBox, sites);
+}
+
+// ---------------------------------------------------------------- 我的收藏
+
+async function loadFavs() {
+  try {
+    const data = await MP.api('/api/favorites');
+    // 后端平铺返回，按 folder 字段分组
+    const map = new Map();
+    data.sites.forEach((s) => {
+      const name = s.folder || '默认收藏夹';
+      if (!map.has(name)) map.set(name, []);
+      map.get(name).push(s);
+    });
+    favFolders = [...map.entries()].map(([name, sites]) => ({ name, sites }));
+    if (!favFolders.length) favFolders = [{ name: '默认收藏夹', sites: [] }];
+    renderFavs();
+  } catch (err) {
+    favCardsBox.innerHTML = '<div class="empty">' + MP.esc(err.message) + '</div>';
+  }
+}
+
+function renderFavs() {
+  favChipsBox.textContent = '';
+  favFolders.forEach((f, i) => {
+    favChipsBox.appendChild(chip(f.name + ' ' + f.sites.length, favFolder === i, () => {
+      favFolder = i; renderFavs();
+    }));
+  });
+  const sites = favFolders[favFolder]?.sites ?? [];
+  if (!sites.length) {
+    favCardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">这个收藏夹还是空的。</div>';
+    return;
+  }
+  MP.renderCards(favCardsBox, sites);
 }
 
 // ---------------------------------------------------------------- Tab 切换
 
 document.getElementById('utabs').addEventListener('click', (e) => {
   const a = e.target.closest('a[data-tab]');
-  if (!a) return;
+  if (!a || a.hidden) return;
   document.querySelectorAll('#utabs a').forEach((x) => x.classList.toggle('on', x === a));
   const tab = a.dataset.tab;
   document.getElementById('tabWorks').hidden = tab !== 'works';
+  document.getElementById('tabFavs').hidden = tab !== 'favs';
   document.getElementById('tabAbout').hidden = tab !== 'about';
+  if (tab === 'favs' && !favFolders.length) loadFavs();
 });
 
 // ---------------------------------------------------------------- 启动
 
-async function boot() {
-  try {
-    profile = await loadProfile();
-    if (!profile) {
-      notFoundBox.hidden = false;
-      return;
-    }
-    isOwn = profile.isOwn === true;
-    following = profile.isFollowing === true;
-    pageBox.hidden = false;
-    renderProfile();
-    renderChips();
-    renderWorks();
-  } catch (error) {
-    loadErrorBox.textContent = error.message || '创作者资料加载失败，稍后再试。';
-    loadErrorBox.hidden = false;
-  }
-}
+(async () => {
+  me = await MP.me();
 
-boot();
+  try {
+    profile = await MP.api('/api/u/' + encodeURIComponent(USERNAME) + '/profile');
+  } catch (err) {
+    notFoundBox.hidden = false;
+    return;
+  }
+
+  pageBox.hidden = false;
+  renderProfile();
+  renderChips();
+  renderWorks();
+})();
 </script>
 </body>
 </html>

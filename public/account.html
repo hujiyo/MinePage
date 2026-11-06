@@ -41,11 +41,25 @@
     <form id="nameForm" novalidate>
       <label class="field">
         <span class="label">用户名</span>
-        <input id="nameInput" type="text" autocomplete="off" spellcheck="false"
-               placeholder="没设置过，留空表示清除">
-        <span class="hint">小写字母、数字、连字符，3–32 位；可以用它登录，主页地址为 /u/用户名</span>
+        <input id="nameInput" type="text" autocomplete="off" spellcheck="false" maxlength="32">
+        <span class="hint">小写字母、数字、连字符，3–32 位。你所有页面的地址都是 /qwq/<b>用户名</b>/站名，
+          主页地址为 /qwq/用户名。<b>改用户名后所有依赖旧名字的链接都会失效</b>，旧链接直接 404。</span>
       </label>
       <button type="submit" id="nameSubmit">保存用户名</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>注销账号</h2>
+    <p class="muted" style="font-size:13px">
+      注销后账号和你名下的<b>所有页面、文件、评论、私信、MCP 密钥</b>都会被永久删除，找不回来。
+    </p>
+    <form id="deleteForm" novalidate>
+      <label class="field">
+        <span class="label">输入密码确认</span>
+        <input id="deletePass" type="password" autocomplete="current-password">
+      </label>
+      <button type="submit" class="danger" id="deleteSubmit">永久注销账号</button>
     </form>
   </section>
 
@@ -108,14 +122,12 @@ async function postJson(url, payload) {
 function renderMe(me) {
   const label = me.username || me.email;
   document.getElementById('avatar').textContent = label.charAt(0).toUpperCase();
-  document.getElementById('whoName').textContent = me.username || '（还没设置用户名）';
+  document.getElementById('whoName').textContent = me.username;
   document.getElementById('whoAdmin').hidden = !me.isAdmin;
   document.getElementById('whoEmail').textContent = me.email;
   document.getElementById('whoSince').textContent =
     '注册于 ' + new Date(me.createdAt).toLocaleDateString('zh-CN');
   document.getElementById('nameInput').value = me.username || '';
-  document.getElementById('nameInput').placeholder = me.username
-    ? '换成别的用户名' : '设置一个用户名';
   document.getElementById('bioInput').value = me.bio || '';
 
   const bioEl = document.getElementById('whoBio');
@@ -135,7 +147,7 @@ document.getElementById('nameForm').addEventListener('submit', async (e) => {
       username: document.getElementById('nameInput').value,
     });
     if (data.ok) {
-      showMsg(true, data.username ? '用户名已保存：' + data.username : '用户名已清除');
+      showMsg(true, '用户名已保存：' + data.username + '。旧地址已经失效，记得更新分享出去的链接。');
       const me = await (await fetch('/api/me')).json();
       if (me.user) renderMe(me.user, me.unread);
       MP.toast('已保存');
@@ -189,6 +201,30 @@ document.getElementById('passForm').addEventListener('submit', async (e) => {
       document.getElementById('passForm').reset();
     } else {
       showMsg(false, data.message || '修改失败');
+    }
+  } catch (err) {
+    showMsg(false, '网络出问题了：' + err.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById('deleteForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!confirm('确定注销账号吗？你名下所有页面和文件都会被永久删除，找不回来。')) return;
+
+  const button = document.getElementById('deleteSubmit');
+  button.disabled = true;
+
+  try {
+    const data = await postJson('/api/account/delete', {
+      password: document.getElementById('deletePass').value,
+    });
+    if (data.ok) {
+      alert('账号已注销。');
+      location.href = '/';
+    } else {
+      showMsg(false, data.message || '注销失败');
     }
   } catch (err) {
     showMsg(false, '网络出问题了：' + err.message);

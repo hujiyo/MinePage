@@ -23,15 +23,11 @@
 <script>
 MP.topbar({ active: 'dynamic' });
 
-// 通知由 GET /api/notifications 读取；点击按钮后用 POST /api/notifications/seen 标记已读。
-let items = [];
-
 const TABS = [
   { key: 'all', label: '全部' },
   { key: 'comment', label: '回复我的' },
   { key: 'interact', label: '赞与收藏' },
   { key: 'follow', label: '新增关注' },
-  { key: 'system', label: '系统通知' },
 ];
 
 const TYPE_TEXT = {
@@ -42,36 +38,24 @@ const TYPE_TEXT = {
 };
 
 let tab = 'all';
-let loadError = '';
+let items = [];
 
 const tabsBox = document.getElementById('tabs');
 const listBox = document.getElementById('list');
 const emptyBox = document.getElementById('empty');
-const seenBtn = document.getElementById('seen');
-const emptyText = emptyBox.textContent;
 
-/** 把毫秒时间戳转成「刚刚 / N 分钟前 / N 小时前 / N 天前」，超过 30 天就直接显示日期。 */
-function fmtTime(ts) {
-  const diff = (Date.now() - ts) / 1000;
-  if (diff < 60) return '刚刚';
-  if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
-  if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
-  if (diff < 86400 * 30) return Math.floor(diff / 86400) + ' 天前';
-  const d = new Date(ts);
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+/** 后端只给「未读总数」，没有逐条已读标记：把最新的 N 条当未读高亮。 */
+function markUnread(items, unreadCount) {
+  if (!unreadCount) return items;
+  return items.map((it, i) => ({ ...it, unread: i < unreadCount }));
 }
 
-/**
- * 判断一条通知是否属于当前选中的标签。
- * 'interact' 是前端自己造的伪标签，对应 like 和 favorite 两种类型，后端没有这个值。
- */
 function match(it) {
   if (tab === 'all') return true;
   if (tab === 'interact') return it.type === 'like' || it.type === 'favorite';
   return it.type === tab;
 }
 
-/** 重建顶部标签行；点某个标签会改 tab、重画标签高亮，并立刻重画列表。 */
 function renderTabs() {
   tabsBox.textContent = '';
   TABS.forEach((t) => {
@@ -83,18 +67,13 @@ function renderTabs() {
   });
 }
 
-/**
- * 造一条通知的 DOM：头像取 actor 首字，非系统通知会把 actor（用户名存在时）和页面名做成链接，
- * 有 snippet 才多一行摘要。返回的元素没有挂进 DOM，由 render() 负责 append。
- * 注意：actor 是必填的（要取 actor[0]），缺了会直接抛错。
- */
 function renderItem(it) {
   const el = document.createElement('div');
   el.className = 'rowItem' + (it.unread ? ' unread' : '');
 
   const av = document.createElement('span');
   av.className = 'avatar sm';
-  av.textContent = it.actor[0];
+  av.textContent = String(it.actor || '?').charAt(0);
 
   const grow = document.createElement('div');
   grow.className = 'grow';
@@ -107,7 +86,7 @@ function renderItem(it) {
   } else {
     if (it.actorUsername) {
       const a = document.createElement('a');
-      a.href = '/u/' + encodeURIComponent(it.actorUsername);
+      a.href = '/qwq/' + encodeURIComponent(it.actorUsername);
       a.textContent = it.actor;
       a.style.color = 'var(--muted2)';
       t.appendChild(a);
@@ -117,7 +96,7 @@ function renderItem(it) {
     t.appendChild(document.createTextNode(' ' + (TYPE_TEXT[it.type] || '和你互动了')));
     if (it.type !== 'follow' && it.siteName) {
       const s = document.createElement('a');
-      s.href = '/view/' + encodeURIComponent(it.siteName);
+      s.href = MP.viewUrl({ name: it.siteName, author: { username: it.siteOwner } });
       s.textContent = '「' + (it.siteTitle || it.siteName) + '」';
       s.style.color = 'var(--pink)';
       t.appendChild(document.createTextNode(' '));
@@ -139,67 +118,46 @@ function renderItem(it) {
   const time = document.createElement('span');
   time.className = 'muted';
   time.style.cssText = 'font-size:12px;flex:none';
-  time.textContent = fmtTime(it.at);
+  time.textContent = MP.timeAgo(it.at);
   el.appendChild(time);
 
   return el;
 }
 
-/**
- * 按当前标签过滤后重画列表，并切换空态提示与列表容器的显隐。
- * 数据源是 GET /api/notifications 返回的 items；筛选仅在页面内进行。
- */
 function render() {
   listBox.textContent = '';
-  emptyBox.textContent = loadError || emptyText;
   const list = items.filter(match);
-  emptyBox.hidden = !loadError && list.length > 0;
+  emptyBox.hidden = list.length > 0;
   list.forEach((it) => listBox.appendChild(renderItem(it)));
-  listBox.hidden = !!loadError || list.length === 0;
+  listBox.hidden = list.length === 0;
 }
 
-seenBtn.addEventListener('click', async () => {
-  seenBtn.disabled = true;
+document.getElementById('seen').addEventListener('click', async () => {
   try {
-    const res = await fetch('/api/notifications/seen', { method: 'POST' });
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data?.ok) {
-      MP.toast(data?.message || '标记失败，稍后再试');
-      return;
-    }
-    items.forEach((it) => { it.unread = false; });
-    MP.forgetSession();
-    document.querySelector('.tacts a[href="/notifications"] .dot')?.remove();
+    await MP.api('/api/notifications/seen', { method: 'POST' });
+    items = items.map((it) => ({ ...it, unread: false }));
     render();
     MP.toast('已全部标为已读');
-  } catch {
-    MP.toast('连不上服务器，稍后再试');
-  } finally {
-    seenBtn.disabled = !items.some((it) => it.unread);
+  } catch (err) {
+    MP.toast(err.message);
   }
 });
 
-/** 进入页面后读取真实通知；失败时显示错误，不把失败伪装成“没有通知”。 */
-async function boot() {
-  seenBtn.disabled = true;
-  try {
-    const res = await fetch('/api/notifications', { headers: { Accept: 'application/json' } });
-    const data = await res.json().catch(() => null);
-    if (!res.ok || !data?.ok || !Array.isArray(data.items)) {
-      throw new Error(data?.message || '加载失败，稍后再试');
-    }
-    loadError = '';
-    items = data.items;
-    seenBtn.disabled = !items.some((it) => it.unread);
-    render();
-  } catch (error) {
-    loadError = error.message || '连不上服务器，稍后再试';
-    render();
-  }
-}
+(async () => {
+  const me = await MP.requireLogin();
+  if (!me) return;
 
-renderTabs();
-boot();
+  renderTabs();
+
+  try {
+    const data = await MP.api('/api/notifications');
+    items = markUnread(data.items, me.unread);
+    render();
+  } catch (err) {
+    emptyBox.hidden = false;
+    emptyBox.textContent = err.message;
+  }
+})();
 </script>
 </body>
 </html>

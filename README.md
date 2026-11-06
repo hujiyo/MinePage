@@ -1,8 +1,12 @@
 # MinePage
 
-极简个人 page 托管 + 社区平台。注册账号，上传一个 HTML 文件，起个名字，
-就能通过 `域名/名字` 访问；`/` 是社区首页（发现流、搜索、标签筛选），
+极简个人 page 托管 + 社区平台。注册账号（用户名必填），上传一个 HTML 文件，起个名字，
+就能通过 `域名/qwq/用户名/名字` 访问；`/` 是社区首页（发现流、搜索、标签筛选），
 管理员在 `/admin` 管理用户和页面。
+
+**站名只在自己名下唯一**：两个人都能有一个叫 `study` 的页面，地址分别是
+`/qwq/alice/study` 和 `/qwq/bob/study`。所以站名不用抢，平台路由也不再跟站名
+抢根路径（`/admin`、`/settings` 这些永远是平台的）。每人最多 10 个站点。
 
 ## 跑起来
 
@@ -36,19 +40,20 @@ lib/auth.js                   scrypt 密码哈希、会话 token、Cookie 读写
 lib/users.js                  用户与会话的数据操作、管理员种子
 lib/sites.js                  站点的数据操作
 lib/social.js                 社区互动数据操作（点赞 / 评论 / 收藏 / 关注 / 通知 / 浏览量 / 创作者主页）
-lib/names.js                  站名校验
-lib/addressing.js             「站名 ⇄ 访问地址」的唯一映射点，换地址形态只改这里
+lib/names.js                  站名 / 用户名校验
+lib/addressing.js             「用户名+站名 ⇄ 访问地址」的唯一映射点，换地址形态只改这里
 lib/email.js                  发信（SMTP），未配置时退化为控制台打印
 lib/verification.js           邮箱验证码的生成、发送、校验与限流
 lib/mcp/tokens.js             MCP 密钥：铸造 / 列表 / 吊销 / 鉴权（只存 sha256）
 lib/mcp/tools.js              MCP 工具注册表（唯一真源）+ 10 个 backend
 lib/mcp/server.js             MCP 的 JSON-RPC 分发，零依赖手写
-scripts/mcp-smoke.mjs         MCP 冒烟测试（68 项，见下）
-scripts/api-smoke.mjs         全站接口冒烟测试（154 项，自己拉起临时服务，见下）
-public/index.html             上传页（/upload）
+scripts/mcp-smoke.mjs         MCP 冒烟测试（69 项，见下）
+scripts/api-smoke.mjs         全站接口冒烟测试（148 项，自己拉起临时服务，见下）
+scripts/migrate-user-space.mjs  把「全局站名」的老库迁到用户空间模型（幂等，见下）
+public/index.html             上传页的跳转兜底
 public/discover.html          社区首页（/）
-public/user.html              创作者主页（/u/:用户名）
-public/view.html              观看页（/view/:站名，全屏 iframe + 底部吸附栏 + 评论面板）
+public/user.html              创作者主页（/qwq/:用户名）
+public/view.html              观看页（/view/:用户名/:站名，全屏 iframe + 底部吸附栏 + 评论面板）
 public/notifications.html     通知列表页（/notifications）
 public/favorites.html         我的收藏（/favorites）
 public/history.html           观看历史（/history）
@@ -59,15 +64,14 @@ public/settings.html          账号设置（改密码 + 创建 MCP 密钥）
 public/admin.html             管理后台
 public/app.js                 公共前端脚本（顶栏 / 图标 / 站点卡片）
 public/style.css              共享样式
-data/minepage.db              数据库（不进 git）
 ```
 
 ## 十二张表
 
 | 表 | 存什么 |
 |---|---|
-| `users` | 账号、scrypt 密码哈希、是否管理员、封禁状态 |
-| `sites` | 站名、归属用户、HTML 内容、大小、上线状态、标题简介标签 |
+| `users` | 账号、用户名（必填，也是用户空间路径段）、scrypt 密码哈希、是否管理员、封禁状态 |
+| `sites` | 站名（只在作者名下唯一）、归属用户（注销级联删除）、HTML 内容、大小、上线状态、标题简介标签 |
 | `site_files` | 多页站的文件（路径 + BLOB 内容） |
 | `sessions` | 登录会话，带过期时间 |
 | `email_codes` | 邮箱验证码的哈希、用途、有效期与尝试次数 |
@@ -84,29 +88,35 @@ data/minepage.db              数据库（不进 git）
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` | 社区首页（发现流、搜索、标签筛选） |
-| GET | `/upload` | 上传站点 |
-| GET | `/u/:用户名` | 创作者公开主页 |
-| GET | `/view/:站名` | 观看页（全屏沙箱 iframe + 底部吸附栏 + 评论面板） |
+| GET | `/upload` | 跳到创作页的投稿标签 |
+| GET | `/qwq/:用户名` | 创作者公开主页（用户空间入口；`/qwq/:用户名/:站名` 是站点） |
+| GET | `/view/:用户名/:站名` | 观看页（全屏沙箱 iframe + 底部吸附栏 + 评论面板） |
+| GET | `/qwq/:用户名/:站名` | 用户页面（带沙箱头）；`/qwq/:用户名/:站名/*` 是站内文件 |
 | GET | `/notifications` | 通知列表页（收到的互动） |
 | GET | `/login` | 登录 / 注册 |
 | GET | `/admin` | 管理后台（仅管理员） |
 | GET | `/api/me` | 当前登录用户 |
-| POST | `/api/auth/register` | 邮箱注册 |
+| POST | `/api/auth/register` | 邮箱注册（`email` / `code` / `password` / `username`） |
 | POST | `/api/auth/login` | 登录（邮箱或用户名） |
 | POST | `/api/auth/logout` | 登出 |
 | GET | `/api/discover` | 社区发现流（?q= 模糊搜索，?tag= 标签筛选） |
 | GET | `/api/u/:username/profile` | 创作者主页数据（资料 / 粉丝关注数 / 总浏览量 / TA 的站点） |
-| GET | `/api/sites` | 我上传的页面 |
-| POST | `/api/upload` | 上传 HTML（需登录） |
-| GET | `/api/sites/:name/stats` | 站点互动数字（浏览 / 赞 / 评 / 藏） |
-| POST / DELETE | `/api/sites/:name/like` | 点赞 / 取消（需登录） |
-| GET / POST | `/api/sites/:name/comments` | 评论列表 / 发评论（回复带 replyTo） |
-| DELETE | `/api/sites/:name/comments/:id` | 删评论（作者或管理员） |
-| POST / DELETE | `/api/sites/:name/favorite` | 收藏 / 取消（可选 folder 名字） |
+| GET | `/api/sites` | 我的站点（带 `username`、`quota`） |
+| POST | `/api/upload` | 上传 HTML（需登录，占配额） |
+| GET | `/api/sites/:用户名/:站名/stats` | 站点互动数字（浏览 / 赞 / 评 / 藏） |
+| POST / DELETE | `/api/sites/:用户名/:站名/like` | 点赞 / 取消（需登录） |
+| GET / POST | `/api/sites/:用户名/:站名/comments` | 评论列表 / 发评论（回复带 replyTo） |
+| DELETE | `/api/sites/:用户名/:站名/comments/:id` | 删评论（作者或管理员） |
+| POST / DELETE | `/api/sites/:用户名/:站名/favorite` | 收藏 / 取消（可选 folder 名字） |
+| GET / PUT / DELETE | `/api/sites/:用户名/:站名` | 站点详情 / 保存单页 HTML / 删除 |
+| GET / POST / DELETE | `/api/sites/:用户名/:站名/files` | 多页站文件列表 / 上传 / 删除 |
+| PUT | `/api/sites/:用户名/:站名/meta` | 站点标题 / 简介 / 标签 |
 | POST / DELETE | `/api/users/:id/follow` | 关注 / 取关（不能关注自己） |
 | GET | `/api/users/:id/social` | 粉丝数 / 关注数 / 是否已关注 |
 | GET | `/api/notifications` | 通知列表（最近的互动事件，新到旧，最多 50 条） |
-| POST | `/api/notifications/seen` | 推进已读时间戳（点击「全部标为已读」时调用） |
+| POST | `/api/notifications/seen` | 推进已读时间戳（进通知页自动调用） |
+| POST | `/api/account/username` | 改用户名（旧名立即释放，旧地址跟着失效） |
+| POST | `/api/account/delete` | 注销账号（密码确认，级联删掉名下所有站点） |
 | GET | `/api/admin/users` | 用户列表 |
 | POST | `/api/admin/users/:id/status` | 封禁 / 解封 |
 | GET | `/api/admin/sites` | 全部页面 |
@@ -116,7 +126,6 @@ data/minepage.db              数据库（不进 git）
 | POST | `/api/mcp/tokens` | 创建 MCP 密钥（明文只回一次） |
 | POST | `/api/mcp/tokens/:id/revoke` | 吊销密钥 |
 | POST | `/mcp` | MCP 运行时（密钥鉴权，与登录态无关） |
-| GET | `/:名字` | 用户页面（带沙箱头） |
 
 ## 接入 MCP（让 AI 直接管页面）
 
@@ -151,8 +160,8 @@ claude mcp add --transport http minepage http://127.0.0.1:3000/mcp \
 # 起一个测试服务（冒烟库，种子管理员 admin/123）
 $env:PORT=3100; $env:MYSQL_DATABASE='minepage_smoke'; node server.js
 
-node scripts/mcp-smoke.mjs                        # 主流程 51 项
-node scripts/mcp-smoke.mjs --isolation smoke-friend   # 跨账号隔离 8 项（$env:SMOKE_LOGIN 换个账号跑）
+node scripts/mcp-smoke.mjs                        # 主流程 50 项
+node scripts/mcp-smoke.mjs --isolation smoke-friend   # 跨账号隔离 10 项（$env:SMOKE_LOGIN 换个账号跑）
 node scripts/mcp-smoke.mjs --revoke-check         # 吊销 4 项
 node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项（需要库里有个 b@smoke.local）
 ```
@@ -161,9 +170,22 @@ node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项（需
 冒烟库的表，跑完自己收拾：
 
 ```
-node scripts/api-smoke.mjs          # 154 项：注册/登录/站点/文件/社交/权限/后台/改密
+node scripts/api-smoke.mjs          # 148 项：注册/登录/站点/文件/社交/权限/后台/改密/配额/改名/注销
 node scripts/api-smoke.mjs --json   # 末尾多打印一段 JSON，换库前后可以拿来对比
 ```
+
+### 老库迁移到用户空间
+
+站名的唯一键从 `name` 换成 `(owner_id, name)`，`owner_id` 变 NOT NULL 且外键改成
+`ON DELETE CASCADE`，缺用户名的账号按邮箱前缀自动补一个。脚本幂等，重复跑只做没做的部分：
+
+```
+node scripts/migrate-user-space.mjs --dry-run   # 只看要做什么
+node scripts/migrate-user-space.mjs             # 真跑（先备份！）
+```
+
+本机连线上库要先开隧道：`ssh -N -L 13306:127.0.0.1:3306 minepage`，再 `MYSQL_PORT=13306`。
+旧的 `/:站名` 地址迁移后**直接 404**（研发阶段不做 301 兼容层）。
 
 验证码在开发模式下打印到服务端控制台，脚本就是从子进程输出里捞的，
 所以这个脚本**必须在开发模式（不配 SMTP_HOST）下跑**。
@@ -188,6 +210,8 @@ node scripts/api-smoke.mjs --json   # 末尾多打印一段 JSON，换库前后�
 | `MYSQL_USER` | `minepage` | 数据库账号 |
 | `MYSQL_PASSWORD` | 空 | 数据库密码 |
 | `MYSQL_DATABASE` | `minepage` | 库名；跑回归脚本时指向 `minepage_smoke` |
+| `USER_SPACE_PREFIX` | `qwq` | 用户空间前缀：站点地址是 `/<前缀>/<用户名>/<站名>` |
+| `MAX_SITES_PER_USER` | `10` | 每人站点配额 |
 | `ADMIN_USERNAME` | `admin` | 管理员用户名 |
 | `ADMIN_PASSWORD` | `123` | 管理员密码，首次创建时生效 |
 | `ADMIN_EMAIL` | `admin@minepage.local` | 管理员邮箱 |
@@ -198,4 +222,5 @@ node scripts/api-smoke.mjs --json   # 末尾多打印一段 JSON，换库前后�
 
 - 自动化测试只盖到接口层（`npm run smoke`），页面上的 JS 交互还没覆盖
 - lint / 格式化配置
-- 限流与配额（验证码有 60 秒重发冷却，其他接口还没有）
+- 除了站点配额，其他接口还没有限流
+- B 站式硬币换配额（先有真实用户量再说）

@@ -189,10 +189,10 @@ function renderSites(sites) {
 
     const nameCell = document.createElement('td');
     const link = document.createElement('a');
-    link.href = '/' + site.name;
+    link.href = '/qwq/' + encodeURIComponent(site.owner_username) + '/' + encodeURIComponent(site.name);
     link.target = '_blank';
     link.rel = 'noopener';
-    link.textContent = '/' + site.name;
+    link.textContent = '/' + site.owner_username + '/' + site.name;
     nameCell.appendChild(link);
     row.appendChild(nameCell);
 
@@ -265,11 +265,11 @@ async function setSiteStatus(id, status) {
  * 只是前端确认，后端不做二次询问，删掉的页面和文件都找不回来。
  */
 async function removeSite(site) {
-  if (!confirm('确定删除 /' + site.name + ' 吗？删了就找不回来了。')) return;
+  if (!confirm('确定删除 /' + site.owner_username + '/' + site.name + ' 吗？删了就找不回来了。')) return;
 
   try {
     await api('/api/admin/sites/' + site.id, { method: 'DELETE' });
-    showMsg(true, '已删除 /' + site.name);
+    showMsg(true, '已删除 /' + site.owner_username + '/' + site.name);
     await loadAll();
   } catch (err) {
     showMsg(false, err.message);

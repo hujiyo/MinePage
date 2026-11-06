@@ -1,8 +1,9 @@
 /* ============================================================
    MinePage 前端公共脚本（app.js）
-   职责：图标库 / 统一顶栏 / 搜索下拉 / 卡片渲染
+   职责：图标库 / 统一顶栏 / 搜索下拉 / 卡片渲染 / 演示数据
    ------------------------------------------------------------
-   页面数据一律走 /api/* 真实接口。
+   当前为「纯前端阶段」：所有用户态与列表数据均为本地演示数据，
+   每处需要后端的地方都留了 TODO，后续接 /api/* 时逐个替换即可。
    ============================================================ */
 
 (function () {
@@ -105,10 +106,6 @@
     'linear-gradient(135deg,#00b7c3,#7fe3e9)',
     'linear-gradient(135deg,#8a6d3b,#d8c39a)',
   ];
-  /**
-   * 按站点名算一个稳定的封面渐变：同名站点每次刷新拿到的颜色都一样。
-   * 取的是 site.name（没有才退到 title），所以改站名会换色；色板是写死的 8 条。
-   */
   function grad(site) {
     const key = String(site.name || site.title || '');
     let h = 0;
@@ -117,14 +114,162 @@
   }
   MP.grad = grad;
 
-  // 标签词表。
-  // '' 和 'hot' 是筛选专用的伪标签（服务端不认，也不会被提交）；
-  // 其余 key 必须与服务端 lib/sites.js 的 SITE_TAGS 完全一致，
-  // 否则前端筛选项和服务端存的 key 对不上，筛出来是空的。
-  // tests/scripts/consistency.mjs 会核对这件事。
+  /**
+   * 观看包装页地址：/view/<用户名>/<站名>。
+   * 站名只在作者名下唯一，指向观看页的链接必须带用户名。
+   */
+  function viewUrl(site) {
+    return '/view/' + encodeURIComponent((site.author && site.author.username) || '')
+      + '/' + encodeURIComponent(site.name);
+  }
+  MP.viewUrl = viewUrl;
+
+  /** 站点访问地址：/qwq/<用户名>/<站名>。 */
+  function siteUrl(site) {
+    return '/qwq/' + encodeURIComponent((site.author && site.author.username) || '')
+      + '/' + encodeURIComponent(site.name);
+  }
+  MP.siteUrl = siteUrl;
+
+  /* ----------------------------------------------------------
+     2.1 接口与时间
+     ---------------------------------------------------------- */
+
+  /**
+   * 调 JSON 接口：非 2xx 或 ok:false 一律抛错（message 用服务端文案）。
+   * err.status 保留状态码，401 时调用方可以引导去登录。
+   *
+   * POST / PUT 即使没有参数也补一个 {}：服务端的 readBody 要解析 JSON，
+   * 空请求体会被当成格式错误回 400。
+   * @param {string} path
+   * @param {{method?:string, body?:any}} [opt]
+   */
+  MP.api = async function (path, opt) {
+    const o = opt || {};
+    const method = o.method || 'GET';
+    const hasBody = o.body !== undefined || method === 'POST' || method === 'PUT';
+    const body = hasBody ? (o.body === undefined ? {} : o.body) : undefined;
+
+    const res = await fetch(path, {
+      method,
+      headers: hasBody ? { 'Content-Type': 'application/json' } : undefined,
+      body: hasBody ? JSON.stringify(body) : undefined,
+    });
+
+    let data = null;
+    try { data = await res.json(); } catch { /* 204 或空响应 */ }
+
+    if (!res.ok || (data && data.ok === false)) {
+      const err = new Error((data && data.message) || '请求失败（' + res.status + '）');
+      err.status = res.status;
+      throw err;
+    }
+    return data || {};
+  };
+
+  /** 站点接口地址：/api/sites/<用户名>/<站名><tail>。站名只在作者名下唯一。 */
+  function siteApi(site, tail) {
+    return '/api/sites/' + encodeURIComponent((site.author && site.author.username) || '')
+      + '/' + encodeURIComponent(site.name) + (tail || '');
+  }
+  MP.siteApi = siteApi;
+
+  const pad2 = (n) => String(n).padStart(2, '0');
+
+  /** 时间戳 / ISO 字符串 → Date；无效值返回 null。 */
+  function toDate(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const d = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  MP.toDate = toDate;
+
+  /** 相对时间：刚刚 / n 分钟前 / n 小时前 / n 天前 / 2026-10-06。 */
+  MP.timeAgo = function (value) {
+    const d = toDate(value);
+    if (!d) return '';
+    const diff = (Date.now() - d.getTime()) / 1000;
+    if (diff < 60) return '刚刚';
+    if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+    if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+    if (diff < 86400 * 30) return Math.floor(diff / 86400) + ' 天前';
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  };
+
+  /** 绝对时间：10-06 20:31。 */
+  MP.fmtTime = function (value) {
+    const d = toDate(value);
+    if (!d) return '';
+    return pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+      + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  };
+
+  /* ----------------------------------------------------------
+     3. 当前登录用户
+     ---------------------------------------------------------- */
+
+  // 已拿到手的当前用户（未登录或还没拉到时为 null）；页面里请用 await MP.me()。
+  let ME = null;
+  let mePromise = null;
+
+  /** 服务端 user 对象 → 前端通用形状（name 用用户名，没有显示名这个概念）。 */
+  function normalizeMe(user, extra) {
+    if (!user) return null;
+    return {
+      id: user.id,
+      name: user.username || user.email,
+      username: user.username,
+      email: user.email,
+      isAdmin: Boolean(user.isAdmin),
+      bio: user.bio || '',
+      createdAt: user.createdAt,
+      unread: extra?.unread ?? 0,
+      unreadMessages: extra?.unreadMessages ?? 0,
+    };
+  }
+
+  /**
+   * 当前登录用户（带 1 次缓存）。未登录返回 null。
+   * opt.refresh=true 强制重新拉取（改名、封禁后需要）。
+   */
+  MP.me = async function (opt) {
+    if (mePromise && !(opt && opt.refresh)) return mePromise;
+
+    mePromise = fetch('/api/me')
+      .then((res) => res.json())
+      .then((data) => {
+        ME = normalizeMe(data.user, data);
+        return ME;
+      })
+      .catch(() => {
+        ME = null;
+        return null;
+      });
+    return mePromise;
+  };
+
+  /** 同步取缓存里的当前用户（只在 MP.me() 已完成后有意义）。 */
+  MP.currentUser = function () {
+    return ME;
+  };
+
+  /** 登录态失效时统一回登录页，并把原地址带回来。 */
+  MP.requireLogin = async function () {
+    const me = await MP.me();
+    if (!me) {
+      location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+      return null;
+    }
+    return me;
+  };
+
+  /* ----------------------------------------------------------
+     3.1 标签
+     ---------------------------------------------------------- */
+
+  // 与后端 lib/sites.js 的 SITE_TAGS 保持一致（key 存库，label 给人看）
   const TAGS = [
     { key: '', label: '全部' },
-    { key: 'hot', label: '热门' },
     { key: 'resume', label: '求职简历' },
     { key: 'portfolio', label: '作品集' },
     { key: 'social', label: '社交聚合页' },
@@ -136,11 +281,6 @@
   ];
   MP.TAGS = TAGS;
 
-  /**
-   * 标签 key → 中文名；词表里查不到的 key 返回空串。
-   * 注意 '' 在词表里是筛选项「全部」，所以没打标签的站点会得到「全部」而不是空串，
-   * 想要别的兜底文案，调用方得自己先判断 key 是否为空（vcard 就是自己兜的）。
-   */
   function tagLabel(key) {
     const t = TAGS.find((x) => x.key === key);
     return t ? t.label : '';
@@ -154,10 +294,6 @@
   const HIST_KEY = 'mp_search_hist';
   const HIST_MAX = 8;
 
-  /**
-   * 读本地搜索历史：最近 8 条，新的在前。
-   * 隐私模式、或存进去的内容不是数组时返回空数组，不抛错；返回的是新数组，调用方随便改都不影响存储。
-   */
   MP.searchHist = function () {
     try {
       const raw = localStorage.getItem(HIST_KEY);
@@ -166,10 +302,6 @@
     } catch { return []; }
   };
 
-  /**
-   * 记一条搜索历史：按词去重后插到最前，只保留最近 8 条。
-   * 会写 localStorage；空白词直接忽略；写失败（隐私模式、配额满）静默放弃，调用方不用管。
-   */
   MP.pushSearchHist = function (word) {
     const w = String(word || '').trim();
     if (!w) return;
@@ -178,7 +310,6 @@
     try { localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX))); } catch { /* 忽略隐私模式报错 */ }
   };
 
-  /** 清空本地搜索历史；只影响当前浏览器，服务端没有这份记录。 */
   MP.clearSearchHist = function () {
     try { localStorage.removeItem(HIST_KEY); } catch { /* 同上 */ }
   };
@@ -215,69 +346,46 @@
     { key: 'rank', label: '排行榜', href: '/?sort=rank' },
   ];
 
-  /** 顶栏显示名：真实用户没有 name 字段，用 username 兜 email。 */
-  function displayName(user) {
-    return user.username || user.email || '用户';
-  }
+  // 顶栏「热门搜索」：后端没有热搜接口，先用内容标签的词，点了就是按词搜索。
+  // 有接口以后换成 GET /api/hot 的返回即可。
+  const HOT_WORDS = TAGS.filter((t) => t.key).map((t) => t.label);
 
-  /** #tuser 的内部 HTML。user 为 null 表示未登录，显示登录入口。 */
-  function userAreaInner(user) {
-    if (!user) {
-      // data-auth-open：点击弹窗登录、不跳转页面；href 保留作为 JS 失效时的兜底
-      return '<a class="tlogin" href="/login" data-auth-open>' + icon('user') + '<span>登录 / 注册</span></a>';
+  /** 顶栏用户区。me 为 null 时显示「未登录」入口。 */
+  function tuserHtml(me) {
+    if (!me) {
+      return '<a class="tlogin" href="/login">登录 / 注册</a>';
     }
-
-    const name = displayName(user);
-    // 没有用户名时 /u/:username 是死链，改成引导去设置
-    const home = user.username
-      ? '<a href="/u/' + encodeURIComponent(user.username) + '">' + icon('user') + '我的主页</a>'
-      : '<a href="/account">' + icon('user') + '设置用户名</a>';
-
+    const initial = esc((me.name || '?').charAt(0));
+    const dot = (n) => (n ? '<i class="dot">' + n + '</i>' : '');
     return ''
-      + '<div class="avatar sm" title="' + esc(name) + '">' + esc(name[0] || '?') + '</div>'
-      + '<div class="tmenu">'
-      +   '<div class="who">' + esc(name) + '<small>' + esc(user.email) + '</small></div>'
-      +   '<hr>'
-      +   home
-      +   '<a href="/account">' + icon('settings') + '账号设置</a>'
-      +   '<a href="/sites">' + icon('grid') + '页面管理</a>'
-      +   (user.isAdmin ? '<a href="/admin">' + icon('shield') + '管理后台</a>' : '')
-      +   '<hr>'
-      +   '<a href="/login" id="tLogout">' + icon('logout') + '退出登录</a>'
+      + '<div class="tacts">' + [
+        { key: 'messages', href: '/messages', ic: 'message', label: '消息', dot: me.unreadMessages },
+        { key: 'dynamic', href: '/notifications', ic: 'bell', label: '动态', dot: me.unread },
+        { key: 'favorites', href: '/favorites', ic: 'folder', label: '收藏' },
+        { key: 'history', href: '/history', ic: 'history', label: '历史' },
+        { key: 'create', href: '/sites', ic: 'grid', label: '创作' },
+      ].map((a) => '<a class="tact" href="' + a.href + '" title="' + a.label + '">'
+        + icon(a.ic) + '<span>' + a.label + '</span>' + dot(a.dot) + '</a>').join('')
+      + '</div>'
+      + '<div class="tuser" id="tuser">'
+      +   '<div class="avatar sm" title="' + esc(me.name) + '">' + initial + '</div>'
+      +   '<div class="tmenu">'
+      +     '<div class="who">' + esc(me.name) + '<small>' + esc(me.email) + '</small></div>'
+      +     '<hr>'
+      +     '<a href="/qwq/' + encodeURIComponent(me.username) + '">' + icon('user') + '我的主页</a>'
+      +     '<a href="/account">' + icon('settings') + '账号设置</a>'
+      +     '<a href="/sites">' + icon('grid') + '创作</a>'
+      +     (me.isAdmin ? '<a href="/admin">' + icon('shield') + '管理后台</a>' : '')
+      +     '<hr>'
+      +     '<a href="/login" id="tLogout">' + icon('logout') + '退出登录</a>'
+      +   '</div>'
       + '</div>';
   }
 
-  /**
-   * 顶栏动作入口的内部 HTML。
-   *
-   * 两个红点的语义来自服务端，别弄反：
-   *   session.unread         = 未读「动态」（通知）
-   *   session.unreadMessages = 未读「消息」（私信）
-   */
-  function tactsInner(session) {
-    const acts = [
-      { key: 'messages', href: '/messages', ic: 'message', label: '消息', dot: session ? session.unreadMessages : 0 },
-      { key: 'dynamic', href: '/notifications', ic: 'bell', label: '动态', dot: session ? session.unread : 0 },
-      { key: 'favorites', href: '/favorites', ic: 'folder', label: '收藏' },
-      { key: 'history', href: '/history', ic: 'history', label: '历史' },
-      { key: 'create', href: '/sites', ic: 'grid', label: '创作' },
-    ];
-    return acts.map((a) => '<a class="tact" href="' + a.href + '" title="' + a.label + '">'
-      + icon(a.ic) + '<span>' + a.label + '</span>'
-      + (a.dot ? '<i class="dot">' + a.dot + '</i>' : '')).join('');
-  }
-
-  /**
-   * 拼出顶栏的 HTML 字符串（只返回字符串，不碰 DOM）。
-   * 这里刻意按「未登录」渲染用户区和未读红点：真实会话是异步来的，先渲染假账号会闪一下错账号，
-   * 拿到会话后由 MP.topbar 用 innerHTML 把那两处补上。
-   * active 与 NAVS 的 key 对应，决定哪个导航项加 .on；搜索历史挂载后填入。
-   */
-  function topbarHtml(active) {
+  function topbarHtml(active, me) {
     const nav = NAVS.map((n) => '<a href="' + n.href + '"'
       + (active === n.key ? ' class="on"' : '') + '>' + n.label + '</a>').join('');
 
-    // 先按「未登录」渲染，避免闪出假的用户信息；拿到真实会话后由 MP.topbar 补上
     return ''
       + '<div class="tinner">'
       +   '<a class="tlogo" href="/">' + icon('logo') + '<span class="tname">MinePage</span></a>'
@@ -290,31 +398,27 @@
       +     '<div class="tsPanel">'
       +       '<div class="tsSec"><span>搜索历史</span><span class="clr" id="tsClear">清空</span></div>'
       +       '<div class="tsHist" id="tsHist"></div>'
+      +       '<div id="tsUsers" hidden></div>'
+      +       '<div class="tsSec" style="margin-top:6px">' + icon('fire') + '<span style="flex:1">热门搜索</span></div>'
+      +       '<div class="tsHot" id="tsHot"></div>'
       +     '</div>'
       +   '</div>'
-      +   '<div class="tacts" id="tacts">' + tactsInner(null) + '</div>'
-      // 独立「投稿」入口已去掉：投稿并入创作页的「投稿」标签（/sites?tab=upload）
-      +   '<div class="tuser" id="tuser">' + userAreaInner(null) + '</div>'
+      +   '<div id="tuserSlot">' + tuserHtml(me) + '</div>'
       + '</div>';
   }
 
   /**
-   * 挂载顶栏：注入到 body 最前。
+   * 挂载顶栏：注入到 body 最前。用户区先按缓存渲染（未登录态），
+   * /api/me 回来后原地替换，不阻塞页面其余部分的渲染。
    * @param {{active?:string, collapse?:boolean}} [opt]
    *   collapse=true 时在顶栏左下角加「收起/展开」箭头，并在收起后于屏幕顶部留一条触发带
-   *
-   * 副作用不少：改 DOM（插到 body 最前）、往 document 上挂 click 监听（挂上就不摘）、
-   * 读 MP.searchHist 填搜索面板、发 /api/me 请求，点「退出登录」还会
-   * POST /api/auth/logout 再跳 /login。
-   * 顺序是先本地渲染未登录态、再用会话打补丁，所以登录用户会看到极短的一下「登录 / 注册」，属预期。
-   * 返回注入的 header 元素；一个页面只该调一次，重复调用会插出第二个顶栏（连带两套全局监听）。
    */
   MP.topbar = function (opt) {
     const o = opt || {};
     const active = o.active || currentNav();
     const header = document.createElement('header');
     header.className = 'topbar';
-    header.innerHTML = topbarHtml(active);
+    header.innerHTML = topbarHtml(active, ME);
     document.body.insertBefore(header, document.body.firstChild);
     if (o.collapse) mountCollapse();
 
@@ -322,15 +426,11 @@
     const ts = header.querySelector('#ts');
     const input = header.querySelector('#tsInput');
     const histBox = header.querySelector('#tsHist');
+    const hotBox = header.querySelector('#tsHot');
 
     const params = new URLSearchParams(location.search);
     if (params.get('q')) input.value = params.get('q');
 
-    /**
-     * 渲染搜索历史词条（每次展开、清空后各调一次）。
-     * 用 textContent 写而不是拼 innerHTML：历史词是用户输入的内容，拼进去会被当成标签。
-     * 绑 mousedown 而不是 click：输入框 blur 后才会延时收起面板，mousedown 早于 blur 触发，点词条不会扑空。
-     */
     function renderHist() {
       const list = MP.searchHist();
       if (!list.length) { histBox.innerHTML = '<span class="none">还没有搜索记录</span>'; return; }
@@ -343,6 +443,54 @@
         histBox.appendChild(el);
       });
     }
+
+    hotBox.textContent = '';
+    HOT_WORDS.forEach((word, i) => {
+      const row = document.createElement('div');
+      row.className = 'hRow';
+      row.innerHTML = '<span class="hNo' + (i < 3 ? ' top' + (i + 1) : '') + '">' + (i + 1) + '</span>'
+        + '<span class="hWord">' + esc(word) + '</span>';
+      row.addEventListener('mousedown', (e) => { e.preventDefault(); MP.goSearch(word); });
+      hotBox.appendChild(row);
+    });
+
+    // 边打边搜用户：输入非空时把「用户」分区插在历史下面，回车仍然按页面搜索
+    const usersBox = header.querySelector('#tsUsers');
+    let searchTimer = null;
+    let searchSeq = 0;
+
+    function renderUsers(list) {
+      if (!list.length) { usersBox.hidden = true; usersBox.textContent = ''; return; }
+      usersBox.hidden = false;
+      usersBox.innerHTML = '<div class="tsSec"><span>用户</span></div>';
+      const wrap = document.createElement('div');
+      wrap.className = 'tsHist';
+      list.forEach((u) => {
+        const a = document.createElement('a');
+        a.className = 'chip';
+        a.href = '/qwq/' + encodeURIComponent(u.username);
+        a.textContent = u.username;
+        a.title = u.bio || u.username;
+        wrap.appendChild(a);
+      });
+      usersBox.appendChild(wrap);
+    }
+
+    input.addEventListener('input', () => {
+      const kw = input.value.trim();
+      clearTimeout(searchTimer);
+      if (!kw) { renderUsers([]); return; }
+
+      searchTimer = setTimeout(async () => {
+        const seq = ++searchSeq;
+        try {
+          const data = await MP.api('/api/users/search?q=' + encodeURIComponent(kw));
+          if (seq === searchSeq) renderUsers(data.users);
+        } catch {
+          if (seq === searchSeq) renderUsers([]);
+        }
+      }, 220);
+    });
 
     renderHist();
     header.querySelector('#tsClear').addEventListener('mousedown', (e) => {
@@ -365,36 +513,36 @@
       MP.goSearch(input.value);
     });
 
-    // 头像下拉。退出登录同样走委托绑定：用户区是异步补上的，
-    // 直接绑到 #tLogout 元素上会在重渲染之后失效。
-    const tu = header.querySelector('#tuser');
-    tu.addEventListener('click', (e) => {
-      if (e.target.closest('#tLogout')) {
-        e.preventDefault();
-        // 有真实会话时先清掉，再回登录页；无会话时该请求只是空操作
-        fetch('/api/auth/logout', { method: 'POST' })
-          .catch(() => { /* 忽略网络异常，直接跳转 */ })
-          .finally(() => { location.href = '/login'; });
-        return;
-      }
-      tu.classList.toggle('open');
-    });
-    document.addEventListener('click', (e) => {
-      if (!tu.contains(e.target)) tu.classList.remove('open');
-    });
     document.addEventListener('click', (e) => {
       if (!ts.contains(e.target)) ts.classList.remove('open');
     });
 
-    // 用真实会话补上用户区与未读红点。请求失败就保持未登录外观，不抛错。
-    MP.session()
-      .then((session) => {
-        const userBox = header.querySelector('#tuser');
-        if (userBox) userBox.innerHTML = userAreaInner(session.user);
-        const actsBox = header.querySelector('#tacts');
-        if (actsBox) actsBox.innerHTML = tactsInner(session.user ? session : null);
-      })
-      .catch(() => { /* 保持未登录外观 */ });
+    // 用户区：头像下拉、退出登录。用户区会随 /api/me 重绘，所以事件挂在 header 上做委托。
+    header.addEventListener('click', (e) => {
+      const tu = e.target.closest('#tuser');
+      if (!tu) return;
+      if (e.target.closest('#tLogout')) return;
+      tu.classList.toggle('open');
+    });
+    document.addEventListener('click', (e) => {
+      const tu = header.querySelector('#tuser');
+      if (tu && !tu.contains(e.target)) tu.classList.remove('open');
+    });
+    header.addEventListener('click', (e) => {
+      if (!e.target.closest('#tLogout')) return;
+      e.preventDefault();
+      // 有真实会话时先清掉，再回登录页；无会话时该请求只是空操作
+      fetch('/api/auth/logout', { method: 'POST' })
+        .catch(() => { /* 忽略网络异常，直接跳转 */ })
+        .finally(() => { location.href = '/login'; });
+    });
+
+    // 拉到真实登录态后替换用户区
+    MP.me().then((me) => {
+      const slot = header.querySelector('#tuserSlot');
+      if (!slot) return;
+      slot.innerHTML = tuserHtml(me);
+    });
 
     return header;
   };
@@ -431,10 +579,6 @@
     handle.innerHTML = icon('triUp', null, 14);
     document.body.appendChild(handle);
 
-    /**
-     * 把当前的收起状态刷到 body 的 class 与按钮 title 上；只读不写 localStorage
-     *（写只在点击时做，所以挂载时能沿用上次的折叠状态）。
-     */
     function sync() {
       document.body.classList.toggle('nav-collapsed', collapsed);
       handle.title = collapsed ? '展开导航栏' : '收起导航栏';
@@ -455,14 +599,8 @@
 
   /**
    * 生成一张站点卡片。
-   * @param {object} site 站点数据
+   * @param {object} site 站点数据（发现流 / 创作者主页 / 收藏 / 历史同一形状）
    * @param {{peek?:boolean}} [opt]
-   *
-   * 返回的是 DOM 节点（不是 HTML 字符串），由调用方自己 append。
-   * 字段兼容：页数优先接口给的 fileCount，缺了退到 pages，再退 1；标签中文名优先 site.tagLabel，
-   * 没有才用 tagLabel(site.tag) 去查词表。
-   * opt.peek=false 时这张卡不挂悬停预览（卡片多的列表页更省）。
-   * 右下角的赞与收藏读取当前用户状态，点击后写入数据库。
    */
   MP.vcard = function (site, opt) {
     const o = opt || {};
@@ -472,37 +610,13 @@
     const cover = document.createElement('div');
     cover.className = 'vcover';
     cover.style.background = grad(site);
-    // 页数：优先接口的 fileCount/kind，兼容字段 pages，都没有按单页算
-    const pages = site.fileCount != null ? site.fileCount : (site.pages != null ? site.pages : 1);
-    cover.innerHTML = '<span class="vtag">' + esc(site.tagLabel || tagLabel(site.tag) || '页面') + '</span>'
+    cover.innerHTML = '<span class="vtag">'
+      + esc(site.tagLabel || (site.tag ? tagLabel(site.tag) : '') || '页面') + '</span>'
       + '<span class="coverChar">' + esc(initial(site)) + '</span>'
       + '<span class="vviews">' + icon('view') + fmtNum(site.views) + '</span>'
-      + '<span class="vkind">' + (pages > 1 ? pages + ' 页' : '单页') + '</span>';
-    // 封面两级：自定义上传图 > 迷你 iframe（站点顶部实时画面，即悬停下翻的起始画面）。
-    // img/iframe 插在最前（coverChar 是 static 会被盖住，角标是 absolute 自然浮在上面）；
-    // 自定义图加载失败就移除 img，露出渐变底完成回落。
-    if (site.hasCover) {
-      const img = document.createElement('img');
-      img.className = 'vimg';
-      img.alt = '';
-      img.referrerPolicy = 'no-referrer';
-      img.addEventListener('error', () => img.remove());
-      img.src = '/api/sites/' + encodeURIComponent(site.name) + '/cover';
-      cover.insertBefore(img, cover.firstChild);
-    } else {
-      cover.appendChild(buildLiveCover(site, cover));
-    }
-    const viewHref = '/view/' + encodeURIComponent(site.name);
-    cover.tabIndex = 0;
-    cover.setAttribute('role', 'link');
-    cover.setAttribute('aria-label', '观看 ' + (site.title || site.name));
-    cover.addEventListener('click', () => { location.href = viewHref; });
-    cover.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        location.href = viewHref;
-      }
-    });
+      + (site.fileCount > 1
+        ? '<span class="vkind">' + site.fileCount + ' 个文件</span>'
+        : '');
     card.appendChild(cover);
 
     const body = document.createElement('div');
@@ -510,7 +624,7 @@
 
     const title = document.createElement('a');
     title.className = 'vtitle';
-    title.href = viewHref;
+    title.href = viewUrl(site);
     title.textContent = site.title || site.name;
     body.appendChild(title);
 
@@ -523,85 +637,64 @@
 
     const author = document.createElement('div');
     author.className = 'vauthor';
-    const uname = site.author && site.author.username;
-    // 作者可能没有用户名（账号还没设置过），也可能是被删掉的用户留下的无主站点：
-    // 两种情况下 /u/:username 都打不开，所以退回首页而不是造一个死链。
-    const aname = (site.author && site.author.name) || uname || '匿名';
     const a = document.createElement('a');
-    a.href = uname ? '/u/' + encodeURIComponent(uname) : '/';
-    a.innerHTML = '<span class="avatar xs">' + esc(aname[0] || '?') + '</span>';
+    a.href = '/qwq/' + encodeURIComponent(site.author.username);
+    a.innerHTML = '<span class="avatar xs">' + esc(String(site.author.name || '?').charAt(0)) + '</span>';
     const nm = document.createElement('span');
     nm.className = 'aname';
-    nm.textContent = aname;
+    nm.textContent = site.author.name;
     a.appendChild(nm);
     author.appendChild(a);
     body.appendChild(author);
 
     card.appendChild(body);
 
-    // 快捷赞 / 藏：服务端列表已带当前用户状态，写入成功后才更新本卡片。
+    // 快捷赞 / 藏：直接打接口，成功后以服务端返回的数字为准
     const ops = document.createElement('div');
     ops.className = 'vops';
     const like = document.createElement('button');
     like.type = 'button';
-    like.className = 'op';
+    like.className = 'op' + (site.liked ? ' on' : '');
+    like.innerHTML = icon('like') + ' ' + fmtNum(site.likes);
     const fav = document.createElement('button');
     fav.type = 'button';
-    fav.className = 'op';
-    function updateActions() {
-      like.classList.toggle('on', !!site.liked);
-      fav.classList.toggle('on', !!site.favorited);
-      like.setAttribute('aria-pressed', String(!!site.liked));
-      fav.setAttribute('aria-pressed', String(!!site.favorited));
-      like.innerHTML = icon('like') + ' ' + fmtNum(site.likes);
-      fav.innerHTML = icon('fav') + ' ' + fmtNum(site.favorites);
-      const numbers = meta.querySelectorAll('span');
-      numbers[0].innerHTML = icon('like') + fmtNum(site.likes);
-      numbers[1].innerHTML = icon('fav') + fmtNum(site.favorites);
-    }
-    async function toggleAction(kind, btn) {
-      if (btn.disabled) return;
+    fav.className = 'op' + (site.favorited ? ' on' : '');
+    fav.innerHTML = icon('fav') + ' ' + fmtNum(site.favorites);
+
+    /** 只在登录后允许互动；未登录引导去登录页。 */
+    async function interact(btn, apiPath, method, countKey) {
+      if (!(await MP.me())) {
+        MP.toast('登录后才能互动');
+        location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+        return;
+      }
       btn.disabled = true;
-      const active = kind === 'like' ? !!site.liked : !!site.favorited;
       try {
-        const res = await fetch('/api/sites/' + encodeURIComponent(site.name) + '/' + kind, {
-          method: active ? 'DELETE' : 'POST',
-          headers: { Accept: 'application/json', ...(kind === 'favorite' ? { 'Content-Type': 'application/json' } : {}) },
-          ...(kind === 'favorite' && !active ? { body: '{}' } : {}),
-        });
-        const data = await res.json().catch(() => null);
-        if (res.status === 401) {
-          MP.forgetSession();
-          MP.auth.openLogin({});
-          return;
-        }
-        if (!res.ok || !data?.ok) {
-          MP.toast(data?.message || '操作失败，稍后再试');
-          return;
-        }
-        if (kind === 'like') {
-          site.liked = data.liked;
-          site.likes = data.likes;
-        } else {
-          site.favorited = data.favorited;
-          site.favorites = data.favorites;
-        }
-        updateActions();
-        if (kind === 'favorite' && o.onFavoriteChange) o.onFavoriteChange(site);
-      } catch {
-        MP.toast('连不上服务器，稍后再试');
+        const data = await MP.api(apiPath, { method });
+        const isOn = data[countKey === 'favorites' ? 'favorited' : 'liked'];
+        btn.classList.toggle('on', Boolean(isOn));
+        btn.innerHTML = (countKey === 'favorites' ? icon('fav') : icon('like'))
+          + ' ' + fmtNum(data[countKey]);
+        site[countKey] = data[countKey];
+      } catch (err) {
+        MP.toast(err.message);
       } finally {
         btn.disabled = false;
       }
     }
-    [[like, 'like'], [fav, 'favorite']].forEach(([btn, kind]) => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        toggleAction(kind, btn);
-      });
+
+    like.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const on = like.classList.contains('on');
+      interact(like, siteApi(site, '/like'), on ? 'DELETE' : 'POST', 'likes');
     });
-    updateActions();
+    fav.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const on = fav.classList.contains('on');
+      interact(fav, siteApi(site, '/favorite'), on ? 'DELETE' : 'POST', 'favorites');
+    });
     ops.appendChild(like);
     ops.appendChild(fav);
     card.appendChild(ops);
@@ -611,189 +704,30 @@
     return card;
   };
 
-  // 迷你封面 / 悬停预览共用的虚拟视口与速度
-  const COVER_VW = 1280; // 虚拟视口宽：桌面布局能正常展开
-  // 虚拟视口高必须等于真实首屏高度（720）：iframe 里 100vh 跟着 iframe 高度走，
-  // 视口拉太高会把全屏 hero 撑出封面可见区，封面就只剩一片背景色
-  const COVER_VH = 720;
-  const COVER_SPEED = 45; // 下翻速度（屏幕像素/秒）：太快像刷屏，太慢没进展
-
-  // 封面并发闸门：封面是整站 iframe，同时开太多会把带宽切碎、每张都慢。
-  // 同一时刻最多加载 COVER_MAX 张，其余按可见顺序排队；用户最先看到的卡片
-  // 因此能独占带宽、最快出画面。加载完或超时即释放闸门给下一张。
-  const COVER_MAX = 3;
-  const COVER_DWELL = 400;    // 进入视口后停留这么久才排队（快速滚过的卡片不浪费流量）
-  const COVER_TIMEOUT = 6000; // 超过这么久还没 load 就放行下一张，避免个别慢站卡住整条队列
-  let coverBusy = 0;
-  const coverQueue = []; // 待加载的 arm 函数，FIFO ≈ 页面从上到下的可见顺序
-
-  function pumpCoverQueue() {
-    while (coverBusy < COVER_MAX && coverQueue.length) {
-      coverQueue.shift()();
-    }
-  }
-
   /**
-   * 迷你 iframe 封面：封面区直接显示站点顶部画面（= 悬停下翻的起始画面）。
-   * 懒加载 + 停留节流 + 并发闸门：滚进视口且停留一小会儿，才排进队列去载入真站；
-   * 载入完成淡入（.mcover.loaded），超时则保留渐变占位、放行下一张。
-   */
-  function buildLiveCover(site, cover) {
-    const frame = document.createElement('iframe');
-    frame.className = 'mcover';
-    frame.referrerPolicy = 'no-referrer';
-    // 只给脚本不给同源：站点 JS 照常跑，但摸不到父页面和 cookie
-    frame.sandbox = 'allow-scripts';
-    frame.setAttribute('scrolling', 'no');
-    let armed = false;
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      coverBusy = Math.max(0, coverBusy - 1);
-      pumpCoverQueue();
-    };
-    /** 算尺寸并载入真站（并发队列的入口，悬停兜底也会调它）。 */
-    const arm = () => {
-      if (armed) return;
-      const scale = cover.clientWidth / COVER_VW;
-      if (!scale) return; // 没布局好就先不占用闸门（悬停时会再试）
-      armed = true;
-      coverBusy += 1; // 占用一个并发槽，release 时归还
-      frame.style.width = COVER_VW + 'px';
-      frame.style.height = COVER_VH + 'px';
-      frame.style.transformOrigin = '0 0';
-      frame.style.transform = 'scale(' + scale + ')';
-      // load 标志必须在设 src 之后挂：iframe 一创建就有 about:blank 的 load，不能算数
-      const reveal = () => frame.classList.add('loaded'); // 淡入（见 style.css 的 .mcover）
-      frame.addEventListener('load', () => {
-        frame.dataset.loaded = '1';
-        reveal();
-        release();
-      }, { once: true });
-      // ?mpcover=1：服务端给入口 HTML 注入滚动代理，悬停时 postMessage 驱动内部下翻
-      frame.src = '/' + encodeURIComponent(site.name) + '/?mpcover=1';
-      // 首屏通常很快就画出来了，不必等整站（含首屏外的图片/视频）全部下完才露脸：
-      // 到点先显示，此时 iframe 底透明，没画出来的部分透出下层渐变占位，不会是白块。
-      setTimeout(reveal, 900);
-      setTimeout(release, COVER_TIMEOUT);
-    };
-    frame.arm = arm; // attachPeek 悬停兜底用
-
-    // 懒加载 + 停留节流：进入视口起算 COVER_DWELL，期间滚出去就作废
-    let dwell = null;
-    const enqueue = () => { coverQueue.push(arm); pumpCoverQueue(); };
-    if ('IntersectionObserver' in window) {
-      const io = new IntersectionObserver((entries) => {
-        for (const e of entries) {
-          if (e.isIntersecting) {
-            if (!dwell) dwell = setTimeout(() => { io.disconnect(); enqueue(); }, COVER_DWELL);
-          } else if (dwell) {
-            clearTimeout(dwell);
-            dwell = null;
-          }
-        }
-      }, { threshold: 0.01 });
-      io.observe(cover);
-    } else {
-      setTimeout(enqueue, COVER_DWELL);
-    }
-    return frame;
-  }
-
-  /**
-   * 悬停实时预览：进入封面 300ms 后页面匀速自动向下翻（循环）。
-   *
-   * 没有自定义封面的卡片，封面本身就是 .mcover（站点顶部实时画面）——
-   * 悬停时同一个 iframe 原地开始翻，移开后停在顶部继续当封面，所见即所得；
-   * 自定义图封面的卡片没有 .mcover，才临时新建 .peek，移开即摘掉。
-   *
-   * 技术要点：沙箱 iframe（不给 allow-same-origin）里父页面碰不到它的内部滚动，
-   * 所以服务端给带 ?mpcover=1 的入口页注入了一个滚动代理脚本，悬停时父页面
-   * postMessage 让文档自己往下滚——等价于真实浏览器窗口下翻，100vh 全屏
-   * 首屏的站点也能正常预览（离开时 mpPeekStop 回顶，封面继续显示首屏）。
-   * iframe 挂在封面 div 里（.vcover 自带 overflow:hidden），缩放多出的部分被裁掉，
-   * 不会盖住卡片的标题区；pointer-events:none 保证悬停事件照常触发。
+   * 悬停实时预览：进入封面 300ms 后挂 iframe，离开即销毁。
+   * iframe 直接指到真实的站点地址；站点页自身带 sandbox CSP，这里再加一层 sandbox 属性。
    */
   function attachPeek(card, site, cover) {
-    const target = cover || card;
-    let frame = null;    // 本次悬停用的 iframe（复用 .mcover 或新建 .peek）
-    let created = false; // 是否本次新建的（移开时要摘掉）
+    let iframe = null;
     let timer = null;
-    let kick = null;
-    let started = false;
-    /** 页面加载完（或 1.5s 兜底）才开始下翻：白屏翻动没有意义。 */
-    const start = () => {
-      if (started || !frame) return;
-      const scale = target.clientWidth / COVER_VW;
-      if (!scale) return;
-      started = true;
-      // 下翻 = 驱动 iframe 内部文档滚动；速度换算成虚拟像素，滚动手感与缩放无关
-      try {
-        frame.contentWindow.postMessage({ mpPeekSpeed: Math.round(COVER_SPEED / scale) }, '*');
-      } catch (e) { /* iframe 尚未就绪，交给 mpReady 握手补发 */ }
-    };
-    /** 悬停 300ms 后才开始：防止鼠标扫过卡片时一路触发。 */
     const open = () => {
       timer = setTimeout(() => {
-        const scale = target.clientWidth / COVER_VW;
-        if (!scale) return;
-        started = false;
-        frame = target.querySelector('iframe.mcover');
-        if (frame) {
-          // 封面 iframe 可能还在加载，load 后（或 1.5s 兜底）再翻
-          if (frame.dataset.loaded === '1') {
-            start();
-          } else {
-            // 懒加载还没触发（后台窗口等），悬停当场载入
-            if (frame.arm) frame.arm();
-            frame.addEventListener('load', start, { once: true });
-            kick = setTimeout(start, 1500);
-          }
-        } else {
-          created = true;
-          const f = document.createElement('iframe');
-          f.className = 'peek';
-          f.loading = 'lazy';
-          f.referrerPolicy = 'no-referrer';
-          f.sandbox = 'allow-scripts';
-          f.src = '/' + encodeURIComponent(site.name) + '/?mpcover=1';
-          f.style.width = COVER_VW + 'px';
-          f.style.height = COVER_VH + 'px';
-          f.style.transformOrigin = '0 0';
-          f.style.transform = 'scale(' + scale + ')';
-          target.appendChild(f);
-          frame = f;
-          f.addEventListener('load', start, { once: true });
-          kick = setTimeout(start, 1500);
-        }
+        iframe = document.createElement('iframe');
+        iframe.className = 'peek';
+        iframe.loading = 'lazy';
+        iframe.referrerPolicy = 'no-referrer';
+        iframe.sandbox = 'allow-scripts';
+        iframe.src = siteUrl(site) + '/';
+        card.appendChild(iframe);
       }, 300);
     };
-    /** 离开封面：让内部滚动停下并回顶；新建的 .peek 摘掉，复用的 .mcover 留着当封面。 */
     const close = () => {
       clearTimeout(timer);
-      clearTimeout(kick);
-      started = false;
-      if (frame) {
-        try { frame.contentWindow.postMessage({ mpPeekStop: 1 }, '*'); } catch (e) { /* ignore */ }
-      }
-      if (frame && created) frame.remove();
-      frame = null;
-      created = false;
+      if (iframe) { iframe.remove(); iframe = null; }
     };
-    // 注入的滚动代理就绪后会广播 mpReady；若 start() 发速度时代理还没跑起来
-    // （load / 1.5s 兜底都可能早于它执行，消息会丢），就绪这一刻把速度补发一次
-    window.addEventListener('message', (e) => {
-      const w = frame && frame.contentWindow;
-      if (started && w && e.source === w && e.data && e.data.mpReady) {
-        try {
-          const scale = target.clientWidth / COVER_VW;
-          w.postMessage({ mpPeekSpeed: Math.round(COVER_SPEED / scale) }, '*');
-        } catch (err) { /* ignore */ }
-      }
-    });
-    target.addEventListener('mouseenter', open);
-    target.addEventListener('mouseleave', close);
+    (cover || card).addEventListener('mouseenter', open);
+    card.addEventListener('mouseleave', close);
   }
   MP.attachPeek = attachPeek;
 
@@ -811,11 +745,6 @@
      7. 轻提示
      ---------------------------------------------------------- */
 
-  /**
-   * 页内轻提示：页面顶部居中显示一行字，1.8 秒后淡出。
-   * 节点是单例（#mpToast），连着调用只换文字并重新计时，不会叠出好几个；
-   * 它带 pointer-events:none，所以盖在什么东西上都不挡点击。没有返回值。
-   */
   MP.toast = function (msg) {
     let el = document.getElementById('mpToast');
     if (!el) {
@@ -831,437 +760,4 @@
     clearTimeout(el._t);
     el._t = setTimeout(() => { el.style.opacity = '0'; }, 1800);
   };
-
-  /* ----------------------------------------------------------
-     8. 当前登录态
-     ---------------------------------------------------------- */
-
-  // undefined = 还没请求过。请求一次后缓存，避免同一页面重复打接口。
-  let sessionCache;
-
-  /**
-   * 读取当前会话：{ user, unread, unreadMessages }。
-   *   user          为 null 表示未登录
-   *   unread        未读「动态」（通知）
-   *   unreadMessages 未读「消息」（私信）
-   * 请求失败按未登录处理，不抛错。
-   * @returns {Promise<{user:object|null, unread:number, unreadMessages:number}>}
-   */
-  MP.session = async function () {
-    if (sessionCache !== undefined) return sessionCache;
-
-    try {
-      const res = await fetch('/api/me', { headers: { Accept: 'application/json' } });
-      const data = await res.json();
-      sessionCache = {
-        user: data && data.user ? data.user : null,
-        unread: Number(data && data.unread) || 0,
-        unreadMessages: Number(data && data.unreadMessages) || 0,
-      };
-    } catch {
-      sessionCache = { user: null, unread: 0, unreadMessages: 0 };
-    }
-
-    return sessionCache;
-  };
-
-  /** 只取用户对象；未登录返回 null。 */
-  MP.me = async function () {
-    return (await MP.session()).user;
-  };
-
-  /** 丢弃缓存（退出登录、改完用户名之后调用）。 */
-  MP.forgetSession = function () {
-    sessionCache = undefined;
-  };
-
-  /* ----------------------------------------------------------
-     9. 登录弹窗
-     ---------------------------------------------------------- */
-
-  // 要求：所有「需要登录」的入口都在当前页上弹窗，不跳转页面；
-  // 弹窗打开时，后面页面除滚轮外全部不可操作（由 .modal-mask 的
-  // position:fixed 挡住指针事件实现，且刻意不锁 body 滚动）。
-
-  /**
-   * 需要登录才能用的路径。
-   * 这份清单必须与服务端守卫保持一致——tests/scripts/e2e-auth.mjs
-   * 会拿真实的匿名请求结果来核对，防止两边漂移。
-   */
-  const LOGIN_REQUIRED = [
-    /^\/sites(\/|$)/,
-    /^\/upload(\/|$)/,
-    /^\/account(\/|$)/,
-    /^\/settings(\/|$)/,
-    /^\/edit\//,
-    /^\/admin(\/|$)/,
-    /^\/messages(\/|$)/,
-    /^\/notifications(\/|$)/,
-    /^\/favorites(\/|$)/,
-    /^\/history(\/|$)/,
-  ];
-
-  /**
-   * 这个链接是不是「必须登录」的路径：参数是页面里的原始 href（形如 /messages，不是绝对 URL）。
-   * 清单必须与服务端守卫一致 —— 客户端少了会直接跳转，服务端少了等于没保护。
-   */
-  function needsLogin(href) {
-    return LOGIN_REQUIRED.some((re) => re.test(href.split(/[?#]/, 1)[0]));
-  }
-
-  /** 登录 / 注册表单的标记。弹窗和 /login 页共用同一份。 */
-  const AUTH_FORM_HTML = ''
-    + '<div class="modal-tabs" role="tablist">'
-    +   '<button type="button" class="mtab on" data-tab="login" role="tab" aria-selected="true">登录</button>'
-    +   '<button type="button" class="mtab" data-tab="register" role="tab" aria-selected="false">注册</button>'
-    + '</div>'
-    + '<form class="auth-login" novalidate>'
-    +   '<label class="field"><span class="label">邮箱或用户名</span>'
-    +     '<input name="loginId" type="text" autocomplete="username" placeholder="you@example.com"></label>'
-    +   '<label class="field"><span class="label">密码 <a class="forgot" href="/forgot">忘记密码？</a></span>'
-    +     '<input name="loginPassword" type="password" autocomplete="current-password" placeholder="请输入密码"></label>'
-    +   '<button type="submit" class="mbtn primary">登 录</button>'
-    +   '<p class="mswitch">还没有账号？<a href="#" data-goto="register">立即注册</a></p>'
-    + '</form>'
-    + '<form class="auth-register" novalidate hidden>'
-    +   '<label class="field"><span class="label">邮箱</span>'
-    +     '<input name="registerEmail" type="email" autocomplete="email" placeholder="you@example.com"></label>'
-    +   '<label class="field"><span class="label">邮箱验证码</span>'
-    +     '<span class="code-row">'
-    +       '<input name="registerCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位数字">'
-    +       '<button type="button" class="mbtn ghost" data-send-code disabled>发送验证码</button>'
-    +     '</span>'
-    +     '<span class="hint" data-code-hint>先填邮箱，再点「发送验证码」</span></label>'
-    +   '<label class="field"><span class="label">密码</span>'
-    +     '<input name="registerPassword" type="password" autocomplete="new-password" placeholder="至少 6 位">'
-    +     '<span class="hint">至少 6 位</span></label>'
-    +   '<button type="submit" class="mbtn primary">注 册</button>'
-    +   '<p class="mswitch">已有账号？<a href="#" data-goto="login">去登录</a></p>'
-    + '</form>'
-    + '<div class="result" data-msg hidden></div>';
-
-  /**
-   * 把登录 / 注册表单渲染进 container 并接好逻辑。
-   * 抽出来是为了让弹窗与 /login 页共用同一份实现，避免两份逻辑漂移。
-   *
-   * @param {HTMLElement} container
-   * @param {{initialTab?: 'login'|'register', onSuccess?: (user:object)=>void}} [opts]
-   */
-  function mountAuthForm(container, opts) {
-    const o = opts || {};
-    container.innerHTML = AUTH_FORM_HTML;
-
-    const tabLogin = container.querySelector('[data-tab="login"]');
-    const tabReg = container.querySelector('[data-tab="register"]');
-    const loginForm = container.querySelector('.auth-login');
-    const regForm = container.querySelector('.auth-register');
-    const msg = container.querySelector('[data-msg]');
-
-    /** 在表单下方显示一行结果：ok 决定用成功样式还是错误样式，text 作为纯文本写入。 */
-    function showMsg(ok, text) {
-      msg.hidden = false;
-      msg.className = 'result ' + (ok ? 'ok' : 'err');
-      msg.textContent = text;
-    }
-
-    /**
-     * 切换登录 / 注册页签：显示对应表单、同步 aria-selected、顺手清掉上一条结果提示。
-     * 只切显示，不清空另一个表单已填的内容（来回切不丢输入）；除 'register' 以外的值都按登录处理。
-     * 切换后会向 container 派发冒泡的 'auth:tab' 事件，弹窗靠它把标题改成注册 / 登录。
-     */
-    function switchTab(which) {
-      const isLogin = which !== 'register';
-      tabLogin.classList.toggle('on', isLogin);
-      tabReg.classList.toggle('on', !isLogin);
-      tabLogin.setAttribute('aria-selected', isLogin ? 'true' : 'false');
-      tabReg.setAttribute('aria-selected', isLogin ? 'false' : 'true');
-      loginForm.hidden = !isLogin;
-      regForm.hidden = isLogin;
-      msg.hidden = true;
-      container.dispatchEvent(new CustomEvent('auth:tab', { detail: which, bubbles: true }));
-    }
-
-    tabLogin.addEventListener('click', () => switchTab('login'));
-    tabReg.addEventListener('click', () => switchTab('register'));
-    container.querySelectorAll('[data-goto]').forEach((a) => {
-      a.addEventListener('click', (e) => { e.preventDefault(); switchTab(a.dataset.goto); });
-    });
-
-    /**
-     * 往鉴权接口发 JSON POST 并解析 JSON 返回。
-     * 不看 HTTP 状态码：业务失败也是 200 + { ok:false, message }，由调用方判 data.ok；
-     * 网络异常或响应不是 JSON 时会抛，调用方要自己 catch（现在每个调用点都有 try/catch）。
-     */
-    async function post(url, payload) {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      return res.json();
-    }
-
-    /**
-     * 登录 / 注册成功后的公共收尾：先让会话缓存作废（否则顶栏还按未登录渲染），
-     * 再把用户对象交给调用方 —— 弹窗就是在这个回调里关掉自己并跳转 / 刷新页面的。
-     */
-    function done(user) {
-      // 会话变了，丢掉缓存，免得顶栏还显示旧状态
-      MP.forgetSession();
-      if (o.onSuccess) o.onSuccess(user);
-    }
-
-
-    loginForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const btn = loginForm.querySelector('button[type="submit"]');
-      btn.disabled = true;
-      try {
-        const data = await post('/api/auth/login', {
-          login: loginForm.elements.loginId.value,
-          password: loginForm.elements.loginPassword.value,
-        });
-        if (data.ok) {
-          showMsg(true, '登录成功…');
-          done(data.user);
-        } else {
-          showMsg(false, data.message || '登录失败');
-        }
-      } catch (err) {
-        showMsg(false, '网络出问题了：' + err.message);
-      } finally {
-        btn.disabled = false;
-      }
-    });
-
-    const sendBtn = regForm.querySelector('[data-send-code]');
-    const codeHint = regForm.querySelector('[data-code-hint]');
-    const emailInput = regForm.elements.registerEmail;
-    /** 邮箱格式粗校验，只用来控制「发送验证码」按不按得动；真正的校验在服务端。 */
-    const emailOk = () => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailInput.value.trim());
-
-    let countdown = 0;
-    let timer = null;
-
-    /**
-     * 验证码发出去之后的重发倒计时：按钮禁用、每秒改一次文案，归零后按邮箱是否合法恢复可点。
-     * 陷阱：它只覆盖闭包里的 timer，倒计时没走完再调一次会同时跑两个 interval
-     *（目前撞不上，倒计时期间按钮是禁用的）；要提前收尾只能用返回的 destroy()，而且只清得掉最后一个。
-     */
-    function startCountdown(seconds) {
-      countdown = seconds;
-      sendBtn.disabled = true;
-      timer = setInterval(() => {
-        countdown -= 1;
-        if (countdown <= 0) {
-          clearInterval(timer);
-          sendBtn.disabled = !emailOk();
-          sendBtn.textContent = '重新发送';
-        } else {
-          sendBtn.textContent = countdown + ' 秒';
-        }
-      }, 1000);
-    }
-
-    emailInput.addEventListener('input', () => {
-      if (countdown <= 0) sendBtn.disabled = !emailOk();
-    });
-
-    sendBtn.addEventListener('click', async () => {
-      if (!emailOk()) { showMsg(false, '先填一个正确的邮箱'); return; }
-      sendBtn.disabled = true;
-      try {
-        const data = await post('/api/auth/send-code', {
-          purpose: 'register',
-          email: emailInput.value.trim(),
-        });
-        if (data.ok) {
-          codeHint.textContent = data.dev
-            ? '验证码已生成（未配置 SMTP，请到服务器控制台查看）'
-            : '验证码已发送，10 分钟内有效';
-          startCountdown(60);
-        } else {
-          codeHint.textContent = data.message || '发送失败';
-          sendBtn.disabled = false;
-        }
-      } catch (err) {
-        codeHint.textContent = '网络出问题了：' + err.message;
-        sendBtn.disabled = false;
-      }
-    });
-
-    regForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const btn = regForm.querySelector('button[type="submit"]');
-      btn.disabled = true;
-
-      if (!/^\d{6}$/.test(regForm.elements.registerCode.value.trim())) {
-        showMsg(false, '请输入 6 位邮箱验证码');
-        btn.disabled = false;
-        return;
-      }
-
-      try {
-        const data = await post('/api/auth/register', {
-          email: emailInput.value.trim(),
-          code: regForm.elements.registerCode.value.trim(),
-          password: regForm.elements.registerPassword.value,
-        });
-        if (data.ok) {
-          showMsg(true, '注册成功…');
-          done(data.user);
-        } else {
-          showMsg(false, data.message || '注册失败');
-        }
-      } catch (err) {
-        showMsg(false, '网络出问题了：' + err.message);
-      } finally {
-        btn.disabled = false;
-      }
-    });
-
-    switchTab(o.initialTab === 'register' ? 'register' : 'login');
-
-    return {
-      switchTab,
-      destroy() { if (timer) clearInterval(timer); },
-    };
-  }
-
-  // 同一时刻只允许一个登录弹窗
-  let authModal = null;
-
-  /**
-   * 在当前页弹出登录窗。
-   * @param {{next?: string}} [opts] next 是登录成功后要去的地址；
-   *        留空则留在当前页并刷新。
-   *
-   * 同一时刻只认一个弹窗：已经开着就直接把原来那个返回（顺手聚焦第一个输入框），
-   * 不会再建第二个，新传的 next 也会被忽略。
-   */
-  function openLoginModal(opts) {
-    const o = opts || {};
-    if (authModal) {
-      const focus = authModal.querySelector('input');
-      if (focus) focus.focus();
-      return authModal;
-    }
-
-    const mask = document.createElement('div');
-    mask.className = 'modal-mask';
-    mask.innerHTML = ''
-      + '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="mpAuthTitle">'
-      +   '<button class="modal-x" type="button" data-close aria-label="关闭">×</button>'
-      +   '<h2 class="modal-title" id="mpAuthTitle">登录 MinePage</h2>'
-      +   '<div data-form></div>'
-      +   '<p class="modal-foot">登录即代表你同意 <a href="#">用户协议</a> 与 <a href="#">隐私政策</a></p>'
-      + '</div>';
-
-    document.body.appendChild(mask);
-    authModal = mask;
-
-    const titleEl = mask.querySelector('#mpAuthTitle');
-    mask.addEventListener('auth:tab', (e) => {
-      titleEl.textContent = e.detail === 'register' ? '注册 MinePage' : '登录 MinePage';
-    });
-
-    mountAuthForm(mask.querySelector('[data-form]'), {
-      onSuccess(user) {
-        closeLoginModal();
-        if (o.next) { location.href = o.next; return; }
-        // 没指定去处：刷新当前页，让内容和顶栏都反映登录后的状态
-        location.reload();
-      },
-    });
-
-    mask.querySelector('[data-close]').addEventListener('click', () => closeLoginModal());
-    // 刻意不做「点遮罩空白就关闭」：
-    //   1. 与 B 站的登录弹窗一致（它只有 X 能关）；
-    //   2. 要求是「除滚轮外其他都不可操作」，点外面不该产生任何效果；
-    //   3. 用户可能已经填了邮箱和密码，误点外面丢掉太亏。
-    // 关闭方式只有两个：右上角 X，以及 Esc。
-
-    /** Esc 关闭用：监听挂在 document 上，句柄存在弹窗元素上，由 closeLoginModal 负责摘掉。 */
-    const onKey = (e) => { if (e.key === 'Escape') closeLoginModal(); };
-    mask.__onKey = onKey;
-    document.addEventListener('keydown', onKey);
-
-    // 刻意不锁 body 滚动：要求是「除滚轮外都不可操作」。
-    // 遮罩是 fixed 且自身不滚动，滚轮会冒泡到文档，后面页面照常滚。
-    const first = mask.querySelector('input');
-    if (first) setTimeout(() => first.focus(), 30);
-
-    return mask;
-  }
-
-  /**
-   * 关闭登录弹窗：摘掉 Esc 监听并移除遮罩；没有弹窗时什么都不做。
-   * 要关弹窗请走 MP.auth.close（就是这个函数），别自己删 .modal-mask：
-   * authModal 这个单例标记会留在原地，之后再点登录会被当成「已经开着」而直接返回。
-   */
-  function closeLoginModal() {
-    if (!authModal) return;
-    if (authModal.__onKey) document.removeEventListener('keydown', authModal.__onKey);
-    authModal.remove();
-    authModal = null;
-  }
-
-  /**
-   * 全局点击拦截：需要登录的链接在未登录时改为弹窗，而不是跳转页面。
-   *
-   * 关键点：preventDefault() 必须同步调用，而会话检查是异步的。
-   * 所以策略是「先一律拦住，拿到会话之后再决定跳转还是弹窗」。
-   *
-   * 它注册在捕获阶段，会比页面里自己的 click 处理器先跑，所以开头要先看 e.defaultPrevented：
-   * 已经被别人处理过的点击，这里不再插手。
-   * 带修饰键的点击（新标签页 / 下载）、# 锚点、http(s): 等外链一律放过，交给浏览器原生行为。
-   * 整个文档只装一次（用 window.__mpAuthGuard 做标记），重复调用直接返回。
-   */
-  function installAuthGuard() {
-    if (window.__mpAuthGuard) return;
-    window.__mpAuthGuard = true;
-
-    document.addEventListener('click', (e) => {
-      if (e.defaultPrevented || e.button !== 0) return;
-      // 带修饰键的点击（新标签页、下载等）保持浏览器原生行为
-      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-
-      const target = e.target instanceof Element ? e.target : e.target.parentElement;
-      if (!target) return;
-
-      // 显式要求登录的触发器（顶栏「登录 / 注册」）
-      const opener = target.closest('[data-auth-open]');
-      if (opener) {
-        e.preventDefault();
-        openLoginModal({ next: opener.getAttribute('data-auth-next') || '' });
-        return;
-      }
-
-      const link = target.closest('a[href]');
-      if (!link) return;
-
-      const href = link.getAttribute('href');
-      if (!href || href.charAt(0) === '#' || /^[a-z][a-z0-9+.-]*:/i.test(href)) return;
-      if (!needsLogin(href)) return;
-
-      e.preventDefault();
-      MP.session()
-        .then((session) => {
-          if (session.user) { location.href = href; return; }
-          openLoginModal({ next: href });
-        })
-        .catch(() => { location.href = href; });
-    }, true);
-  }
-
-  MP.auth = {
-    LOGIN_REQUIRED,
-    needsLogin,
-    mountForm: mountAuthForm,
-    openLogin: openLoginModal,
-    close: closeLoginModal,
-  };
-
-  // 每个加载了 app.js 的页面都装上拦截
-  installAuthGuard();
 })();
