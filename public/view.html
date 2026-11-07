@@ -85,6 +85,7 @@ let me = null;          // 真实登录态（未登录为 null）—— 不再�
 let following = false;
 let liked = false;
 let favored = false;
+let folder = null;      // 收藏所在的收藏夹名（未收藏为 null）
 let coined = false;
 
 // 互动数字。`likes` / `favorites` / `comments` 来自后端；
@@ -203,37 +204,166 @@ async function toggleLike() {
 }
 
 /**
- * 收藏 / 取消收藏 —— 接真实接口，套路与 toggleLike 相同。
+ * 收藏 —— 先弹收藏夹选择器，点哪个夹子就收进哪个；已收藏时再选一次等于换夹。
+ * 选择器里还能新建收藏夹（POST /api/favorite-folders）和取消收藏。
  *
- * 契约：`POST /api/sites/:name/favorite` → `{ok, favorited: true, favorites: N}`；
- *      `DELETE` 同路径 → `{ok, favorited: false, favorites: N}`。
- *
- * 注意两个坑：
- *   ① POST 必须带个 `{}` body —— 后端 readJsonBody 对空 body 会 JSON.parse('') 直接 400；
- *      不传 folder 就落到后端的「默认收藏夹」。
- *   ② 451 已下线站点不能收藏（后端校验），但取消收藏不校验 —— 跟点赞一个脾气。
+ * 契约：`POST /api/sites/:name/favorite` body `{folder}` → `{ok, favorited, folder, favorites}`；
+ *      `DELETE` 同路径 → `{ok, favorited: false, favorites}`。
  */
 async function toggleFavorite() {
-  const res = await fetch('/api/sites/' + enc(SITE) + '/favorite', {
-    method: favored ? 'DELETE' : 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: favored ? undefined : '{}',
-  });
-  const data = await res.json().catch(() => null);
-
-  if (res.status === 401) {
-    MP.toast('登录后才能收藏');
-    MP.auth.openLogin({});
+  let folders;
+  try {
+    const res = await fetch('/api/favorite-folders', { headers: { Accept: 'application/json' } });
+    const data = await res.json().catch(() => null);
+    if (res.status === 401) {
+      MP.toast('登录后才能收藏');
+      MP.auth.openLogin({});
+      return;
+    }
+    if (!res.ok || !data || !data.ok) {
+      MP.toast((data && data.message) || '加载收藏夹失败，稍后再试');
+      return;
+    }
+    folders = data.folders || [];
+  } catch {
+    MP.toast('连不上服务器，稍后再试');
     return;
   }
-  if (!res.ok || !data || !data.ok) {
-    MP.toast((data && data.message) || '操作失败，稍后再试');
-    return;
+  openFavPicker(folders);
+}
+
+/** 打开收藏夹选择弹窗。folders 是 [{name, count}]。 */
+function openFavPicker(folders) {
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  mask.innerHTML = '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="favTitle">'
+    + '<button class="modal-x" type="button" aria-label="关闭">×</button>'
+    + '<h2 class="modal-title" id="favTitle">收藏到…</h2>'
+    + '<div class="folderPick"></div>'
+    + '<div class="folderNew">'
+    +   '<input type="text" maxlength="50" autocomplete="off" placeholder="新建收藏夹，例如：设计灵感">'
+    +   '<button class="mbtn ghost" type="button" data-create>新建</button>'
+    + '</div>'
+    + '<button class="mbtn ghost" type="button" data-unfav>取消收藏</button>'
+    + '</div>';
+
+  const modal = mask.querySelector('.modal');
+  const list = mask.querySelector('.folderPick');
+  const input = mask.querySelector('input');
+  const unfavBtn = mask.querySelector('[data-unfav]');
+  unfavBtn.hidden = !favored;
+
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    mask.remove();
+  };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+
+  const renderList = () => {
+    list.textContent = '';
+    if (!folders.length) {
+      list.innerHTML = '<div class="empty">还没有收藏夹，先在下面新建一个</div>';
+      return;
+    }
+    folders.forEach((f) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'fp' + (favored && f.name === folder ? ' on' : '');
+      btn.innerHTML = '<span>' + MP.esc(f.name) + '</span><span class="ct">' + MP.fmtNum(f.count || 0) + ' 个</span>';
+      btn.addEventListener('click', () => saveToFolder(f.name));
+      list.appendChild(btn);
+    });
+  };
+
+  /** 收藏 / 换夹，成功后关弹窗。 */
+  async function saveToFolder(name) {
+    try {
+      const res = await fetch('/api/sites/' + enc(SITE) + '/favorite', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder: name }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.status === 401) {
+        close();
+        MP.toast('登录后才能收藏');
+        MP.auth.openLogin({});
+        return;
+      }
+      if (!res.ok || !data || !data.ok) {
+        MP.toast((data && data.message) || '操作失败，稍后再试');
+        return;
+      }
+      favored = true;
+      folder = data.folder || name;
+      stats.favorites = data.favorites;
+      renderBar();
+      close();
+      MP.toast('已收藏到「' + folder + '」');
+    } catch {
+      MP.toast('连不上服务器，稍后再试');
+    }
   }
 
-  favored = data.favorited;
-  stats.favorites = data.favorites;
-  renderBar();
+  /** 取消收藏（按钮只在已收藏时出现）。 */
+  async function unfavorite() {
+    try {
+      const res = await fetch('/api/sites/' + enc(SITE) + '/favorite', {
+        method: 'DELETE',
+        headers: { Accept: 'application/json' },
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || !data.ok) {
+        MP.toast((data && data.message) || '操作失败，稍后再试');
+        return;
+      }
+      favored = false;
+      folder = null;
+      stats.favorites = data.favorites;
+      renderBar();
+      close();
+      MP.toast('已取消收藏');
+    } catch {
+      MP.toast('连不上服务器，稍后再试');
+    }
+  }
+
+  /** 新建收藏夹并直接收进去。 */
+  async function createAndSave() {
+    const name = input.value.trim();
+    if (!name) {
+      MP.toast('收藏夹名字不能为空');
+      input.focus();
+      return;
+    }
+    try {
+      const res = await fetch('/api/favorite-folders', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || !data.ok) {
+        MP.toast((data && data.message) || '新建失败，稍后再试');
+        return;
+      }
+      folders = data.folders || folders;
+      await saveToFolder(data.name);
+    } catch {
+      MP.toast('连不上服务器，稍后再试');
+    }
+  }
+
+  modal.querySelector('.modal-x').addEventListener('click', close);
+  mask.addEventListener('mousedown', (e) => { if (e.target === mask) close(); });
+  modal.querySelector('[data-create]').addEventListener('click', createAndSave);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') createAndSave(); });
+  unfavBtn.addEventListener('click', unfavorite);
+  document.addEventListener('keydown', onKey);
+
+  renderList();
+  document.body.appendChild(mask);
+  if (!favored) input.focus();
 }
 
 /** 重新渲染底部吸附栏（互动状态变化时调用）。 */
@@ -259,9 +389,10 @@ function renderBar() {
     title: '投币是纯前端装饰，后端没有这个数据',
     click: () => { coined = !coined; stats.coins += coined ? 1 : -1; renderBar(); },
   }));
-  // 收藏：接真实接口（不传 folder，落到「默认收藏夹」）
+  // 收藏：点开收藏夹选择器（可换夹 / 新建夹 / 取消收藏）
   gLeft.appendChild(makeItem('fav', '收藏 ' + MP.fmtNum(stats.favorites), {
     on: favored,
+    title: favored ? '已收藏到「' + folder + '」，点击可换收藏夹' : '收藏到指定收藏夹',
     click: toggleFavorite,
   }));
 
@@ -621,6 +752,7 @@ async function boot() {
   };
   liked = !!s.liked;
   favored = !!s.favorited;
+  folder = s.folder || null;
 
   // 真实登录态 —— 后面判"是不是自己的站/评论"要用它
   me = await MP.me();

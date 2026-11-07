@@ -16,11 +16,13 @@
   <div class="msgLayout" style="margin-top:16px">
     <!-- 收藏夹分类 -->
     <div>
-      <div class="msgList" id="folders"></div>
-      <div class="panel" style="margin-top:12px">
-        <b style="display:block;margin-bottom:6px">收藏夹</b>
-        <p class="muted" style="font-size:12px;margin:0 0 0">收藏夹按收藏时的名字自动归组，目前收藏统一进「默认收藏夹」。</p>
+      <div class="panel" style="padding:12px 14px">
+        <div class="row" style="justify-content:space-between">
+          <b>收藏夹</b>
+          <button class="tiny ghost" type="button" id="newFolderBtn">＋ 新建</button>
+        </div>
       </div>
+      <div class="msgList" id="folders" style="margin-top:10px"></div>
     </div>
 
     <!-- 收藏内容 -->
@@ -29,6 +31,22 @@
         <h2 id="folderName">默认收藏夹</h2>
         <span class="muted" style="font-size:13px" id="folderCount"></span>
       </div>
+
+      <div class="row" id="folderOps" style="margin-top:6px;gap:8px">
+        <button class="tiny ghost" type="button" id="renameBtn">重命名</button>
+        <button class="tiny ghost" type="button" id="deleteBtn">删除收藏夹</button>
+        <button class="tiny ghost" type="button" id="selectBtn">批量操作</button>
+      </div>
+
+      <!-- 批量操作模式：勾选后可全选 / 取消收藏 / 移动到 -->
+      <div class="selBar" id="selBar" hidden>
+        <label class="selItem"><input type="checkbox" id="pickAll"> 全选</label>
+        <button class="selItem" type="button" id="removeBtn">取消收藏</button>
+        <button class="selItem" type="button" id="moveBtn">移动到</button>
+        <span class="selCount" id="pickCount">已选择 0 个页面</span>
+        <button class="selItem done" type="button" id="doneBtn">完成</button>
+      </div>
+
       <div class="cards" id="cards"></div>
     </div>
   </div>
@@ -39,113 +57,421 @@
 MP.topbar();
 
 // 数据全部来自真实接口：
-//   GET    /api/favorites                 我的收藏（平铺，按收藏时间倒序，≤100 条）
-//   DELETE /api/sites/:站名/favorite       取消收藏
-// 收藏夹在后端**没有实体表** —— folder 只是收藏记录上的一个文本列（收藏那一刻带上的，
-// 观看页收藏时不传就是「默认收藏夹」），所以分组在前端做：按 folder 字符串归堆。
-const FOLDERS = [];
+//   GET    /api/favorites                   我的收藏（平铺，按收藏时间倒序）+ 收藏夹清单
+//   POST   /api/favorites/batch             批量移动 / 批量取消收藏
+//   GET    /api/favorite-folders            收藏夹清单
+//   POST   /api/favorite-folders            新建收藏夹
+//   POST   /api/favorite-folders/rename     重命名收藏夹（夹内收藏一起改）
+//   DELETE /api/favorite-folders            删除收藏夹（只允许空夹子）
+//   DELETE /api/sites/:站名/favorite         取消单条收藏
+//
+// 收藏夹 = favorite_folders 表（空夹子也能存在、能改名）+ favorites.folder 文本列，
+// 两边靠名字对齐；本页只做「按名字归组」的展示。
 
-let cur = 0;
+const DEFAULT_FOLDER = '默认收藏夹';
+
+let FOLDERS = [];   // [{ name, count }]
+let SITES = [];     // 平铺收藏列表
+let curName = null; // 当前选中的收藏夹名字
+let selecting = false;     // 是否处于批量操作模式（默认不显示勾选框）
+const picked = new Set();  // 已勾选的站名（只在当前收藏夹内）
 
 const foldersBox = document.getElementById('folders');
 const cardsBox = document.getElementById('cards');
 const folderName = document.getElementById('folderName');
 const folderCount = document.getElementById('folderCount');
+const folderOps = document.getElementById('folderOps');
+const selBar = document.getElementById('selBar');
+const pickAll = document.getElementById('pickAll');
+const pickCount = document.getElementById('pickCount');
+const moveBtn = document.getElementById('moveBtn');
+const removeBtn = document.getElementById('removeBtn');
 
-/** 把接口的平铺收藏列表按 folder 归组；收藏夹按「最近一次收藏」排序，夹内保持倒序。 */
-function buildFolders(sites) {
-  const map = new Map();
-  sites.forEach((s) => {
-    const name = s.folder || '默认收藏夹';
-    if (!map.has(name)) map.set(name, []);
-    map.get(name).push(s);
+const curFolder = () => FOLDERS.find((f) => f.name === curName) ?? FOLDERS[0] ?? null;
+const sitesIn = (name) => SITES.filter((s) => (s.folder || DEFAULT_FOLDER) === name);
+
+/* ---------------------------------------------------------------- 通用弹窗 */
+
+/**
+ * 单行输入弹窗（新建 / 重命名收藏夹共用）。
+ * 返回 Promise<string|null>：确定返回去空白后的名字，取消 / 关闭返回 null。
+ */
+function askName(title, value) {
+  return new Promise((resolve) => {
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask';
+    mask.innerHTML = '<div class="modal" role="dialog" aria-modal="true">'
+      + '<button class="modal-x" type="button" aria-label="关闭">×</button>'
+      + '<h2 class="modal-title"></h2>'
+      + '<label class="field"><span class="label">收藏夹名字</span>'
+      + '<input type="text" maxlength="50" autocomplete="off" placeholder="例如：设计灵感"></label>'
+      + '<button class="mbtn primary" type="button">确定</button>'
+      + '</div>';
+
+    const modal = mask.querySelector('.modal');
+    modal.querySelector('.modal-title').textContent = title;
+    const input = modal.querySelector('input');
+    input.value = value || '';
+
+    const done = (v) => {
+      document.removeEventListener('keydown', onKey);
+      mask.remove();
+      resolve(v);
+    };
+    const submit = () => {
+      const name = input.value.trim();
+      if (!name) {
+        MP.toast('收藏夹名字不能为空');
+        input.focus();
+        return;
+      }
+      done(name);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') done(null); };
+
+    modal.querySelector('.modal-x').addEventListener('click', () => done(null));
+    modal.querySelector('.mbtn').addEventListener('click', submit);
+    mask.addEventListener('mousedown', (e) => { if (e.target === mask) done(null); });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+    document.addEventListener('keydown', onKey);
+
+    document.body.appendChild(mask);
+    input.focus();
+    input.select();
   });
-  return Array.from(map.entries())
-    .map(([name, arr]) => ({ name, sites: arr, latest: arr[0].favoritedAt }))
-    .sort((a, b) => b.latest - a.latest);
 }
 
 /**
- * 重建左侧收藏夹列表（当前收藏夹加高亮），预览显示每个夹子里前三位作者名。
- * 列表为空（一个收藏都没有）时显示空态文案。
+ * 收藏夹选择弹窗（批量「移动到」用）。
+ * 返回 Promise<string|null>：点某个夹子、或在底部输入新名字点「新建」都直接返回名字，取消返回 null。
  */
+function pickFolder(title) {
+  return new Promise((resolve) => {
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask';
+    mask.innerHTML = '<div class="modal" role="dialog" aria-modal="true">'
+      + '<button class="modal-x" type="button" aria-label="关闭">×</button>'
+      + '<h2 class="modal-title"></h2>'
+      + '<div class="folderPick"></div>'
+      + '<div class="folderNew">'
+      +   '<input type="text" maxlength="50" autocomplete="off" placeholder="新建收藏夹，例如：设计灵感">'
+      +   '<button class="mbtn ghost" type="button" data-create>新建</button>'
+      + '</div>'
+      + '</div>';
+
+    const modal = mask.querySelector('.modal');
+    const list = mask.querySelector('.folderPick');
+    const input = mask.querySelector('input');
+    modal.querySelector('.modal-title').textContent = title;
+
+    const done = (v) => {
+      document.removeEventListener('keydown', onKey);
+      mask.remove();
+      resolve(v);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') done(null); };
+    const create = () => {
+      const name = input.value.trim();
+      if (!name) {
+        MP.toast('收藏夹名字不能为空');
+        input.focus();
+        return;
+      }
+      done(name);
+    };
+
+    FOLDERS.forEach((f) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'fp';
+      btn.innerHTML = '<span>' + MP.esc(f.name) + '</span><span class="ct">' + sitesIn(f.name).length + ' 个</span>';
+      btn.addEventListener('click', () => done(f.name));
+      list.appendChild(btn);
+    });
+
+    modal.querySelector('.modal-x').addEventListener('click', () => done(null));
+    modal.querySelector('[data-create]').addEventListener('click', create);
+    mask.addEventListener('mousedown', (e) => { if (e.target === mask) done(null); });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') create(); });
+    document.addEventListener('keydown', onKey);
+
+    document.body.appendChild(mask);
+    input.focus();
+  });
+}
+
+/** 统一打接口：返回 data，失败弹提示并返回 null。 */
+async function call(url, opt) {
+  try {
+    const res = await fetch(url, {
+      headers: { Accept: 'application/json', ...(opt && opt.body ? { 'Content-Type': 'application/json' } : {}) },
+      ...opt,
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || !data.ok) {
+      MP.toast((data && data.message) || '操作失败，稍后再试');
+      return null;
+    }
+    return data;
+  } catch {
+    MP.toast('连不上服务器，稍后再试');
+    return null;
+  }
+}
+
+/* ---------------------------------------------------------------- 渲染 */
+
+/** 重建左侧收藏夹列表（当前收藏夹加高亮），预览显示每个夹子里前三位作者名。 */
 function renderFolders() {
   foldersBox.textContent = '';
   if (!FOLDERS.length) {
     foldersBox.innerHTML = '<div class="empty">还没有收藏</div>';
     return;
   }
-  FOLDERS.forEach((f, i) => {
+  FOLDERS.forEach((f) => {
+    const list = sitesIn(f.name);
     const item = document.createElement('div');
-    item.className = 'msgItem' + (i === cur ? ' on' : '');
+    item.className = 'msgItem' + (f.name === curName ? ' on' : '');
     item.innerHTML = '<span class="avatar sm">' + MP.esc(f.name[0]) + '</span>'
       + '<div class="mi"><div class="nm"><span>' + MP.esc(f.name) + '</span>'
-      + '<time>' + f.sites.length + '</time></div>'
-      + '<div class="pv">' + MP.esc(f.sites.map((s) => s.author.name).slice(0, 3).join('、')) + '</div></div>';
-    item.addEventListener('click', () => { cur = i; renderFolders(); renderSites(); });
+      + '<time>' + list.length + '</time></div>'
+      + '<div class="pv">' + MP.esc(list.map((s) => s.author.name).slice(0, 3).join('、') || '空收藏夹') + '</div></div>';
+    item.addEventListener('click', () => {
+      if (curName === f.name) return;
+      curName = f.name;
+      picked.clear();
+      renderFolders();
+      renderSites();
+    });
     foldersBox.appendChild(item);
   });
 }
 
-/**
- * 刷新右侧「当前收藏夹」的标题、条数和卡片区；卡片交给 app.js 的 MP.renderCards 渲染。
- * 卡片渲染完再往每张卡的 .vops 里补一个「移除」按钮（renderCards 本身不支持扩展按钮），
- * 点击调 DELETE /api/sites/:name/favorite，成功后整个列表重拉（收藏夹分组可能变化）。
- */
-function renderSites() {
-  const f = FOLDERS[cur];
-  if (!f) {
-    folderName.textContent = '';
-    folderCount.textContent = '';
-    cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">还没有收藏的页面，去观看页点「收藏」吧</div>';
-    return;
-  }
-  folderName.textContent = f.name;
-  folderCount.textContent = '共 ' + f.sites.length + ' 个页面';
-  MP.renderCards(cardsBox, f.sites);
+/** 切换「普通操作按钮」与「批量操作条」：批量模式下才显示勾选框和工具栏。 */
+function syncChrome() {
+  folderOps.hidden = selecting;
+  selBar.hidden = !selecting;
+}
 
+/** 刷新批量操作条：已选数量、全选状态、按钮可用性。 */
+function renderPickBar() {
+  const f = curFolder();
+  const total = f ? sitesIn(f.name).length : 0;
+  pickCount.textContent = '已选择 ' + picked.size + ' 个页面';
+  pickAll.checked = total > 0 && picked.size === total;
+  pickAll.indeterminate = picked.size > 0 && picked.size < total;
+  pickAll.disabled = total === 0;
+  moveBtn.disabled = picked.size === 0;
+  removeBtn.disabled = picked.size === 0;
+}
+
+/** 退出批量操作模式：收起工具栏、清掉勾选（不重新渲染卡片，由调用方决定）。 */
+function exitSelect() {
+  selecting = false;
+  picked.clear();
+  syncChrome();
+}
+
+/** 给卡片挂勾选框（renderCards 不支持扩展，渲染完再补）。 */
+function mountPickers(sites) {
   const cards = cardsBox.querySelectorAll('.vcard');
-  f.sites.forEach((s, i) => {
-    const ops = cards[i] && cards[i].querySelector('.vops');
-    if (!ops) return;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'op';
-    btn.title = '取消收藏';
-    btn.textContent = '移除';
-    btn.addEventListener('click', async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const res = await fetch('/api/sites/' + encodeURIComponent(s.name) + '/favorite', { method: 'DELETE' });
-      const d = await res.json().catch(() => null);
-      if (!res.ok || !d || !d.ok) {
-        MP.toast((d && d.message) || '移除失败，稍后再试');
-        return;
-      }
-      MP.toast('已取消收藏「' + (s.title || s.name) + '」');
-      boot();   // 重拉：当前夹可能变空、其它夹计数也会变
+  sites.forEach((s, i) => {
+    const card = cards[i];
+    if (!card) return;
+    card.classList.toggle('picked', picked.has(s.name));
+
+    const label = document.createElement('label');
+    label.className = 'pick';
+    label.title = '选中后可批量移动 / 取消收藏';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = picked.has(s.name);
+    box.addEventListener('change', () => {
+      if (box.checked) picked.add(s.name);
+      else picked.delete(s.name);
+      card.classList.toggle('picked', box.checked);
+      renderPickBar();
     });
-    ops.appendChild(btn);
+    label.appendChild(box);
+    card.appendChild(label);
   });
 }
 
-/** 启动：拉收藏列表并分组。失败时左侧/右侧显示空态（页面要登录，401 不会走到这里）。 */
-async function boot() {
-  try {
-    const res = await fetch('/api/favorites', { headers: { Accept: 'application/json' } });
-    const data = await res.json().catch(() => null);
-    if (res.ok && data && data.ok) {
-      FOLDERS.length = 0;
-      buildFolders(data.sites || []).forEach((f) => FOLDERS.push(f));
-      if (cur >= FOLDERS.length) cur = 0;
-    } else {
-      MP.toast((data && data.message) || '加载失败，稍后再试');
-    }
-  } catch {
-    MP.toast('连不上服务器，稍后再试');
+/** 刷新右侧「当前收藏夹」的标题、条数和卡片区。 */
+function renderSites() {
+  const f = curFolder();
+  if (!f) {
+    folderName.textContent = '';
+    folderCount.textContent = '';
+    cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">还没有收藏夹</div>';
+    selecting = false;
+    picked.clear();
+    syncChrome();
+    renderPickBar();
+    return;
   }
+
+  const list = sitesIn(f.name);
+  folderName.textContent = f.name;
+  folderCount.textContent = '共 ' + list.length + ' 个页面';
+
+  if (!list.length) {
+    cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">这个收藏夹还是空的，去观看页点「收藏」把页面放进来吧</div>';
+  } else {
+    MP.renderCards(cardsBox, list);
+    if (selecting) mountPickers(list);
+    // 每张卡补一个「移除」按钮（单条取消收藏）
+    const cards = cardsBox.querySelectorAll('.vcard');
+    list.forEach((s, i) => {
+      const ops = cards[i] && cards[i].querySelector('.vops');
+      if (!ops) return;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'op';
+      btn.title = '取消收藏';
+      btn.textContent = '移除';
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const data = await call('/api/sites/' + encodeURIComponent(s.name) + '/favorite', { method: 'DELETE' });
+        if (!data) return;
+        picked.delete(s.name);
+        MP.toast('已取消收藏「' + (s.title || s.name) + '」');
+        await boot();   // 重拉：当前夹可能变空、其它夹计数也会变
+      });
+      ops.appendChild(btn);
+    });
+  }
+
+  syncChrome();
+  renderPickBar();
+}
+
+/** 用接口返回的数据刷新整页。 */
+function applyData(sites, folders) {
+  SITES = sites || [];
+  FOLDERS = folders || [];
+  if (!FOLDERS.some((f) => f.name === curName)) curName = FOLDERS[0]?.name ?? null;
+  // 已经不存在的收藏从选中集合里剔掉
+  const names = new Set(SITES.map((s) => s.name));
+  Array.from(picked).forEach((n) => { if (!names.has(n)) picked.delete(n); });
   renderFolders();
   renderSites();
+}
+
+/* ---------------------------------------------------------------- 收藏夹管理 */
+
+document.getElementById('newFolderBtn').addEventListener('click', async () => {
+  const name = await askName('新建收藏夹', '');
+  if (!name) return;
+  const data = await call('/api/favorite-folders', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
+  if (!data) return;
+  curName = data.name;
+  exitSelect();
+  applyData(SITES, data.folders);
+  MP.toast('已新建收藏夹「' + data.name + '」');
+});
+
+document.getElementById('renameBtn').addEventListener('click', async () => {
+  const f = curFolder();
+  if (!f) return;
+  const name = await askName('重命名收藏夹', f.name);
+  if (!name || name === f.name) return;
+  const data = await call('/api/favorite-folders/rename', {
+    method: 'POST',
+    body: JSON.stringify({ from: f.name, to: name }),
+  });
+  if (!data) return;
+  curName = data.name;
+  applyData(SITES.map((s) => ((s.folder || DEFAULT_FOLDER) === f.name ? { ...s, folder: data.name } : s)), data.folders);
+  MP.toast('已改名为「' + data.name + '」');
+});
+
+document.getElementById('deleteBtn').addEventListener('click', async () => {
+  const f = curFolder();
+  if (!f) return;
+  if (sitesIn(f.name).length) {
+    MP.toast('收藏夹里还有页面，先移走或取消收藏再删');
+    return;
+  }
+  if (!window.confirm('确定删除空收藏夹「' + f.name + '」？')) return;
+  const data = await call('/api/favorite-folders', {
+    method: 'DELETE',
+    body: JSON.stringify({ name: f.name }),
+  });
+  if (!data) return;
+  curName = null;
+  applyData(SITES, data.folders);
+  MP.toast('已删除「' + f.name + '」');
+});
+
+/* ---------------------------------------------------------------- 批量操作 */
+
+document.getElementById('selectBtn').addEventListener('click', () => {
+  selecting = true;
+  picked.clear();
+  syncChrome();
+  renderSites();
+  MP.toast('勾选要处理的页面，或点「全选」');
+});
+
+document.getElementById('doneBtn').addEventListener('click', () => {
+  exitSelect();
+  renderSites();
+});
+
+pickAll.addEventListener('change', () => {
+  const f = curFolder();
+  if (!f) return;
+  picked.clear();
+  if (pickAll.checked) sitesIn(f.name).forEach((s) => picked.add(s.name));
+  renderFolders();
+  renderSites();
+});
+
+moveBtn.addEventListener('click', async () => {
+  if (!picked.size) return;
+  const folder = await pickFolder('移动到…');
+  if (!folder) return;
+  const count = picked.size;
+  const data = await call('/api/favorites/batch', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'move', sites: Array.from(picked), folder }),
+  });
+  if (!data) return;
+  curName = data.folder;
+  exitSelect();
+  applyData(data.sites, data.folders);
+  MP.toast('已把 ' + count + ' 个页面移到「' + data.folder + '」');
+});
+
+removeBtn.addEventListener('click', async () => {
+  if (!picked.size) return;
+  if (!window.confirm('确定取消收藏选中的 ' + picked.size + ' 个页面？')) return;
+  const count = picked.size;
+  const data = await call('/api/favorites/batch', {
+    method: 'POST',
+    body: JSON.stringify({ action: 'remove', sites: Array.from(picked) }),
+  });
+  if (!data) return;
+  exitSelect();
+  applyData(data.sites, data.folders);
+  MP.toast('已取消收藏 ' + count + ' 个页面');
+});
+
+/* ---------------------------------------------------------------- 启动 */
+
+/** 启动：拉收藏列表并分组。失败时显示空态（页面要登录，401 不会走到这里）。 */
+async function boot() {
+  const data = await call('/api/favorites');
+  if (data) applyData(data.sites, data.folders);
+  else {
+    renderFolders();
+    renderSites();
+  }
 }
 
 boot();

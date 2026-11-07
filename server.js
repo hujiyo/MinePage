@@ -83,10 +83,15 @@ import {
   countUnread,
   countUnreadMessages,
   clearHistory,
+  createFavoriteFolder,
   creatorPage,
   deleteComment,
+  deleteFavoriteFolder,
   discoverSites,
+  favoriteFolderExists,
   favoriteSite,
+  favoriteSiteIds,
+  FOLDER_NAME_MAX,
   followUser,
   getComment,
   hasFavorited,
@@ -97,14 +102,18 @@ import {
   listComments,
   listConversations,
   listFavorites,
+  listFavoriteFolders,
   listFollows,
   listHistory,
   listMessagesWith,
   listNotifications,
   markConversationRead,
   markNotificationsSeen,
+  moveFavorites,
   recordView,
+  removeFavorites,
   removeHistory,
+  renameFavoriteFolder,
   searchUsers,
   sendMessage,
   socialProfile,
@@ -1364,6 +1373,13 @@ async function handleSiteCommentDelete(req, res, [name, id]) {
   sendJson(res, 200, { ok: true, total: await countComments(site.id) });
 }
 
+/** 收藏夹名字：去空白后必须 1..FOLDER_NAME_MAX 字，不合法返回 null。 */
+function normalizeFolderName(value) {
+  const name = String(value ?? '').trim();
+  if (!name || name.length > FOLDER_NAME_MAX) return null;
+  return name;
+}
+
 async function handleSiteFavorite(req, res, [name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
@@ -1376,13 +1392,18 @@ async function handleSiteFavorite(req, res, [name]) {
 
   // 收藏夹用简单版：只存一个名字，不传就是「默认收藏夹」
   const folder = String(body.folder ?? '').trim() || '默认收藏夹';
-  if (folder.length > 50) {
-    sendJson(res, 400, { ok: false, message: '收藏夹名字最多 50 字' });
+  if (folder.length > FOLDER_NAME_MAX) {
+    sendJson(res, 400, { ok: false, message: `收藏夹名字最多 ${FOLDER_NAME_MAX} 字` });
     return;
   }
 
   await favoriteSite(site.id, user.id, folder);
-  sendJson(res, 200, { ok: true, favorited: true, favorites: await countFavorites(site.id) });
+  sendJson(res, 200, {
+    ok: true,
+    favorited: true,
+    folder,
+    favorites: await countFavorites(site.id),
+  });
 }
 
 async function handleSiteUnfavorite(req, res, [name]) {
@@ -1628,7 +1649,158 @@ async function handleFavoritesList(req, res) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  sendJson(res, 200, { ok: true, sites: withTagLabel(await listFavorites(user.id)) });
+  sendJson(res, 200, {
+    ok: true,
+    sites: withTagLabel(await listFavorites(user.id)),
+    folders: await listFavoriteFolders(user.id),
+  });
+}
+
+/** 收藏夹清单（我的收藏页左侧分类、观看页收藏选择器共用）。 */
+async function handleFavoriteFolders(req, res) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  sendJson(res, 200, { ok: true, folders: await listFavoriteFolders(user.id) });
+}
+
+/** 新建收藏夹。 */
+async function handleFavoriteFolderCreate(req, res) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const name = normalizeFolderName(body.name);
+  if (!name) {
+    sendJson(res, 400, { ok: false, message: `收藏夹名字不能为空，最多 ${FOLDER_NAME_MAX} 字` });
+    return;
+  }
+  if (await favoriteFolderExists(user.id, name)) {
+    sendJson(res, 409, { ok: false, message: '已经有同名收藏夹了' });
+    return;
+  }
+
+  await createFavoriteFolder(user.id, name);
+  sendJson(res, 200, { ok: true, name, folders: await listFavoriteFolders(user.id) });
+}
+
+/** 重命名收藏夹：夹子名和夹内收藏一起改。 */
+async function handleFavoriteFolderRename(req, res) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const from = normalizeFolderName(body.from);
+  const to = normalizeFolderName(body.to);
+  if (!from || !to) {
+    sendJson(res, 400, { ok: false, message: `收藏夹名字不能为空，最多 ${FOLDER_NAME_MAX} 字` });
+    return;
+  }
+  if (from === to) {
+    sendJson(res, 200, { ok: true, name: to, folders: await listFavoriteFolders(user.id) });
+    return;
+  }
+  if (!(await favoriteFolderExists(user.id, from))) {
+    sendJson(res, 404, { ok: false, message: '没有这个收藏夹' });
+    return;
+  }
+  if (await favoriteFolderExists(user.id, to)) {
+    sendJson(res, 409, { ok: false, message: '已经有同名收藏夹了' });
+    return;
+  }
+
+  await renameFavoriteFolder(user.id, from, to);
+  sendJson(res, 200, { ok: true, name: to, folders: await listFavoriteFolders(user.id) });
+}
+
+/** 删除收藏夹：只允许删空夹子，且至少保留一个。 */
+async function handleFavoriteFolderDelete(req, res) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const name = normalizeFolderName(body.name);
+  if (!name) {
+    sendJson(res, 400, { ok: false, message: '收藏夹名字不能为空' });
+    return;
+  }
+
+  const folders = await listFavoriteFolders(user.id);
+  const target = folders.find((f) => f.name === name);
+  if (!target) {
+    sendJson(res, 404, { ok: false, message: '没有这个收藏夹' });
+    return;
+  }
+  if (target.count > 0) {
+    sendJson(res, 400, { ok: false, message: '收藏夹里还有页面，先移走或取消收藏再删' });
+    return;
+  }
+  if (folders.length <= 1) {
+    sendJson(res, 400, { ok: false, message: '至少保留一个收藏夹' });
+    return;
+  }
+
+  await deleteFavoriteFolder(user.id, name);
+  sendJson(res, 200, { ok: true, folders: await listFavoriteFolders(user.id) });
+}
+
+/** 批量操作：把选中的收藏移到某个收藏夹（不存在就建），或批量取消收藏。 */
+async function handleFavoritesBatch(req, res) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const action = String(body.action ?? '');
+  const names = Array.isArray(body.sites) ? body.sites.map((n) => String(n)).slice(0, 200) : [];
+  if (!names.length) {
+    sendJson(res, 400, { ok: false, message: '先选中要操作的页面' });
+    return;
+  }
+
+  const siteIds = await favoriteSiteIds(user.id, names);
+  if (!siteIds.length) {
+    sendJson(res, 404, { ok: false, message: '选中的页面已经不在收藏里了' });
+    return;
+  }
+
+  if (action === 'move') {
+    const folder = normalizeFolderName(body.folder);
+    if (!folder) {
+      sendJson(res, 400, { ok: false, message: `收藏夹名字不能为空，最多 ${FOLDER_NAME_MAX} 字` });
+      return;
+    }
+    if (!(await favoriteFolderExists(user.id, folder))) await createFavoriteFolder(user.id, folder);
+    const moved = await moveFavorites(user.id, siteIds, folder);
+    sendJson(res, 200, {
+      ok: true,
+      moved,
+      folder,
+      sites: withTagLabel(await listFavorites(user.id)),
+      folders: await listFavoriteFolders(user.id),
+    });
+    return;
+  }
+
+  if (action === 'remove') {
+    const removed = await removeFavorites(user.id, siteIds);
+    sendJson(res, 200, {
+      ok: true,
+      removed,
+      sites: withTagLabel(await listFavorites(user.id)),
+      folders: await listFavoriteFolders(user.id),
+    });
+    return;
+  }
+
+  sendJson(res, 400, { ok: false, message: '不认识的批量操作' });
 }
 
 /** 用户搜索（搜索下拉的「用户」分区用）。 */
@@ -2042,6 +2214,11 @@ const ROUTES = [
   ['DELETE', /^\/api\/history$/, handleHistoryClear],
   ['DELETE', /^\/api\/history\/([a-z0-9-]+)$/, handleHistoryDelete],
   ['GET', /^\/api\/favorites$/, handleFavoritesList],
+  ['POST', /^\/api\/favorites\/batch$/, handleFavoritesBatch],
+  ['GET', /^\/api\/favorite-folders$/, handleFavoriteFolders],
+  ['POST', /^\/api\/favorite-folders$/, handleFavoriteFolderCreate],
+  ['POST', /^\/api\/favorite-folders\/rename$/, handleFavoriteFolderRename],
+  ['DELETE', /^\/api\/favorite-folders$/, handleFavoriteFolderDelete],
   ['GET', /^\/api\/messages$/, handleConversations],
   ['GET', /^\/api\/messages\/(\d+)$/, handleMessagesWith],
   ['POST', /^\/api\/messages\/(\d+)$/, handleMessageSend],
