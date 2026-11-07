@@ -149,7 +149,7 @@ function showMsg(ok, html) {
 // ---------------------------------------------------------------- 加载站点
 
 /**
- * 页面启动入口：GET /api/sites/:name（真实接口）取站点详情，填页头摘要、站点设置表单，
+ * 页面启动入口：GET /api/sites/:用户名/:站名（真实接口）取站点详情，填页头摘要、站点设置表单，
  * 再按 kind 决定显示「单页 HTML 编辑器」还是「多页文件列表」。
  * 地址里没有站名时只提示、不发请求；接口返回 !ok 时也只提示，此时全局 site 仍是 null
  * ——会写 site 的几个按钮（保存设置 / 保存单页 HTML / 上传文件）都在各自 hidden 的区块里，
@@ -391,7 +391,7 @@ document.getElementById('htmlSave').addEventListener('click', async (e) => {
 // ---------------------------------------------------------------- 多页：文件列表
 
 /**
- * GET /api/sites/:name/files（真实接口）拉多页站的文件列表，重建成表格：
+ * GET /api/sites/:用户名/:站名/files（真实接口）拉多页站的文件列表，重建成表格：
  * 每行是路径 / 大小 / 更新时间，加上现挂的「编辑」和「删除」按钮。
  * 列表为空时插一行 colSpan=4 的「还没有文件」占位；删除要先 confirm，成功后重新调本函数刷新。
  * 没有 try/catch，网络异常会变成未处理的 rejection。
@@ -483,7 +483,7 @@ function closeFileEditor() {
 }
 
 /**
- * 打开多页站某个文件的在线编辑器：GET /api/sites/:name/files/content（真实接口）取内容填进 textarea，
+ * 打开多页站某个文件的在线编辑器：GET /api/sites/:用户名/:站名/files/content（真实接口）取内容填进 textarea，
  * 并把面板滚进视野。路径读不到、或服务端标记 data.binary 时只提示、不改状态（编辑器不打开）。
  * 只有成功后才写全局 editingPath ——「保存文件」用它拼 URL，所以它等价于「当前在编辑哪个文件」。
  */

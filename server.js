@@ -139,6 +139,32 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 const SANDBOX_CSP =
   'sandbox allow-scripts allow-forms allow-popups allow-downloads allow-top-navigation-by-user-activation';
 
+// 迷你封面滚动代理：注入到带 ?mpcover=1 的入口页。
+// 封面 iframe 是沙箱（opaque origin），父页面摸不到它的内部滚动，
+// 只能 postMessage 让页面自己滚 —— 等价于真实浏览器窗口往下翻，
+// 「100vh 全屏首屏」这类内容高度跟着视口走的站点也能正常预览下翻。
+// mpPeekSpeed：匀速下翻（px/s，到底循环）；mpPeekStop：停下回顶；mpPeekTo：滚到指定位置。
+// 一律 behavior:'instant'：模板常设 scroll-behavior:smooth，平滑滚动既拖慢步进又会卡在半路。
+const MPEEK_PROXY =
+  '<script>(function(){var s=0,sp=0,raf=0,last=0;' +
+  'function tick(t){if(!sp)return;var dt=Math.min((t-last)/1000,0.1);last=t;' +
+  'var max=document.documentElement.scrollHeight-window.innerHeight;' +
+  'if(max<=0){raf=requestAnimationFrame(tick);return;}' +
+  's+=sp*dt;if(s>=max)s=0;window.scrollTo({top:s,behavior:"instant"});raf=requestAnimationFrame(tick);}' +
+  'window.addEventListener("message",function(e){var d=e.data||{};' +
+  'if(d.mpPeekSpeed!=null){sp=d.mpPeekSpeed;last=performance.now();if(sp&&!raf)raf=requestAnimationFrame(tick);}' +
+  'else if(d.mpPeekStop){sp=0;if(raf)cancelAnimationFrame(raf);raf=0;window.scrollTo({top:0,behavior:"instant"});}' +
+  'else if(d.mpPeekTo!=null){window.scrollTo({top:d.mpPeekTo,behavior:"instant"});}});' +
+  'if(window.parent!==window)parent.postMessage({mpReady:1},"*");})();</script>';
+
+// 把代理脚本插到最后一个 </body> 前，找不到就追加到末尾；Buffer 进 Buffer 出，string 进 string 出
+function injectPeekProxy(html) {
+  const s = html.toString('utf8');
+  const i = s.toLowerCase().lastIndexOf('</body');
+  const out = i === -1 ? s + MPEEK_PROXY : s.slice(0, i) + MPEEK_PROXY + s.slice(i);
+  return Buffer.isBuffer(html) ? Buffer.from(out, 'utf8') : out;
+}
+
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.htm': 'text/html; charset=utf-8',
@@ -192,6 +218,20 @@ function sendHtml(res, status, html, extraHeaders = {}) {
 function sendRedirect(res, location) {
   res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
   res.end();
+}
+
+/**
+ * 未登录访问需要登录的页面时的统一出口：带上 ?next= 让登录后能回到原处。
+ * 只回写 pathname + search（不带 origin），登录页那边也会校验必须是站内相对地址，
+ * 所以不存在开放重定向。
+ */
+function sendLoginRedirect(req, res) {
+  let target = '/';
+  try {
+    const u = new URL(req.url, 'http://internal');
+    target = u.pathname + u.search;
+  } catch { /* URL 解析不了就回首页 */ }
+  sendRedirect(res, '/login?next=' + encodeURIComponent(target));
 }
 
 // ---------------------------------------------------------------- 响应压缩（gzip）
@@ -392,7 +432,7 @@ async function handleLoginPage(req, res) {
 async function handleAdminPage(req, res) {
   const user = await currentUser(req);
   if (!user) {
-    sendRedirect(res, '/login');
+    sendLoginRedirect(req, res);
     return;
   }
   if (!user.isAdmin) {
@@ -404,7 +444,7 @@ async function handleAdminPage(req, res) {
 
 async function handleSettingsPage(req, res) {
   if (!(await currentUser(req))) {
-    sendRedirect(res, '/login');
+    sendLoginRedirect(req, res);
     return;
   }
   await sendPage(res, 'settings.html');
@@ -420,7 +460,7 @@ async function handleForgotPage(req, res) {
 
 async function handleAccountPage(req, res) {
   if (!(await currentUser(req))) {
-    sendRedirect(res, '/login');
+    sendLoginRedirect(req, res);
     return;
   }
   await sendPage(res, 'account.html');
@@ -429,7 +469,7 @@ async function handleAccountPage(req, res) {
 /** 页面管理页：站点列表 / 访问 / 编辑 / 删除。 */
 async function handleSitesPage(req, res) {
   if (!(await currentUser(req))) {
-    sendRedirect(res, '/login');
+    sendLoginRedirect(req, res);
     return;
   }
   await sendPage(res, 'sites.html');
@@ -438,7 +478,7 @@ async function handleSitesPage(req, res) {
 /** 站点管理编辑页（单页编辑 / 多页文件管理，也是未来智能体辅助编辑的挂载点）。 */
 async function handleSiteEditPage(req, res) {
   if (!(await currentUser(req))) {
-    sendRedirect(res, '/login');
+    sendLoginRedirect(req, res);
     return;
   }
   await sendPage(res, 'site.html');
@@ -1559,7 +1599,7 @@ async function handleNotificationsPage(req, res) {
 /** 我的收藏页。 */
 async function handleFavoritesPage(req, res) {
   if (!(await currentUser(req))) {
-    sendRedirect(res, '/login');
+    sendLoginRedirect(req, res);
     return;
   }
   await sendPage(res, 'favorites.html');
@@ -1568,7 +1608,7 @@ async function handleFavoritesPage(req, res) {
 /** 浏览历史页。 */
 async function handleHistoryPage(req, res) {
   if (!(await currentUser(req))) {
-    sendRedirect(res, '/login');
+    sendLoginRedirect(req, res);
     return;
   }
   await sendPage(res, 'history.html');
@@ -1577,7 +1617,7 @@ async function handleHistoryPage(req, res) {
 /** 私信页。 */
 async function handleMessagesPage(req, res) {
   if (!(await currentUser(req))) {
-    sendRedirect(res, '/login');
+    sendLoginRedirect(req, res);
     return;
   }
   await sendPage(res, 'messages.html');
@@ -2091,21 +2131,28 @@ async function handleSite(req, res, [username, name, rest = '']) {
   const entryPath = isRoot ? await pickEntryPath(site.id) : null;
   const filePath = isRoot ? entryPath : rest.slice(1);
   if (isRoot && (!url.pathname.endsWith('/') || filePath.includes('/'))) {
+    // 子目录入口要跳到「/前缀/用户名/站名/实际入口路径」，别把站点那一段弄丢
     const target = filePath.includes('/')
-      ? `/${USER_SPACE_PREFIX}/${username}/${filePath}`
+      ? `/${USER_SPACE_PREFIX}/${username}/${name}/${filePath}`
       : `/${USER_SPACE_PREFIX}/${username}/${name}/`;
     sendRedirect(res, target + url.search);
     return;
   }
 
   // 子目录入口经过重定向后是文件 URL，直接访问或刷新它仍算一次浏览。
-  const isEntryRequest = isRoot || (/\.html?$/i.test(filePath) && filePath === entryPath);
+  // 非根请求也要把入口找回来（isRoot 分支里已经算过，不重复查库）。
+  const isEntryRequest = isRoot
+    || (/\.html?$/i.test(filePath) && filePath === await pickEntryPath(site.id));
+
+  // 广场迷你封面专用（?mpcover=1）：给入口 HTML 注入滚动代理脚本，
+  // 父页面才能 postMessage 驱动内部下翻；/view/ 等直接访问不带参，不受影响
+  const forCover = isEntryRequest && url.searchParams.get('mpcover') === '1';
 
   const content = await getSiteFile(site.id, filePath);
   if (content) {
     // 浏览量简单版：只有入口页 +1，站内 css / js 等子资源不算
     if (isEntryRequest) await incrementViews(site.id);
-    serveSiteFile(req, res, filePath, content);
+    serveSiteFile(req, res, filePath, forCover && /\.html?$/i.test(filePath) ? injectPeekProxy(content) : content);
     return;
   }
 
@@ -2114,7 +2161,7 @@ async function handleSite(req, res, [username, name, rest = '']) {
     const legacy = await findSiteByUsername(username, name);
     if (legacy && legacy.html && legacy.html.trim() !== '') {
       await incrementViews(site.id);
-      sendHtml(res, 200, legacy.html, {
+      sendHtml(res, 200, forCover ? injectPeekProxy(legacy.html) : legacy.html, {
         'Content-Security-Policy': SANDBOX_CSP,
         'Cache-Control': 'no-cache',
       });

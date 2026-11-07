@@ -12,7 +12,7 @@
     <h1 style="margin:0">观看历史</h1>
     <button type="button" class="ghost tiny" id="clear">清空历史</button>
   </div>
-  <p class="sub" id="sub">最近看过的页面都在这里，只保留最近 30 天。</p>
+  <p class="sub" id="sub">最近看过的页面都在这里，最多保留 100 条。</p>
 
   <div id="groups"></div>
   <div id="empty" class="empty" hidden>还没有观看记录，去 <a href="/">首页</a> 逛逛吧。</div>
@@ -44,7 +44,7 @@ function render() {
   groupsBox.textContent = '';
   emptyBox.hidden = records.length > 0;
   subBox.textContent = records.length
-    ? '共 ' + records.length + ' 条记录。'
+    ? '共 ' + records.length + ' 条记录，最多保留 100 条。'
     : '还没有观看记录，去首页逛逛吧。';
 
   ['今天', '昨天', '更早'].forEach((label) => {

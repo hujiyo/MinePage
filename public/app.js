@@ -1,9 +1,9 @@
 /* ============================================================
    MinePage 前端公共脚本（app.js）
-   职责：图标库 / 统一顶栏 / 搜索下拉 / 卡片渲染 / 演示数据
+   职责：图标库 / 统一顶栏 / 搜索下拉 / 站点卡片（含实时封面）/ 轻提示
    ------------------------------------------------------------
-   当前为「纯前端阶段」：所有用户态与列表数据均为本地演示数据，
-   每处需要后端的地方都留了 TODO，后续接 /api/* 时逐个替换即可。
+   所有数据都来自服务端 /api/*，这里不再有演示数据。
+   页面脚本只按需调用 MP.*，不要把业务请求塞进这个文件。
    ============================================================ */
 
 (function () {
@@ -267,9 +267,11 @@
      3.1 标签
      ---------------------------------------------------------- */
 
-  // 与后端 lib/sites.js 的 SITE_TAGS 保持一致（key 存库，label 给人看）
+  // 与后端 lib/sites.js 的 SITE_TAGS 保持一致（key 存库，label 给人看）。
+  // 'hot' 是前端伪标签（服务端词表里没有），首页把它映射成 sort=views。
   const TAGS = [
     { key: '', label: '全部' },
+    { key: 'hot', label: '热门' },
     { key: 'resume', label: '求职简历' },
     { key: 'portfolio', label: '作品集' },
     { key: 'social', label: '社交聚合页' },
@@ -340,15 +342,14 @@
     return '';
   }
 
-  // 左侧导航只保留两个入口：收藏 / 历史已在右侧图标组里，不再重复
+  // 左侧导航只剩排行榜：首页由 logo 承担，收藏 / 历史已在右侧图标组里
   const NAVS = [
-    { key: 'home', label: '首页', href: '/' },
     { key: 'rank', label: '排行榜', href: '/?sort=rank' },
   ];
 
   // 顶栏「热门搜索」：后端没有热搜接口，先用内容标签的词，点了就是按词搜索。
-  // 有接口以后换成 GET /api/hot 的返回即可。
-  const HOT_WORDS = TAGS.filter((t) => t.key).map((t) => t.label);
+  // 'hot' 是伪标签不是真实分类，不能出现在这里。有接口以后换成 GET /api/hot。
+  const HOT_WORDS = TAGS.filter((t) => t.key && t.key !== 'hot').map((t) => t.label);
 
   /** 顶栏用户区。me 为 null 时显示「未登录」入口。 */
   function tuserHtml(me) {
@@ -388,7 +389,7 @@
 
     return ''
       + '<div class="tinner">'
-      +   '<a class="tlogo" href="/">' + icon('logo') + '<span class="tname">MinePage</span></a>'
+      +   '<a class="tlogo" href="/" title="首页">' + icon('logo') + '<span class="tname">MinePage</span></a>'
       +   '<nav class="tnav">' + nav + '</nav>'
       +   '<div class="tsearch" id="ts">'
       +     '<form class="tsForm" id="tsForm" autocomplete="off">'
@@ -617,6 +618,33 @@
       + (site.fileCount > 1
         ? '<span class="vkind">' + site.fileCount + ' 个文件</span>'
         : '');
+    // 封面两级：自定义上传图 > 迷你 iframe（站点顶部实时画面，即悬停下翻的起始画面）。
+    // img/iframe 插在最前（coverChar 是 static 会被盖住，角标是 absolute 自然浮在上面）；
+    // 自定义图加载失败就移除 img，露出渐变底完成回落。
+    if (site.hasCover && site.author && site.author.username) {
+      const img = document.createElement('img');
+      img.className = 'vimg';
+      img.alt = '';
+      img.referrerPolicy = 'no-referrer';
+      img.addEventListener('error', () => img.remove());
+      img.src = siteApi(site, '/cover');
+      cover.insertBefore(img, cover.firstChild);
+    } else {
+      cover.appendChild(buildLiveCover(site, cover));
+    }
+    // 整块封面可点：卡片是 div，没有 href，不这么做用户点封面会以为卡片坏了。
+    // 快捷赞/藏按钮在 .vops 里、不在封面上，所以不会被这里吃掉。
+    const viewHref = viewUrl(site);
+    cover.tabIndex = 0;
+    cover.setAttribute('role', 'link');
+    cover.setAttribute('aria-label', '观看 ' + (site.title || site.name));
+    cover.addEventListener('click', () => { location.href = viewHref; });
+    cover.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        location.href = viewHref;
+      }
+    });
     card.appendChild(cover);
 
     const body = document.createElement('div');
@@ -676,6 +704,12 @@
         btn.innerHTML = (countKey === 'favorites' ? icon('fav') : icon('like'))
           + ' ' + fmtNum(data[countKey]);
         site[countKey] = data[countKey];
+        // 卡片下方那排数字跟着一起变，别出现「按钮 3、上面还写 2」
+        const numbers = meta.querySelectorAll('span');
+        if (countKey === 'likes') numbers[0].innerHTML = icon('like') + fmtNum(data.likes);
+        else numbers[1].innerHTML = icon('fav') + fmtNum(data.favorites);
+        // 收藏页靠这个回调重拉列表：取消收藏后当前收藏夹可能变空
+        if (countKey === 'favorites' && o.onFavoriteChange) o.onFavoriteChange(site);
       } catch (err) {
         MP.toast(err.message);
       } finally {
@@ -704,30 +738,189 @@
     return card;
   };
 
+  // 迷你封面 / 悬停预览共用的虚拟视口与速度
+  const COVER_VW = 1280; // 虚拟视口宽：桌面布局能正常展开
+  // 虚拟视口高必须等于真实首屏高度（720）：iframe 里 100vh 跟着 iframe 高度走，
+  // 视口拉太高会把全屏 hero 撑出封面可见区，封面就只剩一片背景色
+  const COVER_VH = 720;
+  const COVER_SPEED = 45; // 下翻速度（屏幕像素/秒）：太快像刷屏，太慢没进展
+
+  // 封面并发闸门：封面是整站 iframe，同时开太多会把带宽切碎、每张都慢。
+  // 同一时刻最多加载 COVER_MAX 张，其余按可见顺序排队；用户最先看到的卡片
+  // 因此能独占带宽、最快出画面。加载完或超时即释放闸门给下一张。
+  const COVER_MAX = 3;
+  const COVER_DWELL = 400;    // 进入视口后停留这么久才排队（快速滚过的卡片不浪费流量）
+  const COVER_TIMEOUT = 6000; // 超过这么久还没 load 就放行下一张，避免个别慢站卡住整条队列
+  let coverBusy = 0;
+  const coverQueue = []; // 待加载的 arm 函数，FIFO ≈ 页面从上到下的可见顺序
+
+  function pumpCoverQueue() {
+    while (coverBusy < COVER_MAX && coverQueue.length) {
+      coverQueue.shift()();
+    }
+  }
+
   /**
-   * 悬停实时预览：进入封面 300ms 后挂 iframe，离开即销毁。
-   * iframe 直接指到真实的站点地址；站点页自身带 sandbox CSP，这里再加一层 sandbox 属性。
+   * 迷你 iframe 封面：封面区直接显示站点顶部画面（= 悬停下翻的起始画面）。
+   * 懒加载 + 停留节流 + 并发闸门：滚进视口且停留一小会儿，才排进队列去载入真站；
+   * 载入完成淡入（.mcover.loaded），超时则保留渐变占位、放行下一张。
+   */
+  function buildLiveCover(site, cover) {
+    const frame = document.createElement('iframe');
+    frame.className = 'mcover';
+    frame.referrerPolicy = 'no-referrer';
+    // 只给脚本不给同源：站点 JS 照常跑，但摸不到父页面和 cookie
+    frame.sandbox = 'allow-scripts';
+    frame.setAttribute('scrolling', 'no');
+    let armed = false;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      coverBusy = Math.max(0, coverBusy - 1);
+      pumpCoverQueue();
+    };
+    /** 算尺寸并载入真站（并发队列的入口，悬停兜底也会调它）。 */
+    const arm = () => {
+      if (armed) return;
+      const scale = cover.clientWidth / COVER_VW;
+      if (!scale) return; // 没布局好就先不占用闸门（悬停时会再试）
+      armed = true;
+      coverBusy += 1; // 占用一个并发槽，release 时归还
+      frame.style.width = COVER_VW + 'px';
+      frame.style.height = COVER_VH + 'px';
+      frame.style.transformOrigin = '0 0';
+      frame.style.transform = 'scale(' + scale + ')';
+      // load 标志必须在设 src 之后挂：iframe 一创建就有 about:blank 的 load，不能算数
+      const reveal = () => frame.classList.add('loaded'); // 淡入（见 style.css 的 .mcover）
+      frame.addEventListener('load', () => {
+        frame.dataset.loaded = '1';
+        reveal();
+        release();
+      }, { once: true });
+      // ?mpcover=1：服务端给入口 HTML 注入滚动代理，悬停时 postMessage 驱动内部下翻
+      frame.src = siteUrl(site) + '/?mpcover=1';
+      // 首屏通常很快就画出来了，不必等整站（含首屏外的图片/视频）全部下完才露脸：
+      // 到点先显示，此时 iframe 底透明，没画出来的部分透出下层渐变占位，不会是白块。
+      setTimeout(reveal, 900);
+      setTimeout(release, COVER_TIMEOUT);
+    };
+    frame.arm = arm; // attachPeek 悬停兜底用
+
+    // 懒加载 + 停留节流：进入视口起算 COVER_DWELL，期间滚出去就作废
+    let dwell = null;
+    const enqueue = () => { coverQueue.push(arm); pumpCoverQueue(); };
+    if ('IntersectionObserver' in window) {
+      const io = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            if (!dwell) dwell = setTimeout(() => { io.disconnect(); enqueue(); }, COVER_DWELL);
+          } else if (dwell) {
+            clearTimeout(dwell);
+            dwell = null;
+          }
+        }
+      }, { threshold: 0.01 });
+      io.observe(cover);
+    } else {
+      setTimeout(enqueue, COVER_DWELL);
+    }
+    return frame;
+  }
+
+  /**
+   * 悬停实时预览：进入封面 300ms 后页面匀速自动向下翻（循环）。
+   *
+   * 没有自定义封面的卡片，封面本身就是 .mcover（站点顶部实时画面）——
+   * 悬停时同一个 iframe 原地开始翻，移开后停在顶部继续当封面，所见即所得；
+   * 自定义图封面的卡片没有 .mcover，才临时新建 .peek，移开即摘掉。
+   *
+   * 技术要点：沙箱 iframe（不给 allow-same-origin）里父页面碰不到它的内部滚动，
+   * 所以服务端给带 ?mpcover=1 的入口页注入了一个滚动代理脚本，悬停时父页面
+   * postMessage 让文档自己往下滚——等价于真实浏览器窗口下翻，100vh 全屏
+   * 首屏的站点也能正常预览（离开时 mpPeekStop 回顶，封面继续显示首屏）。
+   * iframe 挂在封面 div 里（.vcover 自带 overflow:hidden），缩放多出的部分被裁掉，
+   * 不会盖住卡片的标题区；pointer-events:none 保证悬停事件照常触发。
    */
   function attachPeek(card, site, cover) {
-    let iframe = null;
+    const target = cover || card;
+    let frame = null;    // 本次悬停用的 iframe（复用 .mcover 或新建 .peek）
+    let created = false; // 是否本次新建的（移开时要摘掉）
     let timer = null;
+    let kick = null;
+    let started = false;
+    /** 页面加载完（或 1.5s 兜底）才开始下翻：白屏翻动没有意义。 */
+    const start = () => {
+      if (started || !frame) return;
+      const scale = target.clientWidth / COVER_VW;
+      if (!scale) return;
+      started = true;
+      // 下翻 = 驱动 iframe 内部文档滚动；速度换算成虚拟像素，滚动手感与缩放无关
+      try {
+        frame.contentWindow.postMessage({ mpPeekSpeed: Math.round(COVER_SPEED / scale) }, '*');
+      } catch (e) { /* iframe 尚未就绪，交给 mpReady 握手补发 */ }
+    };
+    /** 悬停 300ms 后才开始：防止鼠标扫过卡片时一路触发。 */
     const open = () => {
       timer = setTimeout(() => {
-        iframe = document.createElement('iframe');
-        iframe.className = 'peek';
-        iframe.loading = 'lazy';
-        iframe.referrerPolicy = 'no-referrer';
-        iframe.sandbox = 'allow-scripts';
-        iframe.src = siteUrl(site) + '/';
-        card.appendChild(iframe);
+        const scale = target.clientWidth / COVER_VW;
+        if (!scale) return;
+        started = false;
+        frame = target.querySelector('iframe.mcover');
+        if (frame) {
+          // 封面 iframe 可能还在加载，load 后（或 1.5s 兜底）再翻
+          if (frame.dataset.loaded === '1') {
+            start();
+          } else {
+            // 懒加载还没触发（后台窗口等），悬停当场载入
+            if (frame.arm) frame.arm();
+            frame.addEventListener('load', start, { once: true });
+            kick = setTimeout(start, 1500);
+          }
+        } else {
+          created = true;
+          const f = document.createElement('iframe');
+          f.className = 'peek';
+          f.loading = 'lazy';
+          f.referrerPolicy = 'no-referrer';
+          f.sandbox = 'allow-scripts';
+          f.src = siteUrl(site) + '/?mpcover=1';
+          f.style.width = COVER_VW + 'px';
+          f.style.height = COVER_VH + 'px';
+          f.style.transformOrigin = '0 0';
+          f.style.transform = 'scale(' + scale + ')';
+          target.appendChild(f);
+          frame = f;
+          f.addEventListener('load', start, { once: true });
+          kick = setTimeout(start, 1500);
+        }
       }, 300);
     };
+    /** 离开封面：让内部滚动停下并回顶；新建的 .peek 摘掉，复用的 .mcover 留着当封面。 */
     const close = () => {
       clearTimeout(timer);
-      if (iframe) { iframe.remove(); iframe = null; }
+      clearTimeout(kick);
+      started = false;
+      if (frame) {
+        try { frame.contentWindow.postMessage({ mpPeekStop: 1 }, '*'); } catch (e) { /* ignore */ }
+      }
+      if (frame && created) frame.remove();
+      frame = null;
+      created = false;
     };
-    (cover || card).addEventListener('mouseenter', open);
-    card.addEventListener('mouseleave', close);
+    // 注入的滚动代理就绪后会广播 mpReady；若 start() 发速度时代理还没跑起来
+    // （load / 1.5s 兜底都可能早于它执行，消息会丢），就绪这一刻把速度补发一次
+    window.addEventListener('message', (e) => {
+      const w = frame && frame.contentWindow;
+      if (started && w && e.source === w && e.data && e.data.mpReady) {
+        try {
+          const scale = target.clientWidth / COVER_VW;
+          w.postMessage({ mpPeekSpeed: Math.round(COVER_SPEED / scale) }, '*');
+        } catch (err) { /* ignore */ }
+      }
+    });
+    target.addEventListener('mouseenter', open);
+    target.addEventListener('mouseleave', close);
   }
   MP.attachPeek = attachPeek;
 

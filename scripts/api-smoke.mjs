@@ -222,9 +222,18 @@ async function run() {
 
   const sitesAnon = await api('/sites', { redirect: 'manual' });
   check(
-    'GET /sites 未登录跳登录页',
-    sitesAnon.res.status === 302 && sitesAnon.res.headers.get('location') === '/login',
+    'GET /sites 未登录跳登录页并带回跳地址',
+    sitesAnon.res.status === 302
+    && sitesAnon.res.headers.get('location') === `/login?next=${encodeURIComponent('/sites')}`,
     `status=${sitesAnon.res.status} loc=${sitesAnon.res.headers.get('location')}`,
+  );
+
+  const favAnon = await api('/favorites', { redirect: 'manual' });
+  check(
+    'GET /favorites 未登录跳登录页且 next 指回原页面',
+    favAnon.res.status === 302
+    && favAnon.res.headers.get('location') === `/login?next=${encodeURIComponent('/favorites')}`,
+    `status=${favAnon.res.status} loc=${favAnon.res.headers.get('location')}`,
   );
 
   const adminAnon = await api('/admin', { redirect: 'manual' });
@@ -332,6 +341,74 @@ async function run() {
 
   const anonUpload = await api('/api/upload', { body: { html: '<p>x</p>', name: 'nobody-site' }, method: 'POST' });
   check('未登录上传 → 401', anonUpload.res.status === 401, `status=${anonUpload.res.status}`);
+
+  // ZIP 整包发布：解压 → 事务内建站 + 写文件，任何一步失败都不留半个站点
+  const badZip = await api(apiSite(`/zip`, 'smoke-zip-invalid'), {
+    cookie: a.cookie, method: 'POST', raw: Buffer.from('not a zip'), type: 'application/zip',
+  });
+  check('无效 ZIP 返回 400', badZip.res.status === 400, `status=${badZip.res.status}`);
+  const missingBadZip = await api(apiSite('', 'smoke-zip-invalid'), { cookie: a.cookie });
+  check('无效 ZIP 不创建站点', missingBadZip.res.status === 404, `status=${missingBadZip.res.status}`);
+
+  // 只有 .DS_Store 这类垃圾条目 → 一个可用文件都没有
+  const skippedZip = Buffer.from('UEsDBBQAAAAAAJKrS105nPsGBAAAAAQAAAAJAAAALkRTX1N0b3JlanVua1BLAQIUABQAAAAAAJKrS105nPsGBAAAAAQAAAAJAAAAAAAAAAAAAACAAQAAAAAuRFNfU3RvcmVQSwUGAAAAAAEAAQA3AAAAKwAAAAAA', 'base64');
+  const noFiles = await api(apiSite(`/zip`, 'smoke-zip-empty'), {
+    cookie: a.cookie, method: 'POST', raw: skippedZip, type: 'application/zip',
+  });
+  check('全被跳过的 ZIP 返回 400', noFiles.res.status === 400, `status=${noFiles.res.status}`);
+  const missingEmptyZip = await api(apiSite('', 'smoke-zip-empty'), { cookie: a.cookie });
+  check('全被跳过的 ZIP 不创建站点', missingEmptyZip.res.status === 404, `status=${missingEmptyZip.res.status}`);
+
+  // index.html + assets/a.css 两个条目
+  const goodZip = Buffer.from('UEsDBBQAAAAAAI2rS10Zc+inDwAAAA8AAAAKAAAAaW5kZXguaHRtbDxoMT56aXAtb2s8L2gxPlBLAwQUAAAAAACNq0tdWXGH4gYAAAAGAAAADAAAAGFzc2V0cy9hLmNzc2JvZHl7fVBLAQIUABQAAAAAAI2rS10Zc+inDwAAAA8AAAAKAAAAAAAAAAAAAACAAQAAAABpbmRleC5odG1sUEsBAhQAFAAAAAAAjatLXVlxh+IGAAAABgAAAAwAAAAAAAAAAAAAAIABNwAAAGFzc2V0cy9hLmNzc1BLBQYAAAAAAgACAHIAAABnAAAAAAA=', 'base64');
+  const goodZipUpload = await api(apiSite(`/zip`, 'smoke-zip-good'), {
+    cookie: a.cookie, method: 'POST', raw: goodZip, type: 'application/zip',
+  });
+  check('有效 ZIP 发布 2 个文件', goodZipUpload.res.status === 201 && goodZipUpload.body?.saved === 2,
+    `status=${goodZipUpload.res.status} ${JSON.stringify(goodZipUpload.body)}`);
+  const goodZipPage = await api(pageUrl('smoke-zip-good'));
+  check('ZIP 首页可访问', goodZipPage.res.status === 200 && goodZipPage.text.includes('zip-ok'));
+  await api(apiSite('', 'smoke-zip-good'), { cookie: a.cookie, method: 'DELETE' });
+
+  // 子目录入口：根地址要跳到真实入口文件，相对资源与封面代理都跟着走
+  const nestedName = 'smoke-nested-entry';
+  const nestedHtml = '<!doctype html><head><link rel="stylesheet" href="assets/a.css"></head><h1>nested-ok</h1>';
+  const nestedIndex = await api(apiSite(`/files?path=dist/index.html`, nestedName), {
+    cookie: a.cookie, method: 'POST', raw: nestedHtml, type: 'application/octet-stream',
+  });
+  const nestedCss = await api(apiSite(`/files?path=dist/assets/a.css`, nestedName), {
+    cookie: a.cookie, method: 'POST', raw: 'body{color:red}', type: 'application/octet-stream',
+  });
+  check('子目录入口与资源上传成功', nestedIndex.res.status === 201 && nestedCss.res.status === 201,
+    `index=${nestedIndex.res.status} css=${nestedCss.res.status}`);
+  const nestedRedirect = await api(`${pageUrl(nestedName)}/?mpcover=1`, { redirect: 'manual' });
+  check('根地址跳转到真实入口且保留封面参数',
+    nestedRedirect.res.status === 302
+    && nestedRedirect.res.headers.get('location') === `${pageUrl(nestedName)}/dist/index.html?mpcover=1`,
+    nestedRedirect.res.headers.get('location'));
+  const nestedNoSlash = await api(pageUrl(nestedName), { redirect: 'manual' });
+  check('无斜杠地址也跳转到真实入口',
+    nestedNoSlash.res.status === 302
+    && nestedNoSlash.res.headers.get('location') === `${pageUrl(nestedName)}/dist/index.html`,
+    nestedNoSlash.res.headers.get('location'));
+  const nestedPage = await api(`${pageUrl(nestedName)}/`);
+  check('子目录首页可访问且最终地址正确', nestedPage.res.status === 200
+    && nestedPage.text.includes('nested-ok')
+    && new URL(nestedPage.res.url).pathname === `${pageUrl(nestedName)}/dist/index.html`);
+  const nestedCssPath = new URL('assets/a.css', nestedPage.res.url).pathname;
+  const resolvedCss = await api(nestedCssPath);
+  check('子目录首页的相对 CSS 可访问', nestedCssPath === `${pageUrl(nestedName)}/dist/assets/a.css`
+    && resolvedCss.res.status === 200 && resolvedCss.text === 'body{color:red}');
+  const nestedCover = await api(`${pageUrl(nestedName)}/?mpcover=1`);
+  check('子目录封面仍注入滚动代理', nestedCover.res.status === 200 && nestedCover.text.includes('mpReady'));
+  const nestedViews = await api(apiSite('/stats', nestedName));
+  check('两次入口请求各只增加一次浏览', nestedViews.body?.stats?.views === 2,
+    JSON.stringify(nestedViews.body?.stats));
+  await api(`${pageUrl(nestedName)}/dist/index.html`);
+  const refreshedViews = await api(apiSite('/stats', nestedName));
+  check('直接刷新子目录入口仍计一次浏览', refreshedViews.body?.stats?.views === 3,
+    JSON.stringify(refreshedViews.body?.stats));
+  await api(apiSite('', nestedName), { cookie: a.cookie, method: 'DELETE' });
 
   const html1 = '<!doctype html><meta charset="utf-8"><title>冒烟</title><h1>第一版</h1>';
   const upload = await api('/api/upload', { body: { html: html1, name: SITE }, cookie: a.cookie, method: 'POST' });
@@ -478,6 +555,22 @@ async function run() {
   const statUnliked = await api(apiSite(`/stats`), { cookie: a.cookie });
   check('点赞数回到 0', statUnliked.body?.stats?.likes === 0, JSON.stringify(statUnliked.body?.stats));
 
+  // 卡片列表要带回「当前用户对这个站点的状态」，前端靠它点亮赞/藏按钮
+  await api(apiSite(`/like`), { cookie: b.cookie, method: 'POST' });
+  const likedCards = await api('/api/discover', { cookie: b.cookie });
+  check('发现流卡片读回我的点赞状态',
+    likedCards.body?.sites?.find((s) => s.name === SITE)?.liked === true,
+    JSON.stringify(likedCards.body?.sites?.find((s) => s.name === SITE)?.liked));
+  const creatorLikedCards = await api('/api/u/smoke-a/profile', { cookie: b.cookie });
+  check('创作者卡片读回我的点赞状态',
+    creatorLikedCards.body?.sites?.find((s) => s.name === SITE)?.liked === true,
+    JSON.stringify(creatorLikedCards.body?.sites?.find((s) => s.name === SITE)?.liked));
+  await api(apiSite(`/like`), { cookie: b.cookie, method: 'DELETE' });
+  const unlikedCards = await api('/api/discover', { cookie: b.cookie });
+  check('取消点赞后卡片状态归零',
+    unlikedCards.body?.sites?.find((s) => s.name === SITE)?.liked === false,
+    JSON.stringify(unlikedCards.body?.sites?.find((s) => s.name === SITE)?.liked));
+
   const comment = await api(apiSite(`/comments`), { body: { content: '这是 b 的评论' }, cookie: b.cookie, method: 'POST' });
   check('发表评论成功', comment.body?.ok === true, JSON.stringify(comment.body));
   const comments = await api(apiSite(`/comments`));
@@ -492,6 +585,10 @@ async function run() {
 
   const delComment = await api(apiSite(`/comments/${parentId}`), { cookie: b.cookie, method: 'DELETE' });
   check('删除自己的评论成功', delComment.body?.ok === true, JSON.stringify(delComment.body));
+  const afterDeleteComments = await api(apiSite(`/comments`));
+  check('删除顶层评论后回复也从数据库删除',
+    afterDeleteComments.body?.comments?.length === 0,
+    JSON.stringify(afterDeleteComments.body?.comments?.length));
 
   const fav = await api(apiSite(`/favorite`), { body: { folder: '冒烟收藏夹' }, cookie: b.cookie, method: 'POST' });
   check('收藏成功', fav.body?.ok === true, JSON.stringify(fav.body));
@@ -501,11 +598,24 @@ async function run() {
     favs.body?.sites?.some((f) => f.name === SITE),
     `status=${favs.res.status} ${JSON.stringify(favs.body?.sites?.map((f) => f.name))}`,
   );
+  check('收藏夹卡片带真实收藏状态',
+    favs.body?.sites?.find((s) => s.name === SITE)?.favorited === true,
+    JSON.stringify(favs.body?.sites?.find((s) => s.name === SITE)?.favorited));
   const unfav = await api(apiSite(`/favorite`), { cookie: b.cookie, method: 'DELETE' });
   check('取消收藏成功', unfav.body?.ok === true, JSON.stringify(unfav.body));
+  const unfavedCards = await api('/api/discover', { cookie: b.cookie });
+  check('取消收藏后卡片状态归零',
+    unfavedCards.body?.sites?.find((s) => s.name === SITE)?.favorited === false,
+    JSON.stringify(unfavedCards.body?.sites?.find((s) => s.name === SITE)?.favorited));
 
   const follow = await api(`/api/users/${a.user.id}/follow`, { cookie: b.cookie, method: 'POST' });
   check('关注成功', follow.body?.ok === true, JSON.stringify(follow.body));
+  const followedSocial = await api(`/api/users/${a.user.id}/social`, { cookie: b.cookie });
+  check('作品页关注状态接口读回已关注', followedSocial.body?.isFollowing === true, JSON.stringify(followedSocial.body));
+  const followedProfile = await api('/api/u/smoke-a/profile', { cookie: b.cookie });
+  check('关注状态与粉丝数从数据库读回',
+    followedProfile.body?.isFollowing === true && followedProfile.body?.stats?.followers === 1,
+    JSON.stringify(followedProfile.body?.stats));
   const followers = await api(`/api/users/${a.user.id}/follow-list?type=followers`);
   check(
     '粉丝列表 1 人（JOIN users）',
@@ -514,6 +624,10 @@ async function run() {
   );
   const unfollow = await api(`/api/users/${a.user.id}/follow`, { cookie: b.cookie, method: 'DELETE' });
   check('取消关注成功', unfollow.body?.ok === true, JSON.stringify(unfollow.body));
+  const unfollowedProfile = await api('/api/u/smoke-a/profile', { cookie: b.cookie });
+  check('取消关注后主页状态与粉丝数归零',
+    unfollowedProfile.body?.isFollowing === false && unfollowedProfile.body?.stats?.followers === 0,
+    JSON.stringify(unfollowedProfile.body?.stats));
 
   const history = await api('/api/history', { body: { site: SITE, username: A_NAME }, cookie: b.cookie, method: 'POST' });
   check('记录浏览历史成功', history.body?.ok === true, JSON.stringify(history.body));
@@ -527,21 +641,34 @@ async function run() {
 
   const send = await api(`/api/messages/${a.user.id}`, { body: { content: '你好，这是私信' }, cookie: b.cookie, method: 'POST' });
   check('发私信成功', send.body?.ok === true, JSON.stringify(send.body));
+  const convsBefore = await api('/api/messages', { cookie: a.cookie });
+  check('收到私信前会话标记未读',
+    (convsBefore.body?.conversations?.[0]?.unread ?? 0) >= 1,
+    JSON.stringify(convsBefore.body?.conversations?.[0]?.unread));
   const convs = await api('/api/messages', { cookie: a.cookie });
   check('会话列表 1 条（JOIN users）', convs.body?.conversations?.length === 1, JSON.stringify(convs.body?.conversations));
   const thread = await api(`/api/messages/${b.user.id}`, { cookie: a.cookie });
   check('私信内容读回一致', thread.body?.messages?.[0]?.content === '你好，这是私信', JSON.stringify(thread.body?.messages?.[0]?.content));
+  const convsAfter = await api('/api/messages', { cookie: a.cookie });
+  check('打开会话后未读数归零',
+    convsAfter.body?.conversations?.[0]?.unread === 0,
+    JSON.stringify(convsAfter.body?.conversations?.[0]?.unread));
 
   // 通知是「按当前互动数据算出来的」（没有事件表），所以先把互动补上再看
   await api(apiSite(`/like`), { cookie: b.cookie, method: 'POST' });
+  const notificationsAnon = await api('/api/notifications');
+  check('未登录不能读取通知', notificationsAnon.res.status === 401, `status=${notificationsAnon.res.status}`);
   const notifications = await api('/api/notifications', { cookie: a.cookie });
   check(
     'a 收到互动通知',
     (notifications.body?.items?.length ?? 0) > 0,
     `status=${notifications.res.status} ${JSON.stringify(notifications.body)?.slice(0, 200)}`,
   );
+  check('新通知带未读状态', notifications.body?.items?.some((item) => item.unread === true));
   const seen = await api('/api/notifications/seen', { cookie: a.cookie, method: 'POST' });
   check('标记通知已读成功', seen.body?.ok === true, JSON.stringify(seen.body));
+  const seenAgain = await api('/api/notifications', { cookie: a.cookie });
+  check('已读状态从数据库读回', seenAgain.body?.items?.every((item) => item.unread === false));
   const meUnread = await api('/api/me', { cookie: a.cookie });
   check('未读数归零', meUnread.body?.unread === 0, JSON.stringify(meUnread.body?.unread));
 
