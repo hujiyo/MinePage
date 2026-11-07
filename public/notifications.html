@@ -44,11 +44,7 @@ const tabsBox = document.getElementById('tabs');
 const listBox = document.getElementById('list');
 const emptyBox = document.getElementById('empty');
 
-/** 后端只给「未读总数」，没有逐条已读标记：把最新的 N 条当未读高亮。 */
-function markUnread(items, unreadCount) {
-  if (!unreadCount) return items;
-  return items.map((it, i) => ({ ...it, unread: i < unreadCount }));
-}
+/** 服务端每条通知已带 unread（按 notify_seen_at 算），前端不再自己猜。 */
 
 function match(it) {
   if (tab === 'all') return true;
@@ -151,7 +147,7 @@ document.getElementById('seen').addEventListener('click', async () => {
 
   try {
     const data = await MP.api('/api/notifications');
-    items = markUnread(data.items, me.unread);
+    items = data.items;
     render();
   } catch (err) {
     emptyBox.hidden = false;

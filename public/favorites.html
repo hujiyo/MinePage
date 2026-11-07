@@ -81,7 +81,10 @@ function renderCards() {
       + (allSites.length ? '这个收藏夹还是空的。' : '还没有收藏任何页面。去首页逛逛吧。') + '</div>';
     return;
   }
-  MP.renderCards(cardsBox, list);
+  // 取消收藏后当前收藏夹可能变空，整页重拉一次（回调由 MP.vcard 的收藏按钮触发）
+  MP.renderCards(cardsBox, list, {
+    onFavoriteChange: (site) => { if (!site.favorited) load(); },
+  });
 }
 
 function render() {
@@ -89,20 +92,23 @@ function render() {
   renderCards();
 }
 
-(async () => {
-  if (!(await MP.requireLogin())) return;
-
+async function load() {
   cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">加载中…</div>';
   try {
     const data = await MP.api('/api/favorites');
     allSites = data.sites;
     folders = groupByFolder(allSites);
     // 默认选中第一个收藏夹；一个都没有时停在「全部收藏」
-    cur = folders.length ? 0 : -1;
+    cur = folders.length ? Math.min(cur, folders.length - 1) : -1;
     render();
   } catch (err) {
     cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">' + MP.esc(err.message) + '</div>';
   }
+}
+
+(async () => {
+  if (!(await MP.requireLogin())) return;
+  await load();
 })();
 </script>
 </body>

@@ -159,28 +159,55 @@ async function renderRank() {
 
 // ---------------------------------------------------------------- 翻页
 
+/**
+ * 渲染底部翻页器。数据来自接口的 total / page / pages 字段。
+ * 只有一页时不渲染任何东西。页码窗口最多 7 个，超出用省略号——
+ * 467 个站按 12 条一页有 39 页，直接把页码铺出来会把页面撑爆。
+ */
 function renderPager(total, pages) {
   pagerBox.textContent = '';
   if (pages <= 1) { pagerBox.hidden = true; return; }
   pagerBox.hidden = false;
 
-  const makeBtn = (label, target, disabled) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = label;
-    b.disabled = disabled;
-    b.addEventListener('click', () => { page = target; reload(); });
-    return b;
+  const cur = page;
+
+  const slot = (label, to, opt) => {
+    const o = opt || {};
+    const el = document.createElement(o.disabled || o.active ? 'span' : 'button');
+    if (el.tagName === 'BUTTON') el.type = 'button';
+    el.className = 'pg' + (o.active ? ' active' : '') + (o.disabled ? ' disabled' : '');
+    el.textContent = label;
+    if (!o.disabled && !o.active && to != null) {
+      el.addEventListener('click', () => {
+        page = to;
+        reload();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+    }
+    pagerBox.appendChild(el);
+  };
+  const dots = () => {
+    const s = document.createElement('span');
+    s.className = 'pg dots';
+    s.textContent = '…';
+    pagerBox.appendChild(s);
   };
 
-  pagerBox.appendChild(makeBtn('上一页', page - 1, page <= 1));
+  slot('上一页', cur - 1, { disabled: cur <= 1 });
 
-  const info = document.createElement('span');
-  info.className = 'muted';
-  info.textContent = page + ' / ' + pages + '（共 ' + total + ' 个）';
-  pagerBox.appendChild(info);
+  if (pages <= 7) {
+    for (let i = 1; i <= pages; i += 1) slot(String(i), i, { active: i === cur });
+  } else {
+    const start = Math.max(2, cur - 2);
+    const end = Math.min(pages - 1, cur + 2);
+    slot('1', 1, { active: cur === 1 });
+    if (start > 2) dots();
+    for (let i = start; i <= end; i += 1) slot(String(i), i, { active: i === cur });
+    if (end < pages - 1) dots();
+    slot(String(pages), pages, { active: cur === pages });
+  }
 
-  pagerBox.appendChild(makeBtn('下一页', page + 1, page >= pages));
+  slot('下一页', cur + 1, { disabled: cur >= pages });
 }
 
 // ---------------------------------------------------------------- 列表
@@ -189,10 +216,11 @@ async function reload() {
   feedTitle.textContent = q ? '搜索：' + q : (sortRank ? '按浏览量' : '推荐');
   cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">加载中…</div>';
 
+  // 参数映射：服务端对非法参数只静默退化，所以 'hot' 这种前端伪标签必须显式换成 sort=views
   const search = new URLSearchParams();
   if (q) search.set('q', q);
-  if (tag) search.set('tag', tag);
-  if (sortRank) search.set('sort', 'views');
+  if (tag && tag !== 'hot') search.set('tag', tag);
+  if (tag === 'hot' || sortRank) search.set('sort', 'views');
   search.set('page', String(page));
   search.set('size', '12');
 
