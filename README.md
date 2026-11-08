@@ -55,7 +55,7 @@ scripts/migrate-user-space.mjs  把「全局站名」的老库迁到用户空间
 public/index.html             上传页的跳转兜底
 public/discover.html          社区首页（/）
 public/user.html              创作者主页（/qwq/:用户名）
-public/view.html              观看页（/view/:用户名/:站名，全屏 iframe + 底部吸附栏 + 评论面板）
+public/view.html              观看页（/view/:用户名/:站名，B 站式播放页；全屏后才是 iframe 铺满 + 底部吸附栏 + 评论面板）
 public/notifications.html     通知列表页（/notifications）
 public/favorites.html         我的收藏（/favorites）
 public/history.html           观看历史（/history）
@@ -95,7 +95,7 @@ public/style.css              共享样式
 | GET | `/` | 社区首页（发现流、搜索、标签筛选） |
 | GET | `/upload` | 跳到创作页的投稿标签 |
 | GET | `/qwq/:用户名` | 创作者公开主页（用户空间入口；`/qwq/:用户名/:站名` 是站点） |
-| GET | `/view/:用户名/:站名` | 观看页（全屏沙箱 iframe + 底部吸附栏 + 评论面板） |
+| GET | `/view/:用户名/:站名` | 观看页（B 站式播放页；全屏态是沙箱 iframe 铺满 + 底部吸附栏 + 评论面板） |
 | GET | `/qwq/:用户名/:站名` | 用户页面（带沙箱头）；`/qwq/:用户名/:站名/*` 是站内文件 |
 | GET | `/notifications` | 通知列表页（收到的互动） |
 | GET | `/login` | 登录 / 注册 |

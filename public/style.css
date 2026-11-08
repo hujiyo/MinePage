@@ -1045,37 +1045,403 @@ section { margin-top: 32px; }
 .utabs a:hover { color: var(--pink); }
 
 /* ============================================================
-   观看页：全屏宿主 + 底部社区吸附栏 + 评论抽屉
-   主体完全让给对方的网页，社区功能收进底部吸附栏
+   观看页（/view/:用户名/:站名）
+   常态：B 站播放页排布 —— 16:9 播放器 + 标题 / 操作栏 / 简介 /
+   评论区，右侧作者与更多页面栏。整页是白底、正文不再套卡片框，
+   内容因此能铺得更宽更高。点「全屏」后播放器铺满视口，平台顶栏滑出、
+   底部吸附栏与评论抽屉才出现（body.view-fs）。
    ============================================================ */
 
-/* 全屏宿主：iframe 铺满视口，顶栏与底栏浮在其上 */
-.viewer {
-  position: fixed;
-  inset: 0;
-  z-index: 1;
-  background: var(--panel);
-}
-.viewer iframe { width: 100%; height: 100%; border: 0; display: block; }
+/* 观看页整页白底：正文块去掉卡片框之后，信息直接落在白色纸张上（B 站视频页就是这样） */
+body.watch-page { background: var(--panel); }
 
-/* 这些容器自带 display，需要显式压过 [hidden] */
-.viewer[hidden],
-.viewMissing[hidden],
-.snapbar[hidden],
-.sheet[hidden] { display: none; }
+/* 宽度就跟着全站 .page.wide 走（max-width 1400，和顶栏 .tinner 同一个值），
+   左右内边距也必须等于顶栏的 20px —— 两边共用同一个 max-width，中间再差 4px
+   内边距就会在屏幕上错开一条。少一层卡片后省下的空间，全部让给播放器。 */
+.page.wide.watch { padding-left: 20px; padding-right: 20px; }
+@media (max-width: 900px) {
+  .page.wide.watch { padding-left: 12px; padding-right: 12px; }
+}
+@media (max-width: 640px) {
+  .page.wide.watch { padding-left: 10px; padding-right: 10px; }
+}
+/* 去掉卡片框省下来的横向空间全部给播放器：右侧栏窄一点、块间距小一点 */
+.watchGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 24px;
+  align-items: start;
+  padding-top: 16px;
+}
+.watchGrid[hidden] { display: none; }
+.watchMain { min-width: 0; }
 
 /* 站点不存在时的占位 */
 .viewMissing {
-  position: fixed;
-  inset: 0;
-  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg);
+  padding: 80px 0;
+}
+.viewMissing[hidden] { display: none; }
+
+/* ---------------- 播放器 ---------------- */
+
+/* 播放器是 <section>：要显式清掉全局的 `section { margin-top: 32px }`，
+   否则全屏时 fixed 的播放器会被顶下 32px，屏幕顶部露出一条底色 */
+.playerWrap {
+  margin: 0;
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: #0f1013;
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+.playerWrap iframe { width: 100%; height: 100%; border: 0; display: block; background: #fff; }
+
+/* 载入提示：iframe 首帧出来前盖一层，load 后淡出。
+   长时间没出来就在原地补一句「可以点右下角重新载入」，别让人对着纯黑屏干等。 */
+.pload {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, .72);
+  font-size: 13px;
+  background: #0f1013;
+  transition: opacity .4s ease;
+  pointer-events: none;
+}
+.pload.gone { opacity: 0; }
+.pload i {
+  width: 22px;
+  height: 22px;
+  border: 2px solid rgba(255, 255, 255, .18);
+  border-top-color: rgba(255, 255, 255, .7);
+  border-radius: 50%;
+  animation: ploadSpin .9s linear infinite;
+}
+@keyframes ploadSpin { to { transform: rotate(360deg); } }
+.pload .slow { display: none; max-width: 260px; text-align: center; line-height: 1.6; }
+.pload.slowShown .slow { display: block; }
+.pload.slowShown i { opacity: .35; }
+
+/* 播放器右下角浮层控制：重新载入 / 新窗口打开 / 全屏。悬停才显形，别挡画面 */
+.pctrl {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  gap: 6px;
+  padding: 5px;
+  border-radius: 10px;
+  background: rgba(15, 16, 19, .62);
+  backdrop-filter: blur(8px);
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity .2s, transform .2s;
+}
+.playerWrap:hover .pctrl,
+.playerWrap:focus-within .pctrl { opacity: 1; transform: none; }
+/* 触摸屏没有 hover：控制条常显，否则重载 / 全屏这两个入口在手机上根本点不到 */
+@media (hover: none) {
+  .pctrl { opacity: 1; transform: none; }
+}
+.pctrl button,
+.pctrl a {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, .86);
+  cursor: pointer;
+}
+.pctrl button:hover,
+.pctrl a:hover { background: rgba(255, 255, 255, .16); color: #fff; }
+.pctrl svg { width: 16px; height: 16px; }
+
+/* ---------------- 标题 / 元信息 ---------------- */
+
+.watchHead { padding: 16px 2px 0; }
+.wtitle {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.wmeta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.wmeta span { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.wmeta svg { width: 15px; height: 15px; flex: none; }
+.wmeta a { color: var(--muted); word-break: break-all; }
+.wmeta a:hover { color: var(--pink); }
+
+/* ---------------- 操作栏 ---------------- */
+
+.wbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 14px 0 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.wact, .wright { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.wbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted2);
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.wbtn:hover { color: var(--pink); border-color: var(--pink); background: var(--panel); }
+.wbtn.on { color: var(--pink); border-color: var(--pink); background: var(--pink-soft); }
+.wbtn svg { width: 17px; height: 17px; flex: none; }
+.wbtn .wnum { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+
+/* 还没上线的功能（投币）：虚线边框 + 灰度，点得到但一眼看得出是「未开放」 */
+.wbtn.pending { border-style: dashed; color: var(--muted); }
+.wbtn.pending:hover { color: var(--muted2); border-color: var(--border); }
+.wbtn.pending svg { opacity: .7; }
+.wbtn .soon {
+  padding: 0 6px;
+  border-radius: 99px;
+  background: rgba(0, 0, 0, .05);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
 }
 
-/* 底部吸附栏：全宽贴底，与顶栏同高 */
+/* 键盘可达：按钮虽然去掉了默认 outline，焦点必须看得见 */
+.wbtn:focus-visible,
+.snapItem:focus-visible,
+.snapMid:focus-visible,
+.pctrl button:focus-visible,
+.pctrl a:focus-visible,
+.fsExit:focus-visible {
+  outline: 2px solid var(--pink);
+  outline-offset: 2px;
+}
+
+/* ---------------- 简介 ---------------- */
+
+/* 不套卡片框：左侧留一个很细的竖线做「这段是简介」的信号，正文宽度全给内容 */
+.wdesc {
+  margin-top: 4px;
+  padding: 2px 0 2px 14px;
+  border-left: 3px solid var(--panel2);
+}
+.tagline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); }
+.sandboxNote { display: inline-flex; align-items: center; gap: 5px; }
+.sandboxNote svg { width: 14px; height: 14px; color: var(--blue); flex: none; }
+.txt { margin-top: 10px; font-size: 14px; line-height: 1.8; white-space: pre-wrap; word-break: break-word; color: var(--muted2); }
+.txt.empty-txt { color: var(--muted); font-size: 13px; }
+
+/* ---------------- 评论区 ---------------- */
+
+/* 同样不套卡片框；用一条通栏细线跟上面的简介分开 */
+.wcomments {
+  margin-top: 26px;
+  padding: 20px 0 0;
+  border-top: 1px solid var(--border);
+}
+.chead { display: flex; align-items: baseline; gap: 8px; font-size: 16px; font-weight: 600; }
+.chead .cnt { color: var(--muted); font-size: 13px; font-weight: 400; }
+
+/* 两个评论表单（本页与全屏抽屉）共用同一套外观 */
+.cform { margin: 14px 0 4px; }
+.cform textarea { min-height: 88px; }
+.cfoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+.cfoot .hint { margin: 0; }
+
+/* ---------------- 右侧栏 ---------------- */
+
+/* 右侧栏同样不套卡片框：第一块贴近播放器顶部，后面每块用一条细线分隔 */
+.wside {
+  position: sticky;
+  top: calc(var(--topbar-h) + 12px);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.wsec { background: transparent; border: 0; border-radius: 0; padding: 0; }
+.wsec[hidden] { display: none; }
+.wsec h3 { margin: 0 0 10px; font-size: 14px; font-weight: 600; color: var(--text); }
+/* 除了第一块，每块前面加一条分隔线（B 站右侧栏就是这个节奏，没有卡片边） */
+.wsec + .wsec:not([hidden]) { padding-top: 18px; border-top: 1px solid var(--border); }
+
+/* 推荐条目：16:9 缩略图 + 两行标题 */
+.wrel { display: flex; flex-direction: column; gap: 10px; }
+.rrow { display: flex; gap: 10px; align-items: flex-start; padding: 2px; border-radius: 8px; }
+.rrow:hover { background: var(--panel2); }
+.relThumb {
+  position: relative;
+  flex: none;
+  width: 108px;
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, .92);
+  font-size: 18px;
+  font-weight: 700;
+  user-select: none;
+}
+.relThumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.relThumb .rviews {
+  position: absolute;
+  left: 6px;
+  bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 400;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, .55);
+}
+.relThumb .rviews svg { width: 12px; height: 12px; }
+.rinfo { flex: 1; min-width: 0; }
+.rtitle {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.rrow:hover .rtitle { color: var(--pink); }
+.rmeta { margin-top: 4px; color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 关于这个站点：作者 + 关注/私信 + 四个数字，放在右侧栏第一块 */
+.wabout { padding: 0; border: 0; }
+.wauthor { display: flex; align-items: center; gap: 10px; }
+.wameta { flex: 1; min-width: 0; }
+.wauthor .waname { display: block; font-size: 13.5px; font-weight: 600; color: var(--text); }
+.wauthor .waname:hover { color: var(--pink); }
+.wauthor .wsub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.wabout .wubtns { margin-top: 12px; }
+.wabout .wubtns .wbtn { flex: 1; justify-content: center; padding: 7px 12px; }
+/* 四个数字不再各占一个灰色小方块：数字直接排开，之间用竖线分隔，跟「没有卡片框」的基调一致 */
+.wanums {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  margin-top: 14px;
+  text-align: center;
+}
+.wanums > div { padding: 2px 0; }
+.wanums > div + div { border-left: 1px solid var(--border); }
+.wanums b { display: block; font-size: 15px; font-weight: 600; line-height: 1.4; }
+.wanums span { color: var(--muted); font-size: 11.5px; }
+
+/* ============================================================
+   全屏态（body.view-fs）：只留对方的网页 + 平台吸附层
+   ============================================================ */
+
+/* 播放器铺满视口：必须显式清掉 aspect-ratio，否则宽高由 16:9 推算，
+   fixed 的 inset 0 只能把盒子挤在视口中间，四周露出一圈底色 */
+body.view-fs .playerWrap {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+  border-radius: 0;
+  box-shadow: none;
+}
+body.view-fs .watchMain > :not(.playerWrap) { display: none; }
+body.view-fs .wside { display: none; }
+/* grid 里只剩一个 fixed 的播放器，任何 padding 都会在视口顶部留下一条背景色 */
+body.view-fs .watchGrid { display: block; padding: 0; }
+body.view-fs .watch { max-width: none; padding: 0; }
+
+/* 全屏时播放器控制只留退出按钮；重载 / 原站这两个入口藏起来 */
+body.view-fs .playerWrap .pctrl { display: none; }
+
+/* 屏幕最上沿的触发带：鼠标顶到它就滑出平台顶栏 */
+.fsTopEdge {
+  display: none;
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 14px;
+  z-index: 99;
+}
+body.view-fs .fsTopEdge { display: block; }
+
+/* 全屏态唯一常驻的退出入口 */
+.fsExit {
+  display: none;
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 210;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(15, 16, 19, .58);
+  color: rgba(255, 255, 255, .88);
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+  opacity: .45;
+  transition: opacity .2s, background .2s;
+}
+.fsExit:hover { opacity: 1; background: rgba(15, 16, 19, .8); }
+.fsExit svg { width: 17px; height: 17px; }
+body.view-fs .fsExit { display: flex; }
+/* 顶栏滑出来时右上角是用户头像，退出按钮让开，别压在头像上 */
+body.view-fs.fs-top .fsExit { display: none; }
+
+/* 顶栏：常态正常吸顶，全屏态上滑隐藏，鼠标顶到屏幕上沿才滑出来 */
+.topbar { transition: transform .25s ease; }
+body.view-fs .topbar { position: fixed; left: 0; right: 0; transform: translateY(-100%); }
+body.view-fs.fs-top .topbar { transform: none; }
+
+/* 底部吸附栏：全宽贴底，与顶栏同高。只在全屏态出现 */
 .snapbar {
   position: fixed;
   left: 0;
@@ -1090,6 +1456,8 @@ section { margin-top: 32px; }
   backdrop-filter: blur(12px);
   border-top: 1px solid var(--border);
 }
+.snapbar[hidden],
+.sheet[hidden] { display: none; }
 /* 两组各占一半，8 个入口均分铺满，中间三角形正好居中 */
 .sgroup { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: space-evenly; }
 
@@ -1136,8 +1504,7 @@ section { margin-top: 32px; }
 .snapMid:hover { color: var(--pink); background: var(--pink-soft); }
 .snapMid svg { width: 15px; height: 15px; flex: none; transform: rotate(180deg); }
 
-/* 收起后：整条栏隐藏，只在左下角留一个小三角形 */
-body.snap-collapsed .snapbar { display: none; }
+/* 收起后：整条栏隐藏，只在左下角留一个小三角形；只有全屏态才给它存在感 */
 .snapHandle {
   display: none;
   position: fixed;
@@ -1159,7 +1526,7 @@ body.snap-collapsed .snapbar { display: none; }
 }
 .snapHandle:hover { color: var(--pink); background: var(--pink-soft); }
 .snapHandle svg { width: 14px; height: 14px; flex: none; }
-body.snap-collapsed .snapHandle { display: flex; }
+body.view-fs.snap-collapsed .snapHandle { display: flex; }
 
 /* 评论面板：可拖拽调高，不做暗化遮罩 */
 .sheet {
@@ -1212,33 +1579,6 @@ body.snap-collapsed .snapHandle { display: flex; }
 }
 .sheetHead b { font-size: 15px; }
 .sheetBody { flex: 1; min-height: 0; overflow: auto; padding: 4px 18px 20px; }
-
-/* 顶栏收起：左上角小三角形（收起后只剩它） */
-.topbar { transition: transform .25s ease; }
-.navHandle {
-  position: fixed;
-  left: 0;
-  top: var(--topbar-h);
-  z-index: 101;
-  width: 36px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-left: 0;
-  border-top: 0;
-  border-radius: 0 0 10px 0;
-  background: rgba(255, 255, 255, .97);
-  color: var(--muted2);
-  cursor: pointer;
-  transition: top .25s ease, color .15s, background .15s;
-}
-.navHandle:hover { color: var(--pink); background: var(--pink-soft); }
-.navHandle svg { width: 14px; height: 14px; flex: none; transition: transform .25s; }
-body.nav-collapsed .navHandle { top: 0; }
-body.nav-collapsed .navHandle svg { transform: rotate(180deg); }
-body.nav-collapsed .topbar { transform: translateY(-100%); }
 
 /* ============================================================
    私信
@@ -1312,6 +1652,9 @@ body.nav-collapsed .topbar { transform: translateY(-100%); }
   .msgLayout { grid-template-columns: 1fr; }
   .msgList { display: flex; overflow-x: auto; }
   .msgList .msgItem { min-width: 200px; border-bottom: 0; border-right: 1px solid var(--panel2); }
+  /* 观看页：单栏，推荐栏掉到正文下面，不再吸顶 */
+  .watchGrid { grid-template-columns: 1fr; }
+  .wside { position: static; }
 }
 @media (max-width: 900px) {
   .tnav { display: none; }
@@ -1344,6 +1687,21 @@ body.nav-collapsed .topbar { transform: translateY(-100%); }
   .snapMid { margin: 0 4px; }
   .sheetHead { padding: 0 12px 10px; }
   .sheetBody { padding: 4px 12px 16px; }
+  /* 观看页：窄屏收紧留白，操作栏换行也不挤 */
+  .watch { padding: 8px 10px 32px; }
+  .wtitle { font-size: 17px; }
+  .wbar { margin: 10px 0 14px; padding-bottom: 12px; }
+  .wbtn { padding: 7px 12px; font-size: 12px; }
+  .wbtn svg { width: 15px; height: 15px; }
+  .wdesc { padding: 2px 0 2px 12px; }
+  .wcomments { padding: 16px 0 0; }
+  .wanums b { font-size: 14px; }
+  .wubtns .wbtn { padding: 6px 10px; }
+  /* 窄屏放不下「未开放」小标签：省掉它，四个操作按钮才能挤进一行（说明仍在 title 里） */
+  .wbtn .soon { display: none; }
+  .wbtn { padding: 7px 11px; }
+  .relThumb { width: 88px; }
+  .cfoot .hint { display: none; }
 }
 
 /* ---------------------------------------------------------------- MCP 密钥 */
