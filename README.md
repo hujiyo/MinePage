@@ -49,7 +49,8 @@ lib/mcp/tokens.js             MCP 密钥：铸造 / 列表 / 吊销 / 鉴权（�
 lib/mcp/tools.js              MCP 工具注册表（唯一真源）+ 10 个 backend
 lib/mcp/server.js             MCP 的 JSON-RPC 分发，零依赖手写
 scripts/mcp-smoke.mjs         MCP 冒烟测试（69 项，见下）
-scripts/api-smoke.mjs         全站接口冒烟测试（148 项，自己拉起临时服务，见下）
+scripts/api-smoke.mjs         全站接口冒烟测试（208 项，自己拉起临时服务，见下）
+scripts/upload-page-smoke.mjs 投稿页交互冒烟测试（42 项，无头 Edge，见下）
 scripts/migrate-user-space.mjs  把「全局站名」的老库迁到用户空间模型（幂等，见下）
 public/index.html             上传页的跳转兜底
 public/discover.html          社区首页（/）
@@ -105,7 +106,7 @@ public/style.css              共享样式
 | POST | `/api/auth/logout` | 登出 |
 | GET | `/api/discover` | 社区发现流（?q= 模糊搜索，?tag= 标签筛选） |
 | GET | `/api/u/:username/profile` | 创作者主页数据（资料 / 粉丝关注数 / 总浏览量 / TA 的站点） |
-| GET | `/api/sites` | 我的站点（带 `username`、`quota`） |
+| GET | `/api/sites` | 我的站点（带 `username`、`quota`，以及内容标签词表 `tags`，投稿页选标签用） |
 | POST | `/api/upload` | 上传 HTML（需登录，占配额） |
 | GET | `/api/sites/:用户名/:站名/stats` | 站点互动数字（浏览 / 赞 / 评 / 藏） |
 | POST / DELETE | `/api/sites/:用户名/:站名/like` | 点赞 / 取消（需登录） |
@@ -175,9 +176,20 @@ node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项（需
 冒烟库的表，跑完自己收拾：
 
 ```
-node scripts/api-smoke.mjs          # 148 项：注册/登录/站点/文件/社交/权限/后台/改密/配额/改名/注销
+node scripts/api-smoke.mjs          # 208 项：注册/登录/站点/文件/社交/权限/后台/改密/配额/改名/注销
 node scripts/api-smoke.mjs --json   # 末尾多打印一段 JSON，换库前后可以拿来对比
 ```
+
+投稿页（`/sites?tab=upload`）的交互另有浏览器冒烟测试，得先起一个冒烟服务再指着它跑
+（文件列表的「移除」按钮、模式徽章的自动切换是 DOM 事件，接口测不到）：
+
+```
+$env:PORT=3105; $env:MYSQL_DATABASE='minepage_smoke'; node server.js
+$env:BASE_URL='http://127.0.0.1:3105'; node scripts/upload-page-smoke.mjs   # 42 项
+```
+
+它用无头 Edge + CDP，账号读 `SMOKE_LOGIN` / `SMOKE_PASSWORD`（默认 smokeadmin /
+smoke-admin-pass）；本机没有 Edge 时直接跳过，不算失败。
 
 ### 老库迁移到用户空间
 

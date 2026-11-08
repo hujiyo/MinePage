@@ -896,6 +896,8 @@ async function handleMySites(req, res) {
     prefix: USER_SPACE_PREFIX,
     quota: MAX_SITES_PER_USER,
     sites,
+    // 投稿页（站点还不存在）也要能选内容标签，所以词表跟着「我的站点」一起给
+    tags: SITE_TAGS,
   });
 }
 

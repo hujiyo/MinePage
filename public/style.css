@@ -139,6 +139,42 @@ textarea.area { min-height: 96px; font-family: inherit; font-size: 14px; }
 .label { display: block; font-weight: 500; margin-bottom: 7px; }
 .hint { display: block; color: var(--muted); font-size: 12px; margin-top: 6px; }
 
+/* 投稿页「更多设置」折叠块：默认收起，投稿页看上去还是原来那个极简两栏表单；
+   展开后是发布后也能在编辑页改的四项，这里只是省一趟来回。 */
+.advBox { margin: 4px 0 18px; }
+.advBox summary {
+  cursor: pointer;
+  color: var(--muted2);
+  font-size: 13px;
+  padding: 10px 0;
+  border-top: 1px dashed var(--border);
+  list-style: none;
+  user-select: none;
+}
+.advBox summary::-webkit-details-marker { display: none; }
+.advBox summary::before { content: '▸'; color: var(--muted); margin-right: 6px; }
+.advBox[open] summary::before { content: '▾'; }
+.advBox summary:hover { color: var(--pink); }
+.advBox summary:hover::before { color: var(--pink); }
+.advBox .advHint { color: var(--muted); font-size: 12px; margin-left: 8px; font-weight: 400; }
+.advBox[open] summary { border-bottom: 1px dashed var(--border); margin-bottom: 16px; }
+.advBox .advBody { padding-top: 2px; }
+
+/* 发布成功后追在成功提示屁股后面的「哪项设置没存上」小字 */
+.advNote {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  font-size: 12px;
+  color: var(--muted2);
+}
+.advNote button { margin-left: 6px; }
+
+/* 投稿页已选文件的每一行：路径可省略，右侧「移除」 */
+.pickRow { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.pickRow .pp { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pickRow .rm { flex: none; padding: 1px 8px; font-size: 11px; }
+
 .code-row { display: flex; gap: 10px; }
 .code-row input { flex: 1; letter-spacing: 2px; }
 .code-row button { white-space: nowrap; flex-shrink: 0; }
