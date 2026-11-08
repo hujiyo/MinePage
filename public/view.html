@@ -72,6 +72,7 @@ const cEmpty = document.getElementById('cEmpty');
 
 let site = null;        // { name, title, description, tag, status, author: {id,name,username} }
 let stats = { views: 0, likes: 0, favorites: 0, comments: 0, liked: false, favorited: false };
+let folder = null;      // 收藏所在的收藏夹名（未收藏为 null）
 let following = false;
 let comments = [];
 let me = null;
@@ -129,6 +130,129 @@ async function needLogin() {
   return false;
 }
 
+/**
+ * 收藏 —— 先弹收藏夹选择器，点哪个夹子就收进哪个；已收藏时再选一次等于换夹。
+ * 选择器里还能新建收藏夹和取消收藏。
+ *
+ * 契约：`POST /api/sites/:name/favorite` body `{folder}` → `{ok, favorited, folder, favorites}`；
+ *      `DELETE` 同路径 → `{ok, favorited: false, favorites}`。
+ */
+async function toggleFavorite() {
+  if (!(await needLogin())) return;
+  let folders;
+  try {
+    const data = await MP.api('/api/favorite-folders');
+    folders = data.folders || [];
+  } catch (err) {
+    MP.toast(err.message);
+    return;
+  }
+  openFavPicker(folders);
+}
+
+/** 打开收藏夹选择弹窗。folders 是 [{name, count}]。 */
+function openFavPicker(folders) {
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  mask.innerHTML = '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="favTitle">'
+    + '<button class="modal-x" type="button" aria-label="关闭">×</button>'
+    + '<h2 class="modal-title" id="favTitle">收藏到…</h2>'
+    + '<div class="folderPick"></div>'
+    + '<div class="folderNew">'
+    +   '<input type="text" maxlength="50" autocomplete="off" placeholder="新建收藏夹，例如：设计灵感">'
+    +   '<button class="mbtn ghost" type="button" data-create>新建</button>'
+    + '</div>'
+    + '<button class="mbtn ghost" type="button" data-unfav>取消收藏</button>'
+    + '</div>';
+
+  const modal = mask.querySelector('.modal');
+  const list = mask.querySelector('.folderPick');
+  const input = mask.querySelector('input');
+  const unfavBtn = mask.querySelector('[data-unfav]');
+  unfavBtn.hidden = !stats.favorited;
+
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    mask.remove();
+  };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+
+  const renderList = () => {
+    list.textContent = '';
+    if (!folders.length) {
+      list.innerHTML = '<div class="empty">还没有收藏夹，先在下面新建一个</div>';
+      return;
+    }
+    folders.forEach((f) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'fp' + (stats.favorited && f.name === folder ? ' on' : '');
+      btn.innerHTML = '<span>' + MP.esc(f.name) + '</span>'
+        + '<span class="ct">' + MP.fmtNum(f.count || 0) + ' 个</span>';
+      btn.addEventListener('click', () => saveToFolder(f.name));
+      list.appendChild(btn);
+    });
+  };
+
+  /** 收藏 / 换夹，成功后关弹窗。 */
+  async function saveToFolder(name) {
+    try {
+      const data = await MP.api(API + '/favorite', { method: 'POST', body: { folder: name } });
+      stats.favorited = data.favorited;
+      folder = data.folder || name;
+      stats.favorites = data.favorites;
+      renderBar();
+      close();
+      MP.toast('已收藏到「' + folder + '」');
+    } catch (err) {
+      MP.toast(err.message);
+    }
+  }
+
+  /** 取消收藏（按钮只在已收藏时出现）。 */
+  async function unfavorite() {
+    try {
+      const data = await MP.api(API + '/favorite', { method: 'DELETE' });
+      stats.favorited = data.favorited;
+      folder = null;
+      stats.favorites = data.favorites;
+      renderBar();
+      close();
+      MP.toast('已取消收藏');
+    } catch (err) {
+      MP.toast(err.message);
+    }
+  }
+
+  /** 新建收藏夹并直接收进去。 */
+  async function createAndSave() {
+    const name = input.value.trim();
+    if (!name) {
+      MP.toast('收藏夹名字不能为空');
+      input.focus();
+      return;
+    }
+    try {
+      const data = await MP.api('/api/favorite-folders', { method: 'POST', body: { name } });
+      folders = data.folders || folders;
+      await saveToFolder(data.name);
+    } catch (err) {
+      MP.toast(err.message);
+    }
+  }
+
+  modal.querySelector('.modal-x').addEventListener('click', close);
+  mask.addEventListener('mousedown', (e) => { if (e.target === mask) close(); });
+  modal.querySelector('[data-create]').addEventListener('click', createAndSave);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') createAndSave(); });
+  unfavBtn.addEventListener('click', unfavorite);
+  document.addEventListener('keydown', onKey);
+
+  renderList();
+  document.body.appendChild(mask);
+  if (!stats.favorited) input.focus();
+}
+
 /** 重新渲染底部吸附栏（互动状态变化时调用）。 */
 function renderBar() {
   if (!site) return;
@@ -172,15 +296,10 @@ function renderBar() {
   }));
   gLeft.appendChild(makeItem('fav', '收藏 ' + MP.fmtNum(stats.favorites), {
     on: stats.favorited,
-    click: async () => {
-      if (!(await needLogin())) return;
-      try {
-        const data = await MP.api(API + '/favorite', { method: stats.favorited ? 'DELETE' : 'POST' });
-        stats.favorited = data.favorited;
-        stats.favorites = data.favorites;
-        renderBar();
-      } catch (err) { MP.toast(err.message); }
-    },
+    title: stats.favorited
+      ? '已收藏到「' + folder + '」，点击可换收藏夹'
+      : '收藏到指定收藏夹',
+    click: toggleFavorite,
   }));
 
   // 中间：收起小三角形（点击整条栏收起，只在左下角留一个小三角形）
@@ -487,6 +606,7 @@ cForm.addEventListener('submit', async (e) => {
     const data = await MP.api(API + '/stats');
     site = data.site;
     stats = data.stats;
+    folder = stats.folder || null;
   } catch (err) {
     viewer.hidden = true;
     snapbar.hidden = true;
