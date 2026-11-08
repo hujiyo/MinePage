@@ -34,7 +34,7 @@
     </label>
     <button type="button" id="metaSave">保存设置</button>
 
-    <!-- 卡片封面：自定义图会覆盖「自动取首页第一张图」的默认封面 -->
+    <!-- 卡片封面：自定义图会覆盖卡片默认的站内实时画面 -->
     <div class="field" style="margin-top:16px">
       <span class="label">卡片封面</span>
       <div class="row">
@@ -44,7 +44,7 @@
         <button type="button" id="coverSave" disabled>上传封面</button>
         <button type="button" class="danger" id="coverRemove" hidden>移除封面</button>
       </div>
-      <span class="hint">不设置时卡片自动取首页第一张图当封面；这里上传的图会覆盖自动封面。png / jpg / webp / gif，≤ 2 MB</span>
+      <span class="hint">不设置时卡片显示站点顶部的实时画面（悬停会自动下翻预览）；这里上传的图会覆盖它。png / jpg / webp / gif，≤ 2 MB，建议 16:9</span>
     </div>
   </section>
 
@@ -278,14 +278,74 @@ const coverSave = document.getElementById('coverSave');
 const coverRemove = document.getElementById('coverRemove');
 const coverPreview = document.getElementById('coverPreview');
 
+/** 客户端上限，和上面的 hint、服务端 lib/config.js 的 MAX_COVER_BYTES 对齐。 */
+const COVER_MAX_BYTES = 2 * 1024 * 1024;
+/** 扩展名 → mime：选文件时 MIME 常常是空的，扩展名更靠谱。 */
+const COVER_EXT_MIME = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+};
+const COVER_MIMES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+
+let localPreview = '';   // 未上传时的本地 blob 预览地址，换图 / 复位时要释放
+
+/** 释放本地 blob 预览地址，避免换图几次就攒下几个不回收的 objectURL。 */
+function dropLocalPreview() {
+  if (localPreview) {
+    URL.revokeObjectURL(localPreview);
+    localPreview = '';
+  }
+}
+
+/**
+ * 判断选中的文件能不能当封面：先看扩展名，扩展名认不出再退回 MIME。
+ * 认得出返回 mime，认不出返回 null（调用方据此提示并复位）。
+ */
+function coverAcceptedMime(file) {
+  const ext = String(file.name || '').split('.').pop().toLowerCase();
+  if (COVER_EXT_MIME[ext]) return COVER_EXT_MIME[ext];
+  return COVER_MIMES.includes(file.type) ? file.type : null;
+}
+
+/**
+ * 读封面接口的响应。平台接口失败也是 JSON（带 message），直接用；
+ * 不是 JSON 时（路由还没上线、网关 / 代理回了个 HTML 错误页）按状态码说人话，
+ * 别把服务端的真实错误吞成一句「网络出问题了」。
+ */
+async function readCoverReply(res, fallback) {
+  let data = null;
+  try { data = JSON.parse(await res.text()); } catch { /* 不是 JSON，走下面的状态码分支 */ }
+  if (data && typeof data === 'object') return data;
+
+  const reasons = {
+    400: '只支持 png / jpg / webp / gif 图片',
+    401: '登录状态过期了，刷新页面重新登录',
+    403: '只能改自己的站点',
+    404: '封面接口不存在，服务端可能还没更新',
+    413: '图片太大了，最大 2 MB',
+  };
+  const reason = reasons[res.status]
+    || (res.status >= 500 ? '服务端出错了，稍后再试'
+      : res.ok ? '服务端返回的不是接口数据，可能还没更新到这一版' : fallback);
+  return { ok: false, message: reason + '（HTTP ' + res.status + '）' };
+}
+
+/** 用本地 blob 预览选中的文件（还没上传时先看看效果）；旧的 blob 地址先释放掉。 */
+function showLocalPreview(file) {
+  dropLocalPreview();
+  localPreview = URL.createObjectURL(file);
+  coverPreview.src = localPreview;
+  coverPreview.hidden = false;
+}
+
 /**
  * 按服务端真实状态刷新封面预览：有自定义封面就显示（URL 加时间戳防缓存），
  * 同时亮出「移除封面」；没有就藏起预览图和移除按钮。
- * 上传成功 / 移除成功 / 选择文件被取消时都会调它兜底回真实状态。
+ * API_BASE 要到 loadSite() 成功之后才有值，没值时不拼地址（避免拼出 /cover 这种错地址）。
  */
 function renderCoverPreview() {
-  if (site && site.hasCover) {
-    coverPreview.src = '/api/sites/' + encodeURIComponent(siteName) + '/cover?v=' + Date.now();
+  dropLocalPreview();
+  if (site && site.hasCover && API_BASE) {
+    coverPreview.src = API_BASE + '/cover?v=' + Date.now();
     coverPreview.hidden = false;
     coverRemove.hidden = false;
   } else {
@@ -295,34 +355,55 @@ function renderCoverPreview() {
   }
 }
 
+/**
+ * 预览跟着「当前状态」走：手上还攥着待上传的文件就预览它，
+ * 没有文件（没选 / 已传成功）就回落到服务端真实封面。
+ */
+function syncCoverPreview() {
+  const file = coverFile.files[0];
+  if (file) showLocalPreview(file);
+  else renderCoverPreview();
+}
+
 coverPick.addEventListener('click', () => coverFile.click());
 
 coverFile.addEventListener('change', () => {
-  const file = coverFile.files[0];
-  coverSave.disabled = !file;
-  if (file) {
-    // 还没上传先用本地 blob 预览效果
-    coverPreview.src = URL.createObjectURL(file);
-    coverPreview.hidden = false;
-  } else {
-    renderCoverPreview();
-  }
+  coverSave.disabled = !coverFile.files[0];
+  syncCoverPreview();
 });
+
+/** 本地预检没过：清空选择、复位上传按钮，回到服务端真实状态。 */
+function resetCoverPick(html) {
+  showMsg(false, html);
+  coverFile.value = '';
+  coverSave.disabled = true;
+  renderCoverPreview();
+}
 
 coverSave.addEventListener('click', async () => {
   const file = coverFile.files[0];
   if (!file) return;
 
+  const mime = coverAcceptedMime(file);
+  if (!mime) {
+    resetCoverPick('只支持 png / jpg / webp / gif 图片，换一张试试。');
+    return;
+  }
+  if (file.size > COVER_MAX_BYTES) {
+    resetCoverPick('图片太大了（' + fmtSize(file.size) + '），最大 2 MB。');
+    return;
+  }
+
   coverSave.disabled = true;
   let ok = false;
   try {
     // 原始字节直接 PUT，服务端按文件头嗅探类型，不信任 Content-Type
-    const res = await fetch('/api/sites/' + encodeURIComponent(siteName) + '/cover', {
+    const res = await fetch(API_BASE + '/cover', {
       method: 'PUT',
-      headers: { 'Content-Type': file.type || 'application/octet-stream' },
-      body: await file.arrayBuffer(),
+      headers: { 'Content-Type': mime },
+      body: file,
     });
-    const data = await res.json();
+    const data = await readCoverReply(res, '上传失败');
     if (data.ok) {
       ok = true;
       site.hasCover = true;
@@ -336,20 +417,21 @@ coverSave.addEventListener('click', async () => {
   } finally {
     // 成功后没有待上传文件、保持禁用；失败允许直接重试
     coverSave.disabled = ok;
-    renderCoverPreview();
+    syncCoverPreview();
   }
 });
 
 coverRemove.addEventListener('click', async () => {
-  if (!confirm('确定移除自定义封面？移除后卡片用自动封面（首页第一张图）。')) return;
+  if (!confirm('确定移除自定义封面？移除后卡片显示站点顶部的实时画面。')) return;
   coverRemove.disabled = true;
   try {
-    const res = await fetch('/api/sites/' + encodeURIComponent(siteName) + '/cover', {
-      method: 'DELETE',
-    });
-    const data = await res.json();
+    const res = await fetch(API_BASE + '/cover', { method: 'DELETE' });
+    const data = await readCoverReply(res, '移除失败');
     if (data.ok) {
       site.hasCover = false;
+      // 移除后手上待上传的图也不再连着「旧封面」，一并清掉，预览回落到没有封面
+      coverFile.value = '';
+      coverSave.disabled = true;
       showMsg(true, '已移除自定义封面');
     } else {
       showMsg(false, escapeHtml(data.message || '移除失败'));

@@ -76,13 +76,26 @@ async function mountBanner() {
   let idx = 0;
   let timer = null;
 
+  /** 轮播封面的取图地址：/api/sites/<用户名>/<站名>/cover。
+   *  /api/banners 返回的 site 里只有 owner（用户名），没有 author；拼不出来就返回空串，调用方退回渐变。 */
+  function bannerCoverUrl(site) {
+    const owner = (site.author && site.author.username) || site.owner || '';
+    if (!owner || !site.name) return '';
+    return '/api/sites/' + encodeURIComponent(owner) + '/' + encodeURIComponent(site.name) + '/cover';
+  }
+
   function paint() {
     const b = list[idx];
     const title = b.title || b.site.title || b.site.name;
     const sub = b.subtitle || b.site.description || '';
+    const coverUrl = b.site.hasCover ? bannerCoverUrl(b.site) : '';
     el.style.background = MP.grad(b.site);
     el.innerHTML =
-      '<div class="bcover"><span class="bchar">' + MP.esc(MP.initial(b.site)) + '</span></div>'
+      '<div class="bcover">'
+      + (coverUrl
+        ? '<img src="' + MP.esc(coverUrl) + '" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">'
+        : '<span class="bchar">' + MP.esc(MP.initial(b.site)) + '</span>')
+      + '</div>'
       + '<div class="binfo"><b>' + MP.esc(title) + '</b><span>' + MP.esc(sub) + '</span></div>'
       + (list.length > 1
         ? '<button type="button" class="bnav prev" title="上一张">' + MP.icon('left') + '</button>'
@@ -96,6 +109,16 @@ async function mountBanner() {
     el.querySelectorAll('.bdots i').forEach((d) => {
       d.addEventListener('click', (e) => { e.stopPropagation(); go(Number(d.dataset.i)); });
     });
+    // 图挂了（接口 404 / 站点已下线）就退回渐变 + 站名首字，别留一块空白
+    const img = el.querySelector('.bcover img');
+    if (img) {
+      img.addEventListener('error', () => {
+        const s = document.createElement('span');
+        s.className = 'bchar';
+        s.textContent = MP.initial(b.site);
+        img.replaceWith(s);
+      });
+    }
   }
 
   function go(i) {

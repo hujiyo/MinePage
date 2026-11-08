@@ -1,6 +1,7 @@
 import http from 'node:http';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -13,6 +14,7 @@ import {
   MAX_FILES_PER_SITE,
   MAX_SITE_TOTAL_BYTES,
   MAX_ZIP_BYTES,
+  MAX_COVER_BYTES,
   SESSION_COOKIE,
   SESSION_TTL_DAYS,
   COOKIE_SECURE,
@@ -81,6 +83,7 @@ import {
   SITE_TAGS,
 } from './lib/sites.js';
 import { parseZip } from './lib/zip.js';
+import { getSiteCover, removeSiteCover, setSiteCover, siteHasCover } from './lib/covers.js';
 import {
   createBanner,
   deleteBanner,
@@ -882,6 +885,7 @@ async function handleMySites(req, res) {
     kind: s.file_count > 0 ? 'multi' : 'single',
     fileCount: s.file_count,
     totalSize: s.size + s.files_size,
+    hasCover: Boolean(s.has_cover),
     createdAt: s.created_at,
     updatedAt: s.updated_at,
   }));
@@ -1150,6 +1154,7 @@ async function handleSiteDetail(req, res, [username, name]) {
       description: site.description,
       tag: site.tag,
       tagLabel: siteTagLabel(site.tag),
+      hasCover: await siteHasCover(site.id),
       createdAt: site.created_at,
       updatedAt: site.updated_at,
     },
@@ -1288,6 +1293,104 @@ async function handleSiteFileDelete(req, res, [username, name]) {
   }
 
   sendJson(res, 200, { ok: true });
+}
+
+// ---------------------------------------------------------------- 卡片自定义封面
+
+/** 封面 ETag：换图后 updated_at 一定变，配合 size 足够区分；走 sha1 收敛成短串。 */
+function coverEtag(cover) {
+  return `"${createHash('sha1').update(`${cover.updatedAt}#${cover.size}`).digest('hex')}"`;
+}
+
+/** If-None-Match 是否命中（支持逗号分隔的多值与 *）。 */
+function ifNoneMatchHit(req, etag) {
+  const raw = String(req.headers['if-none-match'] ?? '').trim();
+  if (!raw) return false;
+  return raw.split(',').map((s) => s.trim()).some((s) => s === '*' || s === etag);
+}
+
+/** 上传/覆盖卡片自定义封面：作者本人或管理员，≤ MAX_COVER_BYTES，按文件头嗅探类型。 */
+async function handleSiteCoverUpload(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownSiteOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  // 超限由 readFileBody 自己回 413（它会把多余的字节读干）
+  const bytes = await readFileBody(req, res, MAX_COVER_BYTES);
+  if (!bytes) return;
+  if (bytes.length === 0) {
+    sendJson(res, 400, { ok: false, message: '没有拿到图片内容' });
+    return;
+  }
+
+  try {
+    const { mime, size } = await setSiteCover(site.id, bytes);
+    sendJson(res, 200, { ok: true, size, mime });
+  } catch (err) {
+    if (err.code === 'INVALID_IMAGE') {
+      sendJson(res, 400, { ok: false, message: '只支持 png / jpg / webp / gif 图片' });
+      return;
+    }
+    if (err.code === 'TOO_LARGE') {
+      sendJson(res, 413, { ok: false, message: '封面太大了，上限 2 MB' });
+      return;
+    }
+    console.error('[site-cover-upload]', err);
+    sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+  }
+}
+
+/** 移除卡片自定义封面。没有封面也回 ok（幂等）。 */
+async function handleSiteCoverDelete(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownSiteOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  await removeSiteCover(site.id);
+  sendJson(res, 200, { ok: true });
+}
+
+/**
+ * 取卡片自定义封面：公开接口，不要求登录（广场 / 创作者主页的卡片匿名可见）。
+ * 平台自己的图片资源，是普通响应，**不套沙箱 CSP**（那是给用户页面的）。
+ * no-cache + ETag：换图后卡片必须立刻更新，没换图的重复请求只花 304。
+ */
+async function handleSiteCoverImage(req, res, [username, name]) {
+  const site = await findSiteHeaderByUsername(username, name);
+  if (!site || site.status !== 'active') {
+    sendJson(res, 404, { ok: false, message: '没有这个站点' });
+    return;
+  }
+
+  const cover = await getSiteCover(site.id);
+  if (!cover) {
+    sendJson(res, 404, { ok: false, message: '这个站点还没有设置封面' });
+    return;
+  }
+
+  const etag = coverEtag(cover);
+  const baseHeaders = {
+    'Cache-Control': 'no-cache',
+    ETag: etag,
+    'X-Content-Type-Options': 'nosniff',
+  };
+
+  if (ifNoneMatchHit(req, etag)) {
+    res.writeHead(304, baseHeaders);
+    res.end();
+    return;
+  }
+
+  res.writeHead(200, {
+    ...baseHeaders,
+    'Content-Type': cover.mime,
+    'Content-Length': cover.bytes.length,
+  });
+  res.end(cover.bytes);
 }
 
 // ---------------------------------------------------------------- 社区互动接口（阶段 1 数据层）
@@ -2394,6 +2497,10 @@ const ROUTES = [
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/zip$`), handleSiteZipUpload],
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files\\/content$`), handleSiteFileContent],
   ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files$`), handleSiteFileDelete],
+  // 卡片自定义封面：GET 公开（卡片匿名可见），PUT/DELETE 走「作者或管理员」
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverImage],
+  ['PUT', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverUpload],
+  ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverDelete],
 
   // 社区互动：站名只在作者名下唯一，所以公开接口一律带用户名
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/stats$`), handleSiteStats],
