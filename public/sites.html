@@ -78,6 +78,46 @@
                   单文件 ≤ 10 MB，每站最多 200 个文件</span>
               </div>
 
+              <!-- 更多设置：默认收起，投稿页还是原来那个极简样子；
+                   展开后是发布后在编辑页也能改的四项，这里只是省一趟来回 -->
+              <details class="advBox" id="advBox">
+                <summary>更多设置<span class="advHint">标题 / 简介 / 标签 / 封面，可选，发布后也能改</span></summary>
+                <div class="advBody">
+                  <label class="field">
+                    <span class="label">站点标题</span>
+                    <input id="advTitle" type="text" maxlength="80" placeholder="比如：张三的个人简历">
+                    <span class="hint">卡片和广场里展示的名字，最多 80 字；留空就用页面名字</span>
+                  </label>
+
+                  <label class="field">
+                    <span class="label">站点简介</span>
+                    <textarea id="advDesc" class="area" maxlength="300"
+                              placeholder="一两句话介绍这个站点是做什么的"></textarea>
+                    <span class="hint">最多 300 字</span>
+                  </label>
+
+                  <label class="field">
+                    <span class="label">内容标签</span>
+                    <select id="advTag">
+                      <option value="">未设置</option>
+                    </select>
+                    <span class="hint">标记站点类型，广场按标签归类展示</span>
+                  </label>
+
+                  <div class="field">
+                    <span class="label">卡片封面</span>
+                    <div class="row">
+                      <img id="advCoverPreview" class="coverPreview" alt="封面预览" hidden>
+                      <input id="advCoverFile" class="srFile" type="file"
+                             accept="image/png,image/jpeg,image/webp,image/gif">
+                      <button type="button" class="ghost" id="advCoverPick">选择图片</button>
+                      <button type="button" class="danger" id="advCoverClear" hidden>清除</button>
+                    </div>
+                    <span class="hint">不设置时卡片显示站点顶部的实时画面；png / jpg / webp / gif，≤ 2 MB，建议 16:9</span>
+                  </div>
+                </div>
+              </details>
+
               <button id="submit" type="submit" class="block lg">发布页面</button>
               <span class="hint" id="quotaHint"></span>
             </form>
@@ -269,6 +309,7 @@ async function loadSites() {
       MY_USERNAME = data.username;
     }
     if (data.prefix) QWQ = data.prefix;
+    fillAdvTags(data.tags);
     if (typeof data.quota === 'number') {
       const hint = document.getElementById('quotaHint');
       hint.textContent = '已用 ' + data.sites.length + ' / ' + data.quota
@@ -304,8 +345,11 @@ function showResult(ok, html) {
   result.innerHTML = html;
 }
 
-let picked = [];        // [{ path, file }]
-let pickedMode = null;  // 'single' | 'zip' | 'multi'
+let picked = [];         // [{ path, file }]
+let pickedMode = null;   // 'single' | 'zip' | 'multi'
+let pickSource = 'files'; // 'files' | 'folder'：决定「恰好一个 html」算不算单页模式
+
+const EMPTY_PICK_TITLE = '把 HTML 文件、文件夹或 zip 包拖到这里';
 
 // 系统垃圾文件黑名单（与服务端 lib/config.js JUNK_SEGMENTS 对齐），
 // 收文件时就跳过，别把 Thumbs.db / node_modules 这类东西传上去。
@@ -325,51 +369,60 @@ function resetResume(key) {
 }
 function clearResume() { resumeKey = ''; resumeDone = new Set(); }
 
-/** 统一入口：根据收集到的文件决定上传模式并刷新界面。 */
-function applyPick(list, source) {
-  picked = list;
-  clearResume();
+/**
+ * 判定上传模式。source 是当初收文件的方式：'folder' 收进来的文件不可能整站只有
+ * 一个 html（去掉目录前缀后至少还带着同级文件），所以文件夹来源永不判成单页。
+ * 抽成独立函数是因为「移除某个文件」之后要重算一遍，判定口径必须和初次选择时一模一样。
+ */
+function classifyMode(list, source) {
+  if (list.length === 0) return null;
+  if (source !== 'folder' && list.length === 1 && /\.html?$/i.test(list[0].path)) return 'single';
+  if (list.length === 1 && /\.zip$/i.test(list[0].path)) return 'zip';
+  return 'multi';
+}
+
+/**
+ * 纯渲染：按当前 picked / pickSource 刷新拖放区、模式徽章和文件列表。
+ * 不碰断点续传状态（那是 applyPick 的事），所以移除单个文件后再调它是安全的。
+ */
+function renderPick() {
+  pickedMode = classifyMode(picked, pickSource);
   pickList.textContent = '';
   modeTag.hidden = true;
 
-  if (list.length === 0) {
-    pickedMode = null;
+  if (picked.length === 0) {
     drop.classList.remove('ready');
-    dropTitle.textContent = '把 HTML 文件、文件夹或 zip 包拖到这里';
+    dropTitle.textContent = EMPTY_PICK_TITLE;
     pickList.hidden = true;
     return;
   }
 
-  const onlyOneHtml = source !== 'folder'
-    && list.length === 1 && /\.html?$/i.test(list[0].path);
+  drop.classList.add('ready');
 
-  if (onlyOneHtml) {
-    pickedMode = 'single';
-    drop.classList.add('ready');
-    dropTitle.textContent = list[0].path;
+  // 列表在任何模式下都留着：单页 / ZIP 只有一行，但那一个文件也得能移除
+  // ——「选错了文件只能整批重选」正是这个页面的老毛病。
+
+  if (pickedMode === 'single') {
+    dropTitle.textContent = picked[0].path;
     modeTag.hidden = false;
     modeTag.innerHTML = '<span class="badge">单页模式 · 整个站点就是这一个 HTML</span>';
-    pickList.hidden = true;
+    renderPickRows();
     return;
   }
 
   // 单个 zip：整包丢给服务端解压发布（Netlify Drop 式）
-  if (list.length === 1 && /\.zip$/i.test(list[0].path)) {
-    pickedMode = 'zip';
-    drop.classList.add('ready');
-    dropTitle.textContent = list[0].path;
+  if (pickedMode === 'zip') {
+    dropTitle.textContent = picked[0].path;
     modeTag.hidden = false;
     modeTag.innerHTML = '<span class="badge ok">ZIP 模式 · 解压后整包发布</span>';
-    pickList.hidden = true;
+    renderPickRows();
     return;
   }
 
   // 多页模式
-  pickedMode = 'multi';
-  drop.classList.add('ready');
-  dropTitle.textContent = list.length + ' 个文件';
-  const hasIndex = list.some((it) => it.path === 'index.html');
-  const hasAnyHtml = list.some((it) => /\.html?$/i.test(it.path));
+  dropTitle.textContent = picked.length + ' 个文件';
+  const hasIndex = picked.some((it) => it.path === 'index.html');
+  const hasAnyHtml = picked.some((it) => /\.html?$/i.test(it.path));
   modeTag.hidden = false;
   if (hasIndex) {
     modeTag.innerHTML = '<span class="badge ok">多页模式 · 入口 index.html</span>';
@@ -380,17 +433,50 @@ function applyPick(list, source) {
     modeTag.innerHTML = '<span class="badge bad">多页模式 · 没有任何 HTML 文件，上传会被拒绝</span>';
   }
 
+  renderPickRows();
+}
+
+/** 把当前 picked 铺成带「移除」的列表行（单页 / ZIP / 多页共用）。 */
+function renderPickRows() {
+  pickList.textContent = '';
   pickList.hidden = false;
-  list.slice(0, 100).forEach((it) => {
-    const line = document.createElement('div');
-    line.textContent = it.path + '（' + it.file.size + ' B）';
-    pickList.appendChild(line);
+
+  picked.slice(0, 100).forEach((it, i) => {
+    const row = document.createElement('div');
+    row.className = 'pickRow';
+
+    const pathText = document.createElement('span');
+    pathText.className = 'pp';
+    pathText.textContent = it.path + '（' + it.file.size + ' B）';
+    row.appendChild(pathText);
+
+    // 选了文件却拿不掉是这个页面的老毛病：给了整批重选之外的第二个选择
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'ghost tiny rm';
+    rm.textContent = '移除';
+    rm.addEventListener('click', () => {
+      picked.splice(i, 1);
+      // 故意不调 clearResume()：断点续传按 path 记，删掉一个不影响其余的
+      renderPick();
+    });
+    row.appendChild(rm);
+
+    pickList.appendChild(row);
   });
-  if (list.length > 100) {
+  if (picked.length > 100) {
     const more = document.createElement('div');
-    more.textContent = '…还有 ' + (list.length - 100) + ' 个文件';
+    more.textContent = '…还有 ' + (picked.length - 100) + ' 个文件';
     pickList.appendChild(more);
   }
+}
+
+/** 统一入口：换了一批文件，作废断点续传记录，然后重新渲染。 */
+function applyPick(list, source) {
+  picked = list;
+  pickSource = source;
+  clearResume();
+  renderPick();
 }
 
 document.getElementById('pickFiles').addEventListener('click', () => fileInput.click());
@@ -500,6 +586,242 @@ function siteUrlOf(siteName) {
   return '/' + QWQ + '/' + encodeURIComponent(MY_USERNAME) + '/' + encodeURIComponent(siteName) + '/';
 }
 
+// ---------------------------------------------------------------- 投稿：更多设置
+
+const advBox = document.getElementById('advBox');
+const advTitle = document.getElementById('advTitle');
+const advDesc = document.getElementById('advDesc');
+const advTag = document.getElementById('advTag');
+const advCoverFile = document.getElementById('advCoverFile');
+const advCoverPick = document.getElementById('advCoverPick');
+const advCoverPreview = document.getElementById('advCoverPreview');
+const advCoverClear = document.getElementById('advCoverClear');
+
+/** 和服务端 lib/config.js 的 MAX_COVER_BYTES 对齐。 */
+const ADV_COVER_MAX = 2 * 1024 * 1024;
+/** 扩展名 → mime：选图时 file.type 常是空串，扩展名更靠得住。 */
+const ADV_COVER_EXT = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+};
+const ADV_COVER_MIMES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+
+let advLocalUrl = '';   // 未发布时的本地预览地址，换图 / 复位要释放
+
+/** 释放本地预览的 objectURL（换图几次不释放会一直占着内存）。 */
+function dropAdvLocalUrl() {
+  if (advLocalUrl) {
+    URL.revokeObjectURL(advLocalUrl);
+    advLocalUrl = '';
+  }
+}
+
+/**
+ * 用服务端下发的标签表填「内容标签」下拉框（第一项固定是「未设置」= 空串）。
+ * 老服务端没有 tags 字段时退回 MP.TAGS，但要剔掉前端的伪标签：空串已经在上面补过，
+ * 'hot' 只是首页排序用的假标签，服务端白名单里没有，提交上去会被拒。
+ */
+function fillAdvTags(tags) {
+  const rows = Array.isArray(tags) && tags.length
+    ? tags
+    : MP.TAGS.filter((t) => t.key !== '' && t.key !== 'hot');
+
+  advTag.textContent = '';
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = '未设置';
+  advTag.appendChild(none);
+
+  rows.forEach((t) => {
+    const opt = document.createElement('option');
+    opt.value = t.key;
+    opt.textContent = t.label;
+    advTag.appendChild(opt);
+  });
+}
+
+/** 认图类型：扩展名优先，认不出再看 MIME；都不认返回空串。 */
+function advCoverMime(file) {
+  const ext = String(file.name || '').split('.').pop().toLowerCase();
+  if (ADV_COVER_EXT[ext]) return ADV_COVER_EXT[ext];
+  return ADV_COVER_MIMES.includes(file.type) ? file.type : '';
+}
+
+/**
+ * 发布前的封面预检：类型和体积都在这里拦下，别让用户白等一轮整站上传
+ * 才在最后一步失败。返回要提示的错误文案，没问题返回空串。
+ */
+function precheckAdvCover() {
+  const file = advCoverFile.files[0];
+  if (!file) return '';
+  if (!advCoverMime(file)) return '封面只支持 png / jpg / webp / gif，换一张或点「清除」。';
+  if (file.size > ADV_COVER_MAX) {
+    return '封面图太大了（' + fmtSize(file.size) + '），最大 2 MB，换一张或点「清除」。';
+  }
+  return '';
+}
+
+/** 折叠区复位：清空四项、收起 details、释放本地预览。 */
+function resetAdvExtras() {
+  dropAdvLocalUrl();
+  advTitle.value = '';
+  advDesc.value = '';
+  advTag.value = '';
+  advCoverFile.value = '';
+  advCoverPreview.hidden = true;
+  advCoverPreview.removeAttribute('src');
+  advCoverClear.hidden = true;
+  advBox.open = false;
+}
+
+/** 按当前选中的封面文件刷新预览（没选就藏起来）。 */
+function syncAdvCover() {
+  const file = advCoverFile.files[0];
+  dropAdvLocalUrl();
+  if (!file) {
+    advCoverPreview.hidden = true;
+    advCoverPreview.removeAttribute('src');
+    advCoverClear.hidden = true;
+    return;
+  }
+  advLocalUrl = URL.createObjectURL(file);
+  advCoverPreview.src = advLocalUrl;
+  advCoverPreview.hidden = false;
+  advCoverClear.hidden = false;
+}
+
+advCoverPick.addEventListener('click', () => advCoverFile.click());
+advCoverFile.addEventListener('change', syncAdvCover);
+advCoverClear.addEventListener('click', () => {
+  advCoverFile.value = '';
+  syncAdvCover();
+});
+
+/** 当前折叠区填了什么（都填了才发请求，全空时发布流程和改版前一模一样）。 */
+function readAdvExtras() {
+  return {
+    title: advTitle.value.trim(),
+    description: advDesc.value.trim(),
+    tag: advTag.value,
+    cover: advCoverFile.files[0] || null,
+  };
+}
+
+function advExtrasFilled(ex) {
+  return Boolean(ex.title || ex.description || ex.tag || ex.cover);
+}
+
+/** 存不上时把文字项填回折叠区（并展开），省得用户重打一遍。封面文件没法回填 input。 */
+function restoreAdvExtras(ex) {
+  advTitle.value = ex.title;
+  advDesc.value = ex.description;
+  advTag.value = ex.tag;
+  advBox.open = true;
+}
+
+/**
+ * 重试时用哪份设置：文字项以折叠区里现填的为准（用户可能刚改过），
+ * 封面以上次选的为准 —— form.reset() 会把 file input 清空，但那张图还在内存里，
+ * 没必要逼用户重新挑一张。
+ */
+function retryExtras(ex) {
+  const now = readAdvExtras();
+  return {
+    title: now.title,
+    description: now.description,
+    tag: now.tag,
+    cover: now.cover || ex.cover,
+  };
+}
+
+/**
+ * 发布成功后把折叠区的四项存上去（走的是编辑页同一套接口）。
+ * 返回失败项说明数组，全成功返回空数组 —— 发布本身已经成功了，
+ * 这些设置存不上不能反过来把发布也说成失败。
+ */
+async function applyAdvExtras(siteName, ex) {
+  const failures = [];
+  if (!advExtrasFilled(ex)) return failures;
+
+  if (ex.title || ex.description || ex.tag) {
+    try {
+      const res = await fetch(apiBase(siteName) + '/meta', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: ex.title, description: ex.description, tag: ex.tag }),
+      });
+      const data = await res.json();
+      if (!data.ok) failures.push('标题 / 简介 / 标签：' + (data.message || '保存失败'));
+    } catch (err) {
+      failures.push('标题 / 简介 / 标签：网络出错（' + err.message + '）');
+    }
+  }
+
+  if (ex.cover) {
+    try {
+      const res = await fetch(apiBase(siteName) + '/cover', {
+        method: 'PUT',
+        headers: { 'Content-Type': advCoverMime(ex.cover) },
+        body: ex.cover,
+      });
+      let data = null;
+      try { data = JSON.parse(await res.text()); } catch { /* 非 JSON 走下面的状态码 */ }
+      if (!(data && data.ok)) {
+        failures.push('卡片封面：' + (data?.message || '上传失败（HTTP ' + res.status + '）'));
+      }
+    } catch (err) {
+      failures.push('卡片封面：网络出错（' + err.message + '）');
+    }
+  }
+
+  return failures;
+}
+
+/**
+ * 发布成功后的收尾：先补存折叠区的设置，再统一刷新界面。
+ * 设置了但没存上时，成功提示照样给（站确实建好了），只追一句哪项没存上 +
+ * 一个重试按钮；重试只重发设置，不用再传一遍文件。
+ */
+async function finishPublish(successHtml, siteName, ex) {
+  const failures = await applyAdvExtras(siteName, ex);
+
+  form.reset();
+  applyPick([], 'files');
+  // 等它跑完再回填：loadSites 会重建标签下拉（选项重建后选中值会被冲回「未设置」），
+  // 顺序反了的话「设置没存上」那条路上用户选过的标签就丢了。
+  await loadSites();
+
+  if (!failures.length) {
+    resetAdvExtras();
+    showResult(true, successHtml);
+    return;
+  }
+
+  restoreAdvExtras(ex);
+  renderAdvFailure(successHtml, failures, siteName, ex);
+}
+
+/** 成功提示 + 失败项 + 重试按钮（重试成功后把这一段换成干净的成功提示）。 */
+function renderAdvFailure(successHtml, failures, siteName, ex) {
+  showResult(true, successHtml
+    + '<div class="advNote">设置没存上：' + escapeHtml(failures.join('；'))
+    + '。上面折叠区里的内容还留着，改完点下面的按钮重存。 '
+    + '<button type="button" class="ghost tiny" id="advRetry">重试保存设置</button></div>');
+
+  const retry = document.getElementById('advRetry');
+  retry.addEventListener('click', async () => {
+    retry.disabled = true;
+    retry.textContent = '重试中…';
+    const next = retryExtras(ex);
+    const again = await applyAdvExtras(siteName, next);
+    if (again.length) {
+      renderAdvFailure(successHtml, again, siteName, next);
+      return;
+    }
+    resetAdvExtras();
+    showResult(true, successHtml + '<div class="advNote">设置已补存上。</div>');
+  });
+}
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   result.hidden = true;
@@ -516,6 +838,15 @@ form.addEventListener('submit', async (e) => {
   }
   if (picked.length === 0) { showResult(false, '先选择要上传的内容'); return; }
 
+  // 折叠区的封面先预检：类型 / 体积不对就别开始传整站，白等一轮最难受
+  const coverErr = precheckAdvCover();
+  if (coverErr) {
+    advBox.open = true;
+    showResult(false, coverErr);
+    return;
+  }
+  const extras = readAdvExtras();
+
   submit.disabled = true;
   submit.textContent = '上传中…';
 
@@ -530,12 +861,10 @@ form.addEventListener('submit', async (e) => {
       });
       const data = await res.json();
       if (data.ok) {
-        showResult(true,
+        await finishPublish(
           '好了。地址是 <a href="' + data.url + '" target="_blank" rel="noopener">' + data.url + '</a>'
-          + '，也可以去左侧「已发布」看看。');
-        form.reset();
-        applyPick([], 'files');
-        loadSites();
+          + '，也可以去左侧「已发布」看看。',
+          siteName, extras);
       } else {
         showResult(false, data.message || '上传失败');
       }
@@ -558,10 +887,7 @@ form.addEventListener('submit', async (e) => {
             + data.skipList.map((it) => escapeHtml(it.path + '（' + it.reason + '）')).join('<br>')
             + '</details>';
         }
-        showResult(true, msg);
-        form.reset();
-        applyPick([], 'files');
-        loadSites();
+        await finishPublish(msg, siteName, extras);
       } else {
         showResult(false, escapeHtml(data.message || '发布失败'));
       }
@@ -626,14 +952,12 @@ form.addEventListener('submit', async (e) => {
 
       const url = siteUrlOf(siteName);
       if (failures.length === 0) {
-        showResult(true,
+        await finishPublish(
           '上传完成，共 ' + doneCount + ' 个文件'
           + (skipped ? '（跳过已传的 ' + skipped + ' 个）' : '')
           + '。地址：<a href="' + url + '" target="_blank" rel="noopener">'
-          + url + '</a>，也可以去左侧「已发布」看看。');
-        form.reset();
-        applyPick([], 'files');
-        loadSites();
+          + url + '</a>，也可以去左侧「已发布」看看。',
+          siteName, extras);
       } else {
         showResult(false,
           '成功 ' + doneCount + '/' + total + ' 个，失败 ' + failures.length + ' 个：<br>'

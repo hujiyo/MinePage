@@ -463,6 +463,39 @@ async function run() {
   const mySites = await api('/api/sites', { cookie: a.cookie });
   check('我的站点列表里有它', mySites.body?.sites?.some((s) => s.name === SITE), JSON.stringify(mySites.body?.sites?.map((s) => s.name)));
 
+  // 投稿页在站点还不存在的时候就要能选内容标签，所以词表跟着「我的站点」一起下发：
+  // 只给登录用户，未登录的 401 响应里不能漏出来。
+  const SITE_TAG_KEYS = ['resume', 'portfolio', 'social', 'blog', 'event', 'opensource', 'docs', 'other'];
+  const myTags = mySites.body?.tags;
+  check(
+    '我的站点列表带 tags 且是 8 项',
+    Array.isArray(myTags) && myTags.length === SITE_TAG_KEYS.length,
+    `type=${Array.isArray(myTags) ? 'array' : typeof myTags} len=${myTags?.length}`,
+  );
+  check(
+    'tags 每项都有非空字符串 key 与 label',
+    Array.isArray(myTags)
+    && myTags.every((t) => typeof t?.key === 'string' && t.key !== '' && typeof t?.label === 'string' && t.label !== ''),
+    JSON.stringify(myTags),
+  );
+  check(
+    'tags 里没有前端伪标签 hot',
+    Array.isArray(myTags) && !myTags.some((t) => t.key === 'hot'),
+    JSON.stringify(myTags?.map((t) => t.key)),
+  );
+  check(
+    'tags 的 key 集合与 SITE_TAGS 完全一致',
+    Array.isArray(myTags) && new Set(myTags.map((t) => t.key)).size === SITE_TAG_KEYS.length
+    && SITE_TAG_KEYS.every((k) => myTags.some((t) => t.key === k)),
+    JSON.stringify(myTags?.map((t) => t.key)),
+  );
+  const anonMySites = await api('/api/sites');
+  check(
+    '未登录 GET /api/sites 仍是 401 且不带 tags',
+    anonMySites.res.status === 401 && !Object.hasOwn(anonMySites.body ?? {}, 'tags'),
+    `status=${anonMySites.res.status} keys=${JSON.stringify(Object.keys(anonMySites.body ?? {}))}`,
+  );
+
   const detail = await api(apiSite(), { cookie: a.cookie });
   check('站点详情 200', detail.res.status === 200, `status=${detail.res.status}`);
 
