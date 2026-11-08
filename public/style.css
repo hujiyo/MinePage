@@ -794,6 +794,8 @@ section { margin-top: 32px; }
   opacity: .9;
   line-height: 1;
 }
+/* 轮播位有自定义封面时铺满整块（.bcover 自带左右 padding，不脱出会留渐变边） */
+.banner .bcover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .banner img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .banner .binfo {
   position: absolute;

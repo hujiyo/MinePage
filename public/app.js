@@ -625,6 +625,8 @@
       const img = document.createElement('img');
       img.className = 'vimg';
       img.alt = '';
+      img.loading = 'lazy';
+      img.decoding = 'async';
       img.referrerPolicy = 'no-referrer';
       img.addEventListener('error', () => img.remove());
       img.src = siteApi(site, '/cover');

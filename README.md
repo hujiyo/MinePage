@@ -39,6 +39,7 @@ lib/db.js                     MySQL 连接池、建表（幂等）、老库补�
 lib/auth.js                   scrypt 密码哈希、会话 token、Cookie 读写
 lib/users.js                  用户与会话的数据操作、管理员种子
 lib/sites.js                  站点的数据操作
+lib/covers.js                 卡片自定义封面：类型嗅探 + 读写 site_covers
 lib/social.js                 社区互动数据操作（点赞 / 评论 / 收藏 / 关注 / 通知 / 浏览量 / 创作者主页）
 lib/names.js                  站名 / 用户名校验
 lib/addressing.js             「用户名+站名 ⇄ 访问地址」的唯一映射点，换地址形态只改这里
@@ -66,22 +67,25 @@ public/app.js                 公共前端脚本（顶栏 / 图标 / 站点卡�
 public/style.css              共享样式
 ```
 
-## 十二张表
+## 十五张表
 
 | 表 | 存什么 |
 |---|---|
 | `users` | 账号、用户名（必填，也是用户空间路径段）、scrypt 密码哈希、是否管理员、封禁状态 |
 | `sites` | 站名（只在作者名下唯一）、归属用户（注销级联删除）、HTML 内容、大小、上线状态、标题简介标签 |
 | `site_files` | 多页站的文件（路径 + BLOB 内容） |
+| `site_covers` | 卡片自定义封面（一站一张，图片字节 + mime + 大小，站点删除级联清掉） |
 | `sessions` | 登录会话，带过期时间 |
 | `email_codes` | 邮箱验证码的哈希、用途、有效期与尝试次数 |
-| `mcp_tokens` | MCP 密钥的 sha256、名称、最后使用时间（明文不落库） |
 | `likes` | 点赞（一人一站一条） |
 | `comments` | 评论，`reply_to` 只做一级回复 |
-| `favorites` | 收藏，带收藏夹名字 |
+| `favorites` | 收藏，带收藏夹名字（`folder` 只存名字） |
+| `favorite_folders` | 收藏夹（每人一套，空夹子也能存在、能改名；和 `favorites.folder` 靠名字对齐，重命名 / 删除时两边一起改） |
 | `follows` | 关注关系 |
 | `view_history` | 浏览历史（一人一站一条，重复浏览只刷新时间） |
 | `messages` | 私信，`read_at` 为空表示未读 |
+| `mcp_tokens` | MCP 密钥的 sha256、名称、最后使用时间（明文不落库） |
+| `banners` | 首页轮播位（管理员指定第几个位置放哪个站，`title` / `subtitle` 空串表示跟随站点；站点删除级联清掉） |
 
 ## 接口
 
@@ -110,6 +114,7 @@ public/style.css              共享样式
 | POST / DELETE | `/api/sites/:用户名/:站名/favorite` | 收藏 / 取消（可选 folder 名字） |
 | GET / PUT / DELETE | `/api/sites/:用户名/:站名` | 站点详情 / 保存单页 HTML / 删除 |
 | GET / POST / DELETE | `/api/sites/:用户名/:站名/files` | 多页站文件列表 / 上传 / 删除 |
+| GET / PUT / DELETE | `/api/sites/:用户名/:站名/cover` | 自定义卡片封面（≤2MB，png/jpg/webp/gif；不设置时卡片显示站点实时画面） |
 | PUT | `/api/sites/:用户名/:站名/meta` | 站点标题 / 简介 / 标签 |
 | POST / DELETE | `/api/users/:id/follow` | 关注 / 取关（不能关注自己） |
 | GET | `/api/users/:id/social` | 粉丝数 / 关注数 / 是否已关注 |

@@ -90,6 +90,35 @@ function cookiesOf(res) {
   return jar.map((c) => c.split(';')[0]).join('; ');
 }
 
+/** 取二进制响应（封面这类图片接口）。api() 会把 body 读成文本，不能走它。 */
+async function apiBytes(pathname, { cookie, headers = {} } = {}) {
+  const res = await fetch(BASE + pathname, {
+    headers: {
+      ...(cookie ? { Cookie: cookie } : {}),
+      ...headers,
+    },
+    redirect: 'follow',
+  });
+  return { bytes: Buffer.from(await res.arrayBuffer()), res };
+}
+
+/** 直连冒烟库查一眼接口断言看不到的库内状态（比如外键级联是否真的清干净）。 */
+async function dbQuery(sql, params = []) {
+  const conn = await mysql.createConnection({
+    database: smokeDb,
+    host: process.env.MYSQL_HOST ?? '127.0.0.1',
+    password: process.env.MYSQL_PASSWORD ?? '',
+    port: Number(process.env.MYSQL_PORT ?? 3306),
+    user: process.env.MYSQL_USER ?? 'minepage',
+  });
+  try {
+    const [rows] = await conn.query(sql, params);
+    return rows;
+  } finally {
+    await conn.end();
+  }
+}
+
 async function login(loginValue, passwordValue) {
   const { body, res } = await api('/api/auth/login', {
     body: { login: loginValue, password: passwordValue },
@@ -540,6 +569,184 @@ async function run() {
   const stats = await api(apiSite(`/stats`), { cookie: a.cookie });
   check('浏览计数是数字', typeof stats.body?.stats?.views === 'number', JSON.stringify(stats.body?.stats));
   check('浏览计数累计到 2 以上', (stats.body?.stats?.views ?? 0) >= 2, JSON.stringify(stats.body?.stats));
+
+  // 卡片自定义封面：一站一张图，读公开 / 写要作者，换图后 ETag 跟着变。
+  // 图片字节必须是常量，别去读 public/ 里的资产（那些以后可能被换掉）。
+  const PNG_1X1 = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const coverApi = (name = SITE, owner = A_NAME) => apiSite('/cover', name, owner);
+
+  const coverDetailBefore = await api(apiSite(), { cookie: a.cookie });
+  const coverSiteId = coverDetailBefore.body?.site?.id;
+  check(
+    '站点详情初始 hasCover=false',
+    coverDetailBefore.body?.site?.hasCover === false,
+    `id=${coverSiteId} hasCover=${JSON.stringify(coverDetailBefore.body?.site?.hasCover)}`,
+  );
+
+  const coverAnonPut = await api(coverApi(), { method: 'PUT', raw: PNG_1X1, type: 'image/png' });
+  check('未登录上传封面 → 401', coverAnonPut.res.status === 401, `status=${coverAnonPut.res.status}`);
+
+  const coverOtherPut = await api(coverApi(), { cookie: b.cookie, method: 'PUT', raw: PNG_1X1, type: 'image/png' });
+  check('别人上传封面 → 403', coverOtherPut.res.status === 403, `status=${coverOtherPut.res.status}`);
+
+  // 内容类型由文件头决定：声明 image/png 但内容不是图片，照样要拒
+  const coverTextPut = await api(coverApi(), {
+    cookie: a.cookie, method: 'PUT', raw: Buffer.from('这不是图片'), type: 'image/png',
+  });
+  check(
+    '纯文本冒充 PNG 上传 → 400',
+    coverTextPut.res.status === 400,
+    `status=${coverTextPut.res.status} ${JSON.stringify(coverTextPut.body)}`,
+  );
+
+  const coverPut = await api(coverApi(), { cookie: a.cookie, method: 'PUT', raw: PNG_1X1, type: 'image/png' });
+  check(
+    '上传 1×1 PNG 封面成功且 size 正确',
+    coverPut.res.status === 200 && coverPut.body?.ok === true && coverPut.body?.size === PNG_1X1.length,
+    `status=${coverPut.res.status} ${JSON.stringify(coverPut.body)} 期望 size=${PNG_1X1.length}`,
+  );
+
+  const coverGet = await apiBytes(coverApi());
+  check(
+    'GET 封面 200 且类型是 image/png',
+    coverGet.res.status === 200 && coverGet.res.headers.get('content-type') === 'image/png',
+    `status=${coverGet.res.status} ct=${coverGet.res.headers.get('content-type')}`,
+  );
+  check(
+    'GET 封面字节与原图一致（比 Buffer）',
+    coverGet.bytes.length === PNG_1X1.length && coverGet.bytes.equals(PNG_1X1),
+    `len=${coverGet.bytes.length}/${PNG_1X1.length} 前 8 字节=${coverGet.bytes.subarray(0, 8).toString('hex')}`,
+  );
+
+  const coverEtag = coverGet.res.headers.get('etag') ?? '';
+  check(
+    '封面带 ETag + no-cache + nosniff + Content-Length',
+    Boolean(coverEtag)
+    && coverGet.res.headers.get('cache-control') === 'no-cache'
+    && coverGet.res.headers.get('x-content-type-options') === 'nosniff'
+    && coverGet.res.headers.get('content-length') === String(PNG_1X1.length),
+    `etag=${coverEtag} cc=${coverGet.res.headers.get('cache-control')}`
+    + ` nosniff=${coverGet.res.headers.get('x-content-type-options')}`
+    + ` len=${coverGet.res.headers.get('content-length')}`,
+  );
+
+  const coverNotModified = await apiBytes(coverApi(), { headers: { 'If-None-Match': coverEtag } });
+  check('If-None-Match 命中回 304', coverNotModified.res.status === 304, `status=${coverNotModified.res.status} etag=${coverEtag}`);
+
+  const coverDetailAfter = await api(apiSite(), { cookie: a.cookie });
+  check(
+    '上传后站点详情 hasCover=true',
+    coverDetailAfter.body?.site?.hasCover === true,
+    `hasCover=${JSON.stringify(coverDetailAfter.body?.site?.hasCover)}`,
+  );
+
+  const coverDiscover = await api('/api/discover');
+  // 站名可以被不同作者复用，所以要按 author.username 一起挑，别只按 name 撞运气
+  const coverDiscoverCard = coverDiscover.body?.sites?.find(
+    (s) => s.name === SITE && s.author?.username === A_NAME,
+  );
+  check(
+    '发现流卡片 hasCover=true',
+    coverDiscoverCard?.hasCover === true,
+    `card=${JSON.stringify(coverDiscoverCard && { author: coverDiscoverCard.author?.username, hasCover: coverDiscoverCard.hasCover })}`,
+  );
+
+  const coverProfile = await api(`/api/u/${A_NAME}/profile`);
+  check(
+    '创作者主页卡片 hasCover=true',
+    coverProfile.body?.sites?.find((s) => s.name === SITE)?.hasCover === true,
+    JSON.stringify(coverProfile.body?.sites?.find((s) => s.name === SITE)?.hasCover),
+  );
+
+  const coverMySites = await api('/api/sites', { cookie: a.cookie });
+  check(
+    '我的站点列表 hasCover=true',
+    coverMySites.body?.sites?.find((s) => s.name === SITE)?.hasCover === true,
+    JSON.stringify(coverMySites.body?.sites?.find((s) => s.name === SITE)?.hasCover),
+  );
+
+  // 2MB 上限：多一个字节就该被 readFileBody 挡在 413（不会走到类型嗅探）
+  const coverTooBigBytes = Buffer.concat([PNG_1X1, Buffer.alloc(2 * 1024 * 1024)]);
+  const coverTooBig = await api(coverApi(), {
+    cookie: a.cookie, method: 'PUT', raw: coverTooBigBytes, type: 'image/png',
+  });
+  check(
+    '封面超过 2MB → 413',
+    coverTooBig.res.status === 413,
+    `status=${coverTooBig.res.status} len=${coverTooBigBytes.length}`,
+  );
+
+  // 下线站点要用管理员接口：这里自己拿一次管理员 cookie，别依赖后面第 7 节
+  const coverAdmin = await login(ADMIN_LOGIN, ADMIN_PASSWORD);
+  const coverOffline = await api(`/api/admin/sites/${coverSiteId}/status`, {
+    body: { status: 'offline' }, cookie: coverAdmin.cookie, method: 'POST',
+  });
+  check('下线站点成功（封面用）', coverOffline.body?.ok === true, `status=${coverOffline.res.status} ${JSON.stringify(coverOffline.body)}`);
+
+  const coverGetOffline = await apiBytes(coverApi());
+  check(
+    '站点下线后封面 404',
+    coverGetOffline.res.status === 404,
+    `status=${coverGetOffline.res.status} siteId=${coverSiteId}`,
+  );
+
+  const coverOnline = await api(`/api/admin/sites/${coverSiteId}/status`, {
+    body: { status: 'active' }, cookie: coverAdmin.cookie, method: 'POST',
+  });
+  const coverGetOnline = await apiBytes(coverApi());
+  check(
+    '恢复上线后封面又能取到且字节一致',
+    coverOnline.body?.ok === true
+    && coverGetOnline.res.status === 200
+    && coverGetOnline.bytes.equals(PNG_1X1),
+    `online=${JSON.stringify(coverOnline.body)} status=${coverGetOnline.res.status} len=${coverGetOnline.bytes.length}`,
+  );
+
+  // 删图后就该彻底没有：详情 hasCover 回落，GET 直接 404
+  const coverDel = await api(coverApi(), { cookie: a.cookie, method: 'DELETE' });
+  check('删除封面成功', coverDel.body?.ok === true, JSON.stringify(coverDel.body));
+
+  const coverGone = await apiBytes(coverApi());
+  check('删除后 GET 封面 404', coverGone.res.status === 404, `status=${coverGone.res.status}`);
+
+  const coverDetailSans = await api(apiSite(), { cookie: a.cookie });
+  check(
+    '删除后详情 hasCover=false',
+    coverDetailSans.body?.site?.hasCover === false,
+    `hasCover=${JSON.stringify(coverDetailSans.body?.site?.hasCover)}`,
+  );
+
+  // 外键级联：拿一个临时站先存图，删站后 site_covers 里的行必须跟着消失
+  const cascadeName = 'smoke-cover-cascade';
+  const cascadeUpload = await api('/api/upload', {
+    body: { html: '<p>cascade</p>', name: cascadeName }, cookie: a.cookie, method: 'POST',
+  });
+  const cascadeDetail = await api(apiSite('', cascadeName), { cookie: a.cookie });
+  const cascadeId = cascadeDetail.body?.site?.id;
+  check(
+    '创建临时站点（级联用）',
+    cascadeUpload.res.status === 201 && Number.isInteger(cascadeId),
+    `status=${cascadeUpload.res.status} id=${cascadeId} ${JSON.stringify(cascadeUpload.body)}`,
+  );
+
+  await api(apiSite('/cover', cascadeName), { cookie: a.cookie, method: 'PUT', raw: PNG_1X1, type: 'image/png' });
+  const cascadeRowsBefore = await dbQuery('SELECT COUNT(*) AS c FROM site_covers WHERE site_id = ?', [cascadeId]);
+  check(
+    '临时站点封面已写进 site_covers',
+    Number(cascadeRowsBefore[0]?.c) === 1,
+    `id=${cascadeId} rows=${JSON.stringify(cascadeRowsBefore)}`,
+  );
+
+  const cascadeDel = await api(apiSite('', cascadeName), { cookie: a.cookie, method: 'DELETE' });
+  const cascadeRowsAfter = await dbQuery('SELECT COUNT(*) AS c FROM site_covers WHERE site_id = ?', [cascadeId]);
+  check(
+    '删除站点后封面行被级联清掉',
+    cascadeDel.body?.ok === true && Number(cascadeRowsAfter[0]?.c) === 0,
+    `ok=${JSON.stringify(cascadeDel.body)} id=${cascadeId} rows=${JSON.stringify(cascadeRowsAfter)}`,
+  );
 
   // ---------------------------------------------------------- 5. 社交
   console.log('\n社交互动');
