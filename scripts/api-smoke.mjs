@@ -168,6 +168,8 @@ async function boot() {
     HOST: '127.0.0.1',
     // 配额调小，冒烟里几次请求就能撞到上限
     MAX_SITES_PER_USER: String(QUOTA),
+    // 热搜榜的生产默认缓存 5 分钟；冒烟要立刻看到写入结果，关掉缓存（0 = 每次重新算）
+    HOT_CACHE_MS: '0',
     PORT: String(PORT),
     SMTP_HOST: '',
   };
@@ -1061,6 +1063,135 @@ async function run() {
   check('恢复站点成功', backOnline.body?.ok === true, `status=${backOnline.res.status} ${JSON.stringify(backOnline.body)}`);
   const onlineView = await api(pageUrl());
   check('恢复后可访问', onlineView.res.status === 200, `status=${onlineView.res.status}`);
+
+  // ---------------------------------------------------------- 7b. 热门搜索
+  console.log('\n热门搜索');
+
+  const hotWord = '冒烟热词';
+
+  // 还没人搜过：榜是空的，而不是拿标签冒充
+  const hotEmpty = await api('/api/hot');
+  check('没人搜过时热搜为空', (hotEmpty.body?.words?.length ?? 0) === 0, JSON.stringify(hotEmpty.body));
+
+  // 一个人搜了不算热门（阈值是「不同的人」，不是次数）
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: a.cookie });
+  const hotOne = await api('/api/hot');
+  check(
+    '一个人搜不算热门',
+    !(hotOne.body?.words ?? []).some((w) => w.word === hotWord),
+    JSON.stringify(hotOne.body?.words),
+  );
+
+  // 同一个人再搜一遍，还不算第二个人
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: a.cookie });
+  const hotOneAgain = await api('/api/hot');
+  check(
+    '同一个人重复搜不涨人数',
+    !(hotOneAgain.body?.words ?? []).some((w) => w.word === hotWord),
+    JSON.stringify(hotOneAgain.body?.words),
+  );
+
+  // 第二个人也搜了 → 上榜
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: b.cookie });
+  const hotTwo = await api('/api/hot');
+  const hotEntry = (hotTwo.body?.words ?? []).find((w) => w.word === hotWord);
+  check('两个人搜过就上榜', Boolean(hotEntry), JSON.stringify(hotTwo.body?.words));
+  check('榜上人数是 2', hotEntry?.people === 2, JSON.stringify(hotEntry));
+
+  // 翻页不重复计数：带上 page=2 再搜一次，人数不该变
+  await api('/api/discover?q=' + encodeURIComponent(hotWord) + '&page=2', { cookie: a.cookie });
+  const hotPaged = await api('/api/hot');
+  check(
+    '翻页不重复记录',
+    (hotPaged.body?.words ?? []).find((w) => w.word === hotWord)?.people === 2,
+    JSON.stringify(hotPaged.body?.words),
+  );
+
+  // 纯数字 / URL 这类不是搜索词的，不入库
+  await api('/api/discover?q=12345', { cookie: a.cookie });
+  await api('/api/discover?q=' + encodeURIComponent('https://example.com'), { cookie: b.cookie });
+  const hotJunk = await api('/api/hot');
+  check(
+    '垃圾词不进榜',
+    !(hotJunk.body?.words ?? []).some((w) => w.word === '12345' || w.word.includes('example.com')),
+    JSON.stringify(hotJunk.body?.words),
+  );
+
+  // 匿名访客也能凑人数（靠随机 Cookie 区分），但同一次浏览器会话里不会重复计
+  const anonA = await api('/api/discover?q=' + encodeURIComponent(hotWord));
+  const anonB = await api('/api/discover?q=' + encodeURIComponent(hotWord));
+  const hotAnon = await api('/api/hot');
+  check(
+    '匿名访客的搜索也被记录',
+    (hotAnon.body?.words ?? []).find((w) => w.word === hotWord)?.people >= 3,
+    JSON.stringify(hotAnon.body?.words?.find((w) => w.word === hotWord)),
+  );
+
+  // 后台屏蔽：词从榜上消失，已有记录一起删掉，再搜也不记录
+  const block = await api('/api/admin/blocked-words', {
+    body: { note: '冒烟测试', word: hotWord }, cookie: admin.cookie, method: 'POST',
+  });
+  check('后台屏蔽热搜词成功', block.body?.ok === true, JSON.stringify(block.body));
+
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: a.cookie });
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: b.cookie });
+  const hotBlocked = await api('/api/hot');
+  check(
+    '屏蔽后榜上搜不到这个词',
+    !(hotBlocked.body?.words ?? []).some((w) => w.word === hotWord),
+    JSON.stringify(hotBlocked.body?.words),
+  );
+
+  // 屏蔽词在写入侧生效：重新积累了几轮也不会回来
+  const hotBlockedAgain = await api('/api/hot');
+  check(
+    '屏蔽后不再积累记录',
+    !(hotBlockedAgain.body?.words ?? []).some((w) => w.word === hotWord),
+    JSON.stringify(hotBlockedAgain.body?.words),
+  );
+
+  const blockedList = await api('/api/admin/blocked-words', { cookie: admin.cookie });
+  check(
+    '后台能看到屏蔽词',
+    (blockedList.body?.words ?? []).some((w) => w.word === hotWord),
+    JSON.stringify(blockedList.body?.words),
+  );
+
+  // 解封后重新开始积累（历史数据不会回来）
+  const unblock = await api('/api/admin/blocked-words/' + encodeURIComponent(hotWord), {
+    cookie: admin.cookie, method: 'DELETE',
+  });
+  check('解封成功', unblock.body?.ok === true, JSON.stringify(unblock.body));
+
+  const unblockAgain = await api('/api/admin/blocked-words/' + encodeURIComponent(hotWord), {
+    cookie: admin.cookie, method: 'DELETE',
+  });
+  check('解封不存在的词 → 404', unblockAgain.res.status === 404, `status=${unblockAgain.res.status}`);
+
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: a.cookie });
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: b.cookie });
+  const hotUnblocked = await api('/api/hot');
+  check(
+    '解封后重新上榜',
+    (hotUnblocked.body?.words ?? []).find((w) => w.word === hotWord)?.people === 2,
+    JSON.stringify(hotUnblocked.body?.words?.find((w) => w.word === hotWord)),
+  );
+
+  // 权限：非管理员碰不到屏蔽词接口
+  const notAdminBlock = await api('/api/admin/blocked-words', { cookie: b.cookie });
+  check('非管理员看屏蔽词 → 403', notAdminBlock.res.status === 403, `status=${notAdminBlock.res.status}`);
+  const anonBlock = await api('/api/admin/blocked-words');
+  check('未登录看屏蔽词 → 401', anonBlock.res.status === 401, `status=${anonBlock.res.status}`);
+  const notAdminBlockPost = await api('/api/admin/blocked-words', {
+    body: { word: '别人不能加' }, cookie: b.cookie, method: 'POST',
+  });
+  check('非管理员加屏蔽词 → 403', notAdminBlockPost.res.status === 403, `status=${notAdminBlockPost.res.status}`);
+
+  // 空词拒绝
+  const emptyBlock = await api('/api/admin/blocked-words', {
+    body: { word: '   ' }, cookie: admin.cookie, method: 'POST',
+  });
+  check('空词屏蔽 → 400', emptyBlock.res.status === 400, `status=${emptyBlock.res.status}`);
 
   // ---------------------------------------------------------- 8. 改密码与找回
   console.log('\n改密码与找回');
