@@ -148,7 +148,7 @@ const upMoreList = document.getElementById('upMoreList');
 const secUp = document.getElementById('secUp');
 
 let site = null;          // { name, title, description, tag, tagLabel, status, author: {id,name,username} }
-let stats = { views: 0, likes: 0, favorites: 0, comments: 0, liked: false, favorited: false };
+let stats = { views: 0, likes: 0, favorites: 0, comments: 0, coins: 0, coined: 0, liked: false, favorited: false };
 let folder = null;        // 收藏所在的收藏夹名（未收藏为 null）
 let following = false;
 let comments = [];
@@ -163,12 +163,11 @@ function isFs() {
 
 /**
  * 生成操作栏按钮 / 链接。
- * opt.pending=true 表示这项功能还没上线：外观做成「未开放」态，但仍可点（点了给一句说明）。
  */
 function wbtn(ic, text, opt) {
   const o = opt || {};
   const el = document.createElement(o.href ? 'a' : 'button');
-  el.className = 'wbtn' + (o.on ? ' on' : '') + (o.pending ? ' pending' : '');
+  el.className = 'wbtn' + (o.on ? ' on' : '');
   if (o.href) {
     el.href = o.href;
     if (o.newTab) { el.target = '_blank'; el.rel = 'noopener'; }
@@ -176,8 +175,7 @@ function wbtn(ic, text, opt) {
     el.type = 'button';
   }
   el.title = o.title || text;
-  el.innerHTML = MP.icon(ic) + '<span class="wnum">' + MP.esc(text) + '</span>'
-    + (o.pending ? '<span class="soon">未开放</span>' : '');
+  el.innerHTML = MP.icon(ic) + '<span class="wnum">' + MP.esc(text) + '</span>';
   if (o.click) el.addEventListener('click', o.click);
   return el;
 }
@@ -188,6 +186,11 @@ async function needLogin() {
   MP.toast('登录后才能互动');
   location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
   return false;
+}
+
+/** 当前登录用户是不是这个页面的作者（作者不能给自己的页面投币）。 */
+function isOwnAuthor() {
+  return Boolean(me && site && site.author && me.id === site.author.id);
 }
 
 /* ---------------------------------------------------------------- 播放器 */
@@ -294,12 +297,15 @@ function renderActions() {
     title: stats.liked ? '取消点赞' : '点赞这个页面',
     click: toggleLike,
   }));
-  wact.appendChild(wbtn('coin', '投币', {
-    // 后端还没有投币接口：做成明确的「未开放」态（虚线边框 + 降低不透明度），
-    // 让人一眼看出这是还没做的功能，而不是一个点了没反应的按钮
-    title: '投币功能还没上线',
-    pending: true,
-    click: () => MP.toast('投币还没开放'),
+  wact.appendChild(wbtn('coin', '投币 ' + MP.fmtNum(stats.coins), {
+    on: stats.coined > 0,
+    // 已经投满就说明原因，别让人点进去才发现不能再投
+    title: isOwnAuthor()
+      ? '不能给自己的页面投币'
+      : (stats.coined >= (stats.coinLimit ?? 2)
+        ? '你已经给这个页面投满了'
+        : '投币支持这个页面（' + (stats.coined || 0) + ' / ' + (stats.coinLimit ?? 2) + '）'),
+    click: openCoinPicker,
   }));
   wact.appendChild(wbtn('fav', '收藏 ' + MP.fmtNum(stats.favorites), {
     on: stats.favorited,
@@ -359,6 +365,92 @@ function renderDesc() {
   txt.className = 'txt' + (site.description ? '' : ' empty-txt');
   txt.textContent = site.description || '作者还没有写简介。';
   wdesc.appendChild(txt);
+}
+
+/* ---------------------------------------------------------------- 投币 */
+
+/**
+ * 投币 —— 和点赞不同，这是不可撤回的一次性事件（没有取消接口）。
+ * 弹层给 1 枚 / 2 枚两个选项，上限由服务端再判一次（每人每站 2 枚、余额要够）。
+ *
+ * 契约：`POST /api/sites/:用户名/:站名/coin` body `{count}` →
+ *       `{ok, coins, myCoins, balance}`。
+ */
+async function openCoinPicker() {
+  if (!(await needLogin())) return;
+  if (isOwnAuthor()) {
+    MP.toast('不能给自己的页面投币');
+    return;
+  }
+  const limit = stats.coinLimit ?? 2;
+  // 余额可能在上一次投币/兑换后变了，弹层打开前重新拉一次（/api/me 顺带发当天签到币）
+  if (!me.coins) {
+    try {
+      const data = await MP.api('/api/me');
+      if (data.user) me.coins = data.user.coins ?? 0;
+    } catch { /* 拉不到就用旧值，弹层里会显示 0 */ }
+  }
+  const remaining = Math.max(0, limit - stats.coined);
+  const myCoins = me ? (me.coins ?? 0) : 0;
+
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  mask.innerHTML = '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="coinTitle">'
+    + '<button class="modal-x" type="button" aria-label="关闭">×</button>'
+    + '<h2 class="modal-title" id="coinTitle">投币支持一下</h2>'
+    + '<div class="coinInfo"></div>'
+    + '<div class="coinPick"></div>'
+    + '</div>';
+  const modal = mask.querySelector('.modal');
+  const info = mask.querySelector('.coinInfo');
+  const pick = mask.querySelector('.coinPick');
+
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    mask.remove();
+  };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+
+  // 余额与剩余额度：投不出去的原因就说清楚，别让人点一个没反应的按钮
+  const lines = ['你还有 <b>' + MP.fmtNum(myCoins) + '</b> 枚硬币'];
+  if (stats.coined > 0) lines.push('这个页面你已经投过 ' + stats.coined + ' 枚');
+  if (remaining <= 0) lines.push('每人每个页面最多 ' + limit + ' 枚，你已经投满了');
+  else if (myCoins <= 0) lines.push('硬币不够了，明天再来签到可以领');
+  info.innerHTML = lines.map((s) => '<div>' + s + '</div>').join('');
+
+  const disabled = remaining <= 0 || myCoins <= 0;
+  const choices = [1, 2].filter((n) => n <= limit).map((n) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'mbtn' + (n === 1 ? '' : ' ghost');
+    btn.textContent = '投 ' + n + ' 枚';
+    btn.disabled = disabled || n > remaining || n > myCoins;
+    if (!btn.disabled) btn.addEventListener('click', () => giveCoins(n));
+    return btn;
+  });
+  choices.forEach((b) => pick.appendChild(b));
+
+  async function giveCoins(count) {
+    try {
+      const data = await MP.api(API + '/coin', { method: 'POST', body: { count } });
+      stats.coins = data.coins;
+      stats.coined = data.myCoins;
+      if (me) me.coins = data.balance;
+      renderActions();
+      renderBar();
+      renderAbout();
+      close();
+      MP.toast('投了 ' + count + ' 枚，谢谢你的支持');
+    } catch (err) {
+      MP.toast(err.message);
+      close();
+    }
+  }
+
+  modal.querySelector('.modal-x').addEventListener('click', close);
+  mask.addEventListener('mousedown', (e) => { if (e.target === mask) close(); });
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(mask);
 }
 
 /* ---------------------------------------------------------------- 收藏 */
@@ -598,6 +690,7 @@ function renderAbout() {
   [
     ['浏览', MP.fmtNum(stats.views)],
     ['点赞', MP.fmtNum(stats.likes)],
+    ['投币', MP.fmtNum(stats.coins)],
     ['收藏', MP.fmtNum(stats.favorites)],
     ['评论', MP.fmtNum(stats.comments)],
   ].forEach(([label, val]) => {
@@ -711,9 +804,10 @@ function renderBar() {
     on: stats.liked,
     click: toggleLike,
   }));
-  gLeft.appendChild(makeItem('coin', '投币', {
-    title: '投币功能还没上线',
-    click: () => MP.toast('投币还没开放'),
+  gLeft.appendChild(makeItem('coin', '投币 ' + MP.fmtNum(stats.coins), {
+    on: stats.coined > 0,
+    title: '投币支持这个页面',
+    click: openCoinPicker,
   }));
   gLeft.appendChild(makeItem('fav', '收藏 ' + MP.fmtNum(stats.favorites), {
     on: stats.favorited,

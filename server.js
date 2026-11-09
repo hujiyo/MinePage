@@ -23,11 +23,11 @@ import {
   SITE_DESC_MAX,
   BIO_MAX,
   COMMENT_MAX,
+  MAX_COINS_PER_SITE,
   MYSQL_HOST,
   MYSQL_PORT,
   MYSQL_DATABASE,
   USER_SPACE_PREFIX,
-  MAX_SITES_PER_USER,
 } from './lib/config.js';
 import { checkName, checkUsername } from './lib/names.js';
 import { absoluteUrlForSite, urlForSite, urlForView } from './lib/addressing.js';
@@ -60,7 +60,6 @@ import { createMcpToken, listMcpTokens, revokeMcpToken } from './lib/mcp/tokens.
 import {
   countSiteFiles,
   countSites,
-  countSitesByOwner,
   createSite,
   deleteSite,
   findSiteByUsername,
@@ -141,6 +140,15 @@ import {
   unlikeSite,
   withViewerFlags,
 } from './lib/social.js';
+import {
+  chargeCoins,
+  claimDailyCoin,
+  coinBalance,
+  coinsReceived,
+  listLedger,
+  redeemQuotaSlot,
+  siteQuota,
+} from './lib/coins.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -520,10 +528,12 @@ async function handleAsset(req, res, [file]) {
 
 async function handleMe(req, res) {
   const user = await currentUser(req);
-  // 登录用户附带未读通知数 / 未读私信数，导航条不用额外请求
+  // 登录用户附带未读通知数 / 未读私信数，导航条不用额外请求。
+  // 每日首次访问的赠币也在这里发：热路径上当天已领过就只有一次只读查询。
+  const daily = user ? await claimDailyCoin(user.id) : null;
   sendJson(res, 200, {
     ok: true,
-    user,
+    user: user ? { ...user, coins: daily.balance } : null,
     unread: user ? await countUnread(user.id) : 0,
     unreadMessages: user ? await countUnreadMessages(user.id) : 0,
   });
@@ -894,7 +904,9 @@ async function handleMySites(req, res) {
     ok: true,
     username: user.username,
     prefix: USER_SPACE_PREFIX,
-    quota: MAX_SITES_PER_USER,
+    // 配额不是常量：硬币兑换会加名额，页面上的「已用 x / y」要跟着变
+    quota: await siteQuota(user.id),
+    coins: await coinBalance(user.id),
     sites,
     // 投稿页（站点还不存在）也要能选内容标签，所以词表跟着「我的站点」一起给
     tags: SITE_TAGS,
@@ -1466,6 +1478,79 @@ async function handleSiteUnlike(req, res, [username, name]) {
 
   await unlikeSite(site.id, user.id);
   sendJson(res, 200, { ok: true, liked: false, likes: await countLikes(site.id) });
+}
+
+/** 投币：和点赞不同，这是不可撤回的一次性事件（没有对应的 DELETE 接口）。
+ *  body `{count: 1|2}`，不传按 1 枚。 */
+async function handleSiteCoin(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await siteHeaderOrRespond(res, username, name);
+  if (!site || !activeSiteOrRespond(res, site)) return;
+
+  if (site.owner_id === user.id) {
+    sendJson(res, 400, { ok: false, message: '不能给自己的页面投币' });
+    return;
+  }
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  // 只接受 1 或 2：数量来自前端的两个按钮，不让人传 0 或负数
+  const count = body.count === undefined ? 1 : Number(body.count);
+  if (!Number.isInteger(count) || count < 1 || count > MAX_COINS_PER_SITE) {
+    sendJson(res, 400, { ok: false, message: `一次投 1 到 ${MAX_COINS_PER_SITE} 枚` });
+    return;
+  }
+
+  try {
+    const result = await chargeCoins({ siteId: site.id, siteOwnerId: site.owner_id, giverId: user.id, count });
+    sendJson(res, 200, { ok: true, ...result });
+  } catch (err) {
+    if (err.code === 'COIN_LIMIT' || err.code === 'COIN_SHORT') {
+      sendJson(res, err.code === 'COIN_SHORT' ? 402 : 409, { ok: false, message: err.message });
+      return;
+    }
+    console.error('[site-coin]', err);
+    sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+  }
+}
+
+/** 我的硬币页数据：余额、配额、流水。 */
+async function handleCoinsSummary(req, res) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  sendJson(res, 200, {
+    ok: true,
+    balance: await coinBalance(user.id),
+    quota: await siteQuota(user.id),
+    received: await coinsReceived(user.id),
+    ledger: (await listLedger(user.id)).map((row) => ({
+      delta: Number(row.delta),
+      reason: row.reason,
+      at: row.created_at,
+    })),
+  });
+}
+
+/** 花硬币换一份额外站点配额。 */
+async function handleCoinQuotaRedeem(req, res) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  try {
+    const result = await redeemQuotaSlot(user.id);
+    sendJson(res, 200, { ok: true, ...result });
+  } catch (err) {
+    if (err.code === 'COIN_SHORT') {
+      sendJson(res, 402, { ok: false, message: err.message });
+      return;
+    }
+    console.error('[coin-quota]', err);
+    sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+  }
 }
 
 async function handleSiteCommentsList(req, res, [username, name]) {
@@ -2513,6 +2598,9 @@ const ROUTES = [
   ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/comments\\/(\\d+)$`), handleSiteCommentDelete],
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/favorite$`), handleSiteFavorite],
   ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/favorite$`), handleSiteUnfavorite],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/coin$`), handleSiteCoin],
+  ['GET', /^\/api\/coins$/, handleCoinsSummary],
+  ['POST', /^\/api\/coins\/quota$/, handleCoinQuotaRedeem],
   ['POST', /^\/api\/users\/(\d+)\/follow$/, handleUserFollow],
   ['DELETE', /^\/api\/users\/(\d+)\/follow$/, handleUserUnfollow],
   ['GET', /^\/api\/users\/(\d+)\/social$/, handleUserSocial],
