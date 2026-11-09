@@ -281,8 +281,8 @@ async function runMain(cookie, token) {
   const badName = await call(token, 'create_site', { html: '<h1>x</h1>', name: 'A B' });
   check('非法站名被拒', badName.isError, badName.text);
 
-  const tooBig = await call(token, 'create_site', { html: 'x'.repeat(2 * 1024 * 1024 + 1), name: 'smoke-big' });
-  check('超过 2MB 被拒', tooBig.isError && tooBig.text.includes('太大'), tooBig.text);
+  const tooBig = await call(token, 'create_site', { html: 'x'.repeat(5 * 1024 * 1024 + 1), name: 'smoke-big' });
+  check('超过 5MB 被拒', tooBig.isError && tooBig.text.includes('太大'), tooBig.text);
 
   const detail = await call(token, 'get_site', { name: 'smoke-single' });
   check('get_site 带上 HTML', detail.data?.site?.html === '<!DOCTYPE html><h1>v1</h1>');
@@ -325,6 +325,12 @@ async function runMain(cookie, token) {
 
   const badBase64 = await call(token, 'write_file', { content: '!!!not base64!!!', encoding: 'base64', name: 'smoke-multi', path: 'x.bin' });
   check('非法 base64 被拒', badBase64.isError, badBase64.text);
+
+  // write_file 与网页上传共用同一道存储预算闸：单文件 10 MB
+  const tooBigFile = await call(token, 'write_file', {
+    content: 'x'.repeat(10 * 1024 * 1024 + 1), name: 'smoke-multi', path: 'big.txt',
+  });
+  check('write_file 超过单文件 10MB 被拒', tooBigFile.isError && tooBigFile.text.includes('单个文件上限'), tooBigFile.text);
 
   const multiDetail = await call(token, 'get_site', { name: 'smoke-multi' });
   check('多页站 html 为 null', multiDetail.data.site.html === null && multiDetail.data.site.kind === 'multi');

@@ -15,6 +15,7 @@ import {
   MAX_SITE_TOTAL_BYTES,
   MAX_ZIP_BYTES,
   MAX_COVER_BYTES,
+  MAX_USER_TOTAL_BYTES,
   SESSION_COOKIE,
   SESSION_TTL_DAYS,
   COOKIE_SECURE,
@@ -66,6 +67,7 @@ import {
   unblockWord,
 } from './lib/hot.js';
 import {
+  assertStorageBudget,
   countSiteFiles,
   countSites,
   createSite,
@@ -83,10 +85,10 @@ import {
   removeSiteFile,
   setSiteStatus,
   siteTagLabel,
-  totalSiteFileSize,
   updateSiteHtml,
   updateSiteMeta,
   upsertSiteFile,
+  userContentBytes,
   SITE_TAGS,
 } from './lib/sites.js';
 import { parseZip } from './lib/zip.js';
@@ -230,6 +232,11 @@ function sendJson(res, status, payload) {
     'Cache-Control': 'no-store',
   });
   res.end(body);
+}
+
+/** 单页 HTML 超限的提示：上限从 MAX_HTML_BYTES 现算，不写死数字（曾经两个入口各写一个数）。 */
+function htmlTooBigMessage() {
+  return `文件太大了，单个 HTML 上限 ${Math.round(MAX_HTML_BYTES / 1024 / 1024)} MB`;
 }
 
 function sendHtml(res, status, html, extraHeaders = {}) {
@@ -911,7 +918,11 @@ async function handleMySites(req, res) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const sites = (await listSitesByOwner(user.id)).map((s) => ({
+  const [sites, usedBytes] = await Promise.all([
+    listSitesByOwner(user.id),
+    userContentBytes(user.id),
+  ]);
+  const mapped = sites.map((s) => ({
     id: s.id,
     name: s.name,
     url: urlForSite(user.username, s.name),
@@ -923,7 +934,10 @@ async function handleMySites(req, res) {
     status: s.status,
     kind: s.file_count > 0 ? 'multi' : 'single',
     fileCount: s.file_count,
-    totalSize: s.size + s.files_size,
+    // sites.size 只对单页站有意义（存 HTML 字节），多页站的内容全在 site_files。
+    // 两者相加会把「import-templates 曾把文件总和也写进 sites.size」的老站算成两倍，
+    // 所以有文件就只认文件（和 lib/sites.js 的 siteContentBytes 同一口径）。
+    totalSize: s.file_count > 0 ? s.files_size : s.size,
     hasCover: Boolean(s.has_cover),
     createdAt: s.created_at,
     updatedAt: s.updated_at,
@@ -936,7 +950,9 @@ async function handleMySites(req, res) {
     // 配额不是常量：硬币兑换会加名额，页面上的「已用 x / y」要跟着变
     quota: await siteQuota(user.id),
     coins: await coinBalance(user.id),
-    sites,
+    sites: mapped,
+    // 上传上限随接口下发：前端不再各写一份数字，文案和真正生效的闸永远对得上
+    limits: { ...uploadLimits(), storageUsedBytes: usedBytes },
     // 投稿页（站点还不存在）也要能选内容标签，所以词表跟着「我的站点」一起给
     tags: SITE_TAGS,
   });
@@ -961,7 +977,7 @@ async function handleUpload(req, res) {
     return;
   }
   if (Buffer.byteLength(html, 'utf8') > MAX_HTML_BYTES) {
-    sendJson(res, 413, { ok: false, message: '文件太大了，单个文件上限 2 MB' });
+    sendJson(res, 413, { ok: false, message: htmlTooBigMessage() });
     return;
   }
 
@@ -974,8 +990,9 @@ async function handleUpload(req, res) {
       url: absoluteUrlForSite(originOf(req), user.username, site.name),
     });
   } catch (err) {
-    if (err.code === 'NAME_TAKEN' || err.code === 'QUOTA_EXCEEDED') {
-      sendJson(res, err.code === 'NAME_TAKEN' ? 409 : 429, { ok: false, message: err.message });
+    if (err.code === 'NAME_TAKEN' || err.code === 'QUOTA_EXCEEDED' || err.code === 'STORAGE_EXCEEDED') {
+      const status = { NAME_TAKEN: 409, QUOTA_EXCEEDED: 429, STORAGE_EXCEEDED: 413 }[err.code];
+      sendJson(res, status, { ok: false, message: err.message });
       return;
     }
     console.error('[upload]', err);
@@ -1018,8 +1035,9 @@ async function handleSiteFileUpload(req, res, [username, name]) {
       await createSite({ name: checked.name, html: '', ownerId: user.id });
       site = await findSiteHeaderByUsername(username, checked.name);
     } catch (err) {
-      if (err.code === 'NAME_TAKEN' || err.code === 'QUOTA_EXCEEDED') {
-        sendJson(res, err.code === 'NAME_TAKEN' ? 409 : 429, { ok: false, message: err.message });
+      if (err.code === 'NAME_TAKEN' || err.code === 'QUOTA_EXCEEDED' || err.code === 'STORAGE_EXCEEDED') {
+        const status = { NAME_TAKEN: 409, QUOTA_EXCEEDED: 429, STORAGE_EXCEEDED: 413 }[err.code];
+        sendJson(res, status, { ok: false, message: err.message });
         return;
       }
       console.error('[site-file-upload]', err);
@@ -1044,14 +1062,17 @@ async function handleSiteFileUpload(req, res, [username, name]) {
     sendJson(res, 409, { ok: false, message: `站点文件太多啦，上限 ${MAX_FILES_PER_SITE} 个` });
     return;
   }
-  // 单站总容量：把被覆盖文件的旧体积扣掉只算增量，超上限拒收
-  const usedBytes = await totalSiteFileSize(site.id, filePath);
-  if (usedBytes + content.length > MAX_SITE_TOTAL_BYTES) {
-    sendJson(res, 413, {
-      ok: false,
-      message: `站点总容量超限，单站上限 ${Math.round(MAX_SITE_TOTAL_BYTES / 1024 / 1024)} MB`,
+  // 单站 / 每人总容量：覆盖同名文件时把旧体积扣掉只算增量
+  try {
+    await assertStorageBudget({ get }, {
+      ownerId: user.id, siteId: site.id, replacePath: filePath, incomingBytes: content.length,
     });
-    return;
+  } catch (err) {
+    if (err.code === 'STORAGE_EXCEEDED') {
+      sendJson(res, 413, { ok: false, message: err.message });
+      return;
+    }
+    throw err;
   }
 
   const saved = await upsertSiteFile(site.id, filePath, content);
@@ -1116,10 +1137,12 @@ async function handleSiteZipUpload(req, res, [username, name]) {
       totalBytes,
     });
   } catch (err) {
-    if (err.code === 'NO_FILES') {
+    if (err.code === 'NO_FILES' || err.code === 'STORAGE_EXCEEDED') {
       sendJson(res, 400, {
         ok: false,
-        message: 'zip 里没有可发布的文件' + (err.skipped.length ? `（${err.skipped.length} 个条目被跳过）` : ''),
+        message: err.code === 'STORAGE_EXCEEDED'
+          ? err.message
+          : 'zip 里没有可发布的文件' + (err.skipped.length ? `（${err.skipped.length} 个条目被跳过）` : ''),
         skipped: err.skipped.slice(0, 20),
       });
       return;
@@ -1172,7 +1195,19 @@ async function ownSiteOrRespond(req, res, user, username, name) {
   return site;
 }
 
-/** 站点详情：单页站带 html，多页站带文件数。 */
+/** 当前生效的上传上限，接口统一下发（投稿页 / 编辑页 / 校验文案共用）。 */
+function uploadLimits() {
+  return {
+    htmlBytes: MAX_HTML_BYTES,
+    fileBytes: MAX_FILE_BYTES,
+    filesPerSite: MAX_FILES_PER_SITE,
+    siteTotalBytes: MAX_SITE_TOTAL_BYTES,
+    userTotalBytes: MAX_USER_TOTAL_BYTES,
+    zipBytes: MAX_ZIP_BYTES,
+  };
+}
+
+/** 站点详情：单页站带 html，多页站带文件数，外加当前生效的上传上限。 */
 async function handleSiteDetail(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
@@ -1202,6 +1237,8 @@ async function handleSiteDetail(req, res, [username, name]) {
       updatedAt: site.updated_at,
     },
     tags: SITE_TAGS,
+    // 编辑页的「单文件 ≤ x MB」和上传前预检都从这里读，别在前端再写一份数字
+    limits: uploadLimits(),
   });
 }
 
@@ -1262,12 +1299,20 @@ async function handleSiteSaveHtml(req, res, [username, name]) {
     return;
   }
   if (Buffer.byteLength(html, 'utf8') > MAX_HTML_BYTES) {
-    sendJson(res, 413, { ok: false, message: '文件太大了，单个文件上限 2 MB' });
+    sendJson(res, 413, { ok: false, message: htmlTooBigMessage() });
     return;
   }
 
-  const size = await updateSiteHtml(site.id, html);
-  sendJson(res, 200, { ok: true, size });
+  try {
+    const size = await updateSiteHtml(site.id, html, site.owner_id);
+    sendJson(res, 200, { ok: true, size });
+  } catch (err) {
+    if (err.code === 'STORAGE_EXCEEDED') {
+      sendJson(res, 413, { ok: false, message: err.message });
+      return;
+    }
+    throw err;
+  }
 }
 
 /** 删除整个站点（site_files 由外键级联清掉）。 */

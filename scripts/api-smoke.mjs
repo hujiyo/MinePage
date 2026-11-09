@@ -582,21 +582,66 @@ async function run() {
   });
   check('路径穿越被拒', traversal.res.status >= 400, `status=${traversal.res.status}`);
 
-  const bigHtml = `<p>${'x'.repeat(2 * 1024 * 1024)}</p>`;
+  // 单页 HTML 上限 5 MB（对应用户看到的「单页 ≤ 5 MB」）
+  const bigHtml = `<p>${'x'.repeat(5 * 1024 * 1024)}</p>`;
   const tooBig = await api('/api/upload', { body: { html: bigHtml, name: 'smoke-too-big' }, cookie: a.cookie, method: 'POST' });
-  check('单页上传超过 2MB → 413', tooBig.res.status === 413, `status=${tooBig.res.status}`);
+  check('单页上传超过 5MB → 413', tooBig.res.status === 413, `status=${tooBig.res.status}`);
 
-  // 单文件上限已从 10MB 提到 90MB（模板库里有 85MB 的 mp4），10MB 现在是合法体积
-  const hugeFile = `<p>${'y'.repeat(10 * 1024 * 1024)}</p>`;
+  // 多页单文件上限 10 MB：9 MB 合法，11 MB 必须被拒（MEDIUMBLOB 的 16 MB 硬顶之内）
+  const hugeFile = `<p>${'y'.repeat(9 * 1024 * 1024)}</p>`;
   const huge = await api(apiSite(`/files?path=huge.html`), {
     cookie: a.cookie,
     method: 'POST',
     raw: hugeFile,
     type: 'text/html',
   });
-  check('多文件站点 10MB 文件可上传（上限 90MB）', huge.res.status === 201, `status=${huge.res.status}`);
+  check('多文件站点 9MB 文件可上传（上限 10MB）', huge.res.status === 201, `status=${huge.res.status}`);
   const removeHuge = await api(apiSite(`/files?path=huge.html`), { cookie: a.cookie, method: 'DELETE' });
   check('大文件可删除以恢复文件列表', removeHuge.body?.ok === true, JSON.stringify(removeHuge.body));
+
+  const overFile = `<p>${'z'.repeat(11 * 1024 * 1024)}</p>`;
+  const overFileRes = await api(apiSite(`/files?path=over.html`), {
+    cookie: a.cookie,
+    method: 'POST',
+    raw: overFile,
+    type: 'text/html',
+  });
+  check('多文件站点 11MB 文件被拒 → 413', overFileRes.res.status === 413, `status=${overFileRes.res.status}`);
+
+  // 单站总量 50 MB：拿 10 MB 的文件刷到超限，第 5 个必被拒（4×10 + 已有内容 ≈ 40 MB 起）
+  const chunk = 'w'.repeat(10 * 1024 * 1024 - 16);
+  let siteFilled = 0;
+  for (let i = 1; i <= 4; i += 1) {
+    const fill = await api(apiSite(`/files?path=fill-${i}.html`), {
+      cookie: a.cookie, method: 'POST', raw: chunk, type: 'text/html',
+    });
+    if (fill.res.status === 201) siteFilled += 1;
+  }
+  check('单站容量填充 4 个 10MB 文件成功', siteFilled === 4, `filled=${siteFilled}`);
+  const overSite = await api(apiSite(`/files?path=fill-5.html`), {
+    cookie: a.cookie, method: 'POST', raw: chunk, type: 'text/html',
+  });
+  check(
+    '单站总量超过 50MB → 413 且提示站点上限',
+    overSite.res.status === 413 && String(overSite.body?.message).includes('站点总容量'),
+    `status=${overSite.res.status} ${JSON.stringify(overSite.body)}`,
+  );
+  for (let i = 1; i <= 4; i += 1) {
+    await api(apiSite(`/files?path=fill-${i}.html`), { cookie: a.cookie, method: 'DELETE' });
+  }
+
+  // 上限随接口下发，前端文案和预检都靠它（别再让页面各写一份数字）
+  const limitsPayload = (await api('/api/sites', { cookie: a.cookie })).body?.limits;
+  check(
+    'GET /api/sites 下发 limits',
+    limitsPayload?.htmlBytes === 5 * 1024 * 1024
+    && limitsPayload?.fileBytes === 10 * 1024 * 1024
+    && limitsPayload?.filesPerSite === 200
+    && limitsPayload?.siteTotalBytes === 50 * 1024 * 1024
+    && limitsPayload?.userTotalBytes === 100 * 1024 * 1024
+    && typeof limitsPayload?.storageUsedBytes === 'number',
+    JSON.stringify(limitsPayload),
+  );
 
   // 浏览计数：连续访问两次
   await api(pageUrl());
@@ -694,6 +739,76 @@ async function run() {
     '创作者主页卡片 hasCover=true',
     coverProfile.body?.sites?.find((s) => s.name === SITE)?.hasCover === true,
     JSON.stringify(coverProfile.body?.sites?.find((s) => s.name === SITE)?.hasCover),
+  );
+
+  // 每人总量 100 MB：单站上限是 50 MB，所以要用两个站才撞得到账号这道闸。
+  const quotaAccount = await registerUser('smoke-storage@test.local', 'smoke-storage');
+  const storageChunk = 'q'.repeat(10 * 1024 * 1024 - 16);
+
+  const fillSite = async (siteName) => {
+    let saved = 0;
+    for (let i = 1; i <= 5; i += 1) {
+      const put = await api(apiSite(`/files?path=bulk-${i}.html`, siteName, 'smoke-storage'), {
+        cookie: quotaAccount.cookie, method: 'POST', raw: storageChunk, type: 'text/html',
+      });
+      if (put.res.status === 201 || put.res.status === 200) saved += 1;
+    }
+    return saved;
+  };
+
+  check('第一个站灌满 5 × 10MB', await fillSite('storage-a') === 5);
+  check('第二个站灌满 5 × 10MB（账号共约 100MB）', await fillSite('storage-b') === 5);
+
+  const overUser = await api(apiSite(`/files?path=bulk-1.html`, 'storage-c', 'smoke-storage'), {
+    cookie: quotaAccount.cookie, method: 'POST', raw: storageChunk, type: 'text/html',
+  });
+  check(
+    '账号总量超过 100MB → 413 且提示账号上限',
+    overUser.res.status === 413 && String(overUser.body?.message).includes('账号总容量'),
+    `status=${overUser.res.status} ${JSON.stringify(overUser.body)}`,
+  );
+
+  // 把文件换成更小的版本永远允许（日常维护不能被打断）
+  const shrink = await api(apiSite(`/files?path=bulk-1.html`, 'storage-a', 'smoke-storage'), {
+    cookie: quotaAccount.cookie, method: 'POST', raw: '<h1>shrink</h1>', type: 'text/html',
+  });
+  check('把文件换成更小版本仍然成功', shrink.res.status === 200, `status=${shrink.res.status}`);
+
+  // 存量超限的例外：API 进不来（本来就挡），所以直接往库里造一条「已经 110MB」的旧状态
+  // （模拟模板导入的站），验证它仍能把文件换成更小的版本。
+  // 必须超过 100MB 的账号上限才落在那条分支上；60MB 还在单站 50MB 之内，撞不到。
+  await dbQuery(
+    `INSERT INTO sites (name, owner_id, html, size, status, created_at, updated_at)
+     SELECT 'legacy-big', id, '', 0, 'active', ?, ? FROM users WHERE username = 'smoke-storage'`,
+    [new Date().toISOString(), new Date().toISOString()],
+  );
+  await dbQuery(
+    `INSERT INTO site_files (site_id, path, content, size, updated_at)
+     SELECT s.id, 'big.bin', '', 110 * 1024 * 1024, ? FROM sites s WHERE s.name = 'legacy-big'`,
+    [new Date().toISOString()],
+  );
+  const legacyShrink = await api(apiSite(`/files?path=big.bin`, 'legacy-big', 'smoke-storage'), {
+    cookie: quotaAccount.cookie, method: 'POST', raw: '<h1>small</h1>', type: 'text/html',
+  });
+  check('存量已超限的站点仍可把文件换成更小的版本', legacyShrink.res.status === 200, `status=${legacyShrink.res.status}`);
+  const legacyGrow = await api(apiSite(`/files?path=more.html`, 'legacy-big', 'smoke-storage'), {
+    cookie: quotaAccount.cookie, method: 'POST', raw: storageChunk, type: 'text/html',
+  });
+  check('存量已超限的站点再增内容 → 413', legacyGrow.res.status === 413, `status=${legacyGrow.res.status} ${JSON.stringify(legacyGrow.body)}`);
+
+  // 回归：账号已用量必须逐站聚合 —— 单页站的 sites.size 和多页站的文件不能「取大」了事。
+  // 造一个同时有单页站和多页站的账号，确认 storageUsedBytes 把两者都算进去。
+  const mixedAccount = await registerUser('smoke-mixed@test.local', 'smoke-mixed');
+  const singleHtml = `<p>${'s'.repeat(3 * 1024 * 1024)}</p>`;
+  await api('/api/upload', { body: { html: singleHtml, name: 'mixed-single' }, cookie: mixedAccount.cookie, method: 'POST' });
+  await api(apiSite(`/files?path=index.html`, 'mixed-multi', 'smoke-mixed'), {
+    cookie: mixedAccount.cookie, method: 'POST', raw: storageChunk, type: 'text/html',
+  });
+  const mixedUsed = (await api('/api/sites', { cookie: mixedAccount.cookie })).body?.limits?.storageUsedBytes ?? 0;
+  check(
+    '账号已用量逐站聚合（单页 3MB + 多页 10MB ≈ 13MB，不能被取大吞掉）',
+    mixedUsed > 12 * 1024 * 1024 && mixedUsed < 14 * 1024 * 1024,
+    `used=${mixedUsed} (${(mixedUsed / 1024 / 1024).toFixed(1)}MB)`,
   );
 
   const coverMySites = await api('/api/sites', { cookie: a.cookie });

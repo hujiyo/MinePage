@@ -74,8 +74,7 @@
                 </div>
                 <input id="fileInput" type="file" multiple hidden>
                 <input id="folderInput" type="file" webkitdirectory multiple hidden>
-                <span class="hint">单页站：1 个 .html（CSS / JS 请内嵌）；多页站：入口必须是 index.html，
-                  单文件 ≤ 10 MB，每站最多 200 个文件</span>
+                <span class="hint" id="uploadLimitsHint">单页站：1 个 .html（CSS / JS 请内嵌）；多页站：入口必须是 index.html</span>
               </div>
 
               <!-- 更多设置：默认收起，投稿页还是原来那个极简样子；
@@ -131,8 +130,9 @@
               <ul class="muted" style="font-size:13px;margin:0;padding-left:18px;line-height:1.9">
                 <li>单页站所有 CSS / JS 请内嵌在 HTML 里</li>
                 <li>多页站必须包含 <code>index.html</code> 作为入口</li>
-                <li>单个文件不超过 10 MB</li>
-                <li>每个站点最多 200 个文件</li>
+                <li id="limitFile">单个文件有上限</li>
+                <li id="limitCount">每个站点最多若干个文件</li>
+                <li id="limitStorage">单站与账号各有容量上限</li>
                 <li>页面会在沙箱中运行，请勿引用本机资源</li>
               </ul>
             </div>
@@ -186,6 +186,81 @@ function fmtSize(n) {
   if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
   if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
   return n + ' B';
+}
+
+/**
+ * 服务端下发的上传上限（GET /api/sites 的 limits 字段）。
+ * 页面上的每一处「≤ x MB」「最多 n 个」都从这里现算 —— 文案和真正生效的闸
+ * 只能有一个来源，否则又会漂成两套数。
+ */
+let LIMITS = null;
+
+function mbLabel(bytes) {
+  const mb = bytes / 1024 / 1024;
+  return (Number.isInteger(mb) ? mb : mb.toFixed(1)) + ' MB';
+}
+
+/** 把 limits 填进投稿须知和拖放区文案；接口没给就保持占位，不编数字。 */
+function applyLimits(limits) {
+  if (!limits) return;
+  LIMITS = limits;
+
+  const html = document.getElementById('uploadLimitsHint');
+  if (html) {
+    html.textContent = '单页站：1 个 .html（CSS / JS 请内嵌，≤ ' + mbLabel(limits.htmlBytes) + '）；'
+      + '多页站：入口必须是 index.html，单文件 ≤ ' + mbLabel(limits.fileBytes)
+      + '，每站最多 ' + limits.filesPerSite + ' 个文件';
+  }
+  document.getElementById('limitFile').textContent =
+    '单个文件不超过 ' + mbLabel(limits.fileBytes) + '（单页 HTML 不超过 ' + mbLabel(limits.htmlBytes) + '）';
+  document.getElementById('limitCount').textContent = '每个站点最多 ' + limits.filesPerSite + ' 个文件';
+  document.getElementById('limitStorage').textContent =
+    '单个站点内容不超过 ' + mbLabel(limits.siteTotalBytes)
+    + '，整个账号不超过 ' + mbLabel(limits.userTotalBytes)
+    + '；ZIP 包体不超过 ' + mbLabel(limits.zipBytes);
+
+  const stat = document.getElementById('statSize');
+  if (stat) stat.title = '账号已用 ' + fmtSize(limits.storageUsedBytes) + ' / ' + mbLabel(limits.userTotalBytes);
+}
+
+/**
+ * 提交前的体积预检：别让用户把整个站传完才在服务端吃 413。
+ * 返回一句错误文案，通过返回 null。
+ *
+ * 只管「这一次要写的字节」本身是否已经超限，不把账号已用量算进去 ——
+ * 覆盖已有文件时会顶掉旧体积，而前端不知道会顶掉哪些，算进去就会误拦合法操作。
+ * 真正带已用量的判定在服务端（storageBudgetViolation），这里只是省一趟白传。
+ */
+function precheckTotals() {
+  if (!LIMITS) return null;
+
+  let total = 0;
+  for (const it of picked) total += it.file.size;
+
+  if (total > LIMITS.userTotalBytes) {
+    const used = LIMITS.storageUsedBytes ?? 0;
+    return '这批文件一共 ' + fmtSize(total) + '，超过账号总量上限 '
+      + mbLabel(LIMITS.userTotalBytes) + (used ? '（账号当前已用 ' + fmtSize(used) + '）' : '') + '。';
+  }
+  if (pickedMode === 'zip' && total > LIMITS.zipBytes) {
+    return 'ZIP 包有 ' + fmtSize(total) + '，上限是 ' + mbLabel(LIMITS.zipBytes) + '。';
+  }
+
+  if (pickedMode === 'single') {
+    if (picked[0].file.size > LIMITS.htmlBytes) {
+      return '单页 HTML 有 ' + fmtSize(picked[0].file.size) + '，上限是 ' + mbLabel(LIMITS.htmlBytes) + '。';
+    }
+  } else {
+    const over = picked.find((it) => it.file.size > LIMITS.fileBytes);
+    if (over) {
+      return '「' + over.path + '」有 ' + fmtSize(over.file.size) + '，单个文件上限是 '
+        + mbLabel(LIMITS.fileBytes) + '。';
+    }
+    if (pickedMode === 'multi' && picked.length > LIMITS.filesPerSite) {
+      return '这次选了 ' + picked.length + ' 个文件，每站最多 ' + LIMITS.filesPerSite + ' 个。';
+    }
+  }
+  return null;
 }
 
 function showMsg(ok, text) {
@@ -310,10 +385,13 @@ async function loadSites() {
     }
     if (data.prefix) QWQ = data.prefix;
     fillAdvTags(data.tags);
+    applyLimits(data.limits);
     if (typeof data.quota === 'number') {
       const hint = document.getElementById('quotaHint');
       hint.textContent = '已用 ' + data.sites.length + ' / ' + data.quota
-        + ' 个站点配额，每个站点内的文件数另算（每站最多 200 个）';
+        + ' 个站点配额' + (LIMITS
+          ? '，每个站点内的文件数另算（每站最多 ' + LIMITS.filesPerSite + ' 个）'
+          : '');
       // 配额满了才提硬币兑换，没满的时候不该抢注意力
       if (data.sites.length >= data.quota) {
         hint.innerHTML = MP.esc(hint.textContent)
@@ -850,6 +928,9 @@ form.addEventListener('submit', async (e) => {
     showResult(false, coverErr);
     return;
   }
+  // 文件本身的体积也先预检：超限的文件传完才被拒，白等一轮同样难受
+  const totalsErr = precheckTotals();
+  if (totalsErr) { showResult(false, totalsErr); return; }
   const extras = readAdvExtras();
 
   submit.disabled = true;
