@@ -52,7 +52,7 @@ lib/mcp/tokens.js             MCP 密钥：铸造 / 列表 / 吊销 / 鉴权（�
 lib/mcp/tools.js              MCP 工具注册表（唯一真源）+ 10 个 backend
 lib/mcp/server.js             MCP 的 JSON-RPC 分发，零依赖手写
 scripts/mcp-smoke.mjs         MCP 冒烟测试（69 项，见下）
-scripts/api-smoke.mjs         全站接口冒烟测试（232 项，自己拉起临时服务，见下）
+scripts/api-smoke.mjs         全站接口冒烟测试（262 项，自己拉起临时服务，见下）
 scripts/upload-page-smoke.mjs 投稿页交互冒烟测试（42 项，无头 Edge，见下）
 scripts/coin-page-smoke.mjs   投币交互冒烟测试（17 项，无头 Edge，见下）
 scripts/migrate-user-space.mjs  把「全局站名」的老库迁到用户空间模型（幂等，见下）
@@ -115,7 +115,7 @@ public/style.css              共享样式
 | GET | `/api/discover` | 社区发现流（?q= 模糊搜索，?tag= 标签筛选） |
 | GET | `/api/hot` | 热门搜索榜（窗口内至少两个人搜过的词，按人数排；没数据时返回空数组） |
 | GET | `/api/u/:username/profile` | 创作者主页数据（资料 / 粉丝关注数 / 总浏览量 / TA 的站点） |
-| GET | `/api/sites` | 我的站点（带 `username`、`quota`，以及内容标签词表 `tags`，投稿页选标签用） |
+| GET | `/api/sites` | 我的站点（带 `username`、`quota`、内容标签词表 `tags`，以及当前上传上限 `limits`——投稿页文案与提交前预检都读它） |
 | POST | `/api/upload` | 上传 HTML（需登录，占配额） |
 | GET | `/api/sites/:用户名/:站名/stats` | 站点互动数字（浏览 / 赞 / 评 / 藏 / 投币） |
 | POST / DELETE | `/api/sites/:用户名/:站名/like` | 点赞 / 取消（需登录） |
@@ -190,7 +190,7 @@ node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项（需
 冒烟库的表，跑完自己收拾：
 
 ```
-node scripts/api-smoke.mjs          # 232 项：注册/登录/站点/文件/社交/硬币/权限/后台/改密/配额/改名/注销
+node scripts/api-smoke.mjs          # 262 项：注册/登录/站点/文件/社交/硬币/权限/后台/改密/配额/存储上限/改名/注销
 node scripts/api-smoke.mjs --json   # 末尾多打印一段 JSON，换库前后可以拿来对比
 ```
 
@@ -265,6 +265,8 @@ node scripts/migrate-user-space.mjs             # 真跑（先备份！）
 | `MYSQL_DATABASE` | `minepage` | 库名；跑回归脚本时指向 `minepage_smoke` |
 | `USER_SPACE_PREFIX` | `qwq` | 用户空间前缀：站点地址是 `/<前缀>/<用户名>/<站名>` |
 | `MAX_SITES_PER_USER` | `10` | 每人基础站点配额（硬币兑换可再加） |
+| `MAX_SITE_TOTAL_BYTES` | `52428800` | 单个站点的内容总量上限（50 MB） |
+| `MAX_USER_TOTAL_BYTES` | `104857600` | 每人所有站点的内容总量上限（100 MB） |
 | `COIN_REGISTER_BONUS` | `3` | 注册赠送硬币 |
 | `COIN_DAILY` | `1` | 每日首次访问发放的硬币 |
 | `MAX_COINS_PER_SITE` | `2` | 每人每站最多能投几枚 |
@@ -274,6 +276,24 @@ node scripts/migrate-user-space.mjs             # 真跑（先备份！）
 | `ADMIN_EMAIL` | `admin@minepage.local` | 管理员邮箱 |
 | `COOKIE_SECURE` | 关 | 设为 `1` 时 Cookie 带上 Secure |
 | `SMTP_HOST` 等 | 空 | 发信配置，见「跑起来」；不配置则验证码打印到控制台 |
+
+## 上传上限
+
+按「极简个人 page」定位定的一组数，每个都从某一层硬限制推导出来：
+
+| 项 | 值 | 来源 |
+|---|---|---|
+| 单页 HTML | 5 MB | JSON 请求体，`MAX_HTML_BYTES` |
+| 多页单文件 | 10 MB | `site_files.content` 是 MEDIUMBLOB（16 MB 硬顶） |
+| 每站文件数 | 200 | `MAX_FILES_PER_SITE` |
+| 单站总量 | 50 MB | `MAX_SITE_TOTAL_BYTES`，可用环境变量覆盖 |
+| 每人总量 | 100 MB | `MAX_USER_TOTAL_BYTES`，可用环境变量覆盖 |
+| ZIP 包体 | 55 MB | `MAX_ZIP_BYTES`；**nginx 的 `client_max_body_size` 必须 ≥ 64m** |
+| 卡片封面 | 2 MB | `MAX_COVER_BYTES` |
+
+这些上限由 `GET /api/sites` 和站点详情接口的 `limits` 字段下发，页面文案和提交前预检都读它，
+不在前端另写数字。限制只在写入时校验：已经超限的存量站点（模板导入的站最大 171 MB）
+仍可把文件换成同样大或更小的版本，但任何增量都会被拒。
 
 ## 还没做
 

@@ -80,7 +80,7 @@
         <button type="button" class="ghost" id="addPick">选择文件</button>
         <span id="addText" class="muted">以文件自身的名字存入站点根目录</span>
       </div>
-      <span class="hint">单文件 ≤ 10 MB；同名文件会被覆盖</span>
+      <span class="hint" id="addFileHint">单文件有上限；同名文件会被覆盖</span>
     </div>
     <button type="button" id="addSubmit" disabled>上传文件</button>
   </section>
@@ -133,6 +133,12 @@ function fmtSize(n) {
   if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
   if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
   return n + ' B';
+}
+
+/** 字节数 → 「10 MB」这种整数写法，用于上限文案（和 fmtSize 的小数展示区分开）。 */
+function mbLabel(bytes) {
+  const mb = bytes / 1024 / 1024;
+  return (Number.isInteger(mb) ? mb : mb.toFixed(1)) + ' MB';
 }
 
 /**
@@ -192,6 +198,9 @@ async function loadSite() {
 
   document.getElementById('singleSection').hidden = site.kind !== 'single';
   document.getElementById('multiSection').hidden = site.kind !== 'multi';
+  document.getElementById('addFileHint').textContent = data.limits
+    ? '单文件 ≤ ' + mbLabel(data.limits.fileBytes) + '；同名文件会被覆盖'
+    : '单文件有上限；同名文件会被覆盖';
 
   fillMetaForm(data.tags);
   fillMetaValues(site);
