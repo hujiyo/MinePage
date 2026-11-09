@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>个人中心 · MinePage</title>
 <link rel="stylesheet" href="/_assets/style.css">
+<link rel="stylesheet" href="/_assets/account.css">
 </head>
 <body>
 <main class="page">
@@ -22,6 +23,27 @@
       </div>
     </div>
   </div>
+
+  <section class="panel" id="coinSection">
+    <h2>硬币</h2>
+    <p class="muted" style="font-size:13px">
+      每天第一次打开网站会自动领到硬币，可以投给别人的页面（每人每页最多 2 枚）。
+      投出去的币会等额进入作者余额，作者可以再拿它换更多站点名额。
+    </p>
+    <div class="coinBox">
+      <div class="coinBig"><b id="coinBalance">0</b><span>枚硬币</span></div>
+      <div class="coinMeta">
+        <div>站点配额：<b id="coinQuota">–</b></div>
+        <div>累计获赠：<b id="coinReceived">0</b> 枚</div>
+      </div>
+    </div>
+    <div class="coinActs">
+      <button type="button" id="redeemQuota" class="ghost">花 5 枚换 +1 个站点名额</button>
+      <span class="hint" id="redeemHint"></span>
+    </div>
+    <h3 class="coinLedgerTitle">最近流水</h3>
+    <ul class="coinLedger" id="coinLedger"><li class="empty">还没有流水。</li></ul>
+  </section>
 
   <section class="panel">
     <h2>个人简介</h2>
@@ -233,6 +255,75 @@ document.getElementById('deleteForm').addEventListener('submit', async (e) => {
   }
 });
 
+// ---------------------------------------------------------------- 硬币
+
+const LEDGER_TEXT = {
+  register: '注册赠送',
+  signin: '每日签到',
+  received: '页面收到投币',
+  charge: '给别的页面投币',
+  quota: '兑换站点名额',
+};
+
+/** 把 /api/coins 的余额 / 配额 / 流水渲染进硬币面板。 */
+function renderCoins(data) {
+  document.getElementById('coinBalance').textContent = MP.fmtNum(data.balance ?? 0);
+  document.getElementById('coinQuota').textContent = data.quota ?? '–';
+  document.getElementById('coinReceived').textContent = MP.fmtNum(data.received ?? 0);
+
+  const list = document.getElementById('coinLedger');
+  list.textContent = '';
+  const rows = data.ledger ?? [];
+  if (!rows.length) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = '还没有流水。';
+    list.appendChild(li);
+    return;
+  }
+  rows.forEach((row) => {
+    const li = document.createElement('li');
+    const sign = row.delta > 0 ? '+' : '';
+    const cls = row.delta > 0 ? 'plus' : 'minus';
+    li.innerHTML = '<span class="why">' + MP.esc(LEDGER_TEXT[row.reason] || row.reason) + '</span>'
+      + '<span class="amt ' + cls + '">' + sign + row.delta + '</span>'
+      + '<span class="when">' + MP.timeAgo(row.at) + '</span>';
+    list.appendChild(li);
+  });
+
+  // 余额不够就禁用兑换按钮，把原因写在旁边
+  const redeem = document.getElementById('redeemQuota');
+  const hint = document.getElementById('redeemHint');
+  redeem.disabled = (data.balance ?? 0) < 5;
+  hint.textContent = redeem.disabled ? '硬币还不够 5 枚' : '';
+}
+
+async function loadCoins() {
+  try {
+    const res = await fetch('/api/coins');
+    const data = await res.json();
+    if (data.ok) renderCoins(data);
+  } catch { /* 拉不到就保持面板初始的空态 */ }
+}
+
+document.getElementById('redeemQuota').addEventListener('click', async () => {
+  const button = document.getElementById('redeemQuota');
+  button.disabled = true;
+  try {
+    const data = await postJson('/api/coins/quota', {});
+    if (data.ok) {
+      MP.toast('兑换成功，现在可以建 ' + data.quota + ' 个页面了');
+      await loadCoins();
+    } else {
+      MP.toast(data.message || '兑换失败');
+    }
+  } catch (err) {
+    MP.toast('网络出问题了：' + err.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 // ---------------------------------------------------------------- 启动
 
 (async () => {
@@ -248,6 +339,7 @@ document.getElementById('deleteForm').addEventListener('submit', async (e) => {
   }
 
   renderMe(me);
+  await loadCoins();
 })();
 </script>
 </body>

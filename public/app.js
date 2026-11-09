@@ -226,6 +226,7 @@
       email: user.email,
       isAdmin: Boolean(user.isAdmin),
       bio: user.bio || '',
+      coins: Number(user.coins ?? 0),
       createdAt: user.createdAt,
       unread: extra?.unread ?? 0,
       unreadMessages: extra?.unreadMessages ?? 0,
@@ -379,6 +380,7 @@
       +     '<hr>'
       +     '<a href="/qwq/' + encodeURIComponent(me.username) + '">' + icon('user') + '我的主页</a>'
       +     '<a href="/account">' + icon('settings') + '账号设置</a>'
+      +     '<a href="/account#coinSection">' + icon('coin') + '硬币 ' + fmtNum(me.coins) + ' 枚</a>'
       +     '<a href="/sites">' + icon('grid') + '创作</a>'
       +     (me.isAdmin ? '<a href="/admin">' + icon('shield') + '管理后台</a>' : '')
       +     '<hr>'

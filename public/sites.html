@@ -314,6 +314,11 @@ async function loadSites() {
       const hint = document.getElementById('quotaHint');
       hint.textContent = '已用 ' + data.sites.length + ' / ' + data.quota
         + ' 个站点配额，每个站点内的文件数另算（每站最多 200 个）';
+      // 配额满了才提硬币兑换，没满的时候不该抢注意力
+      if (data.sites.length >= data.quota) {
+        hint.innerHTML = MP.esc(hint.textContent)
+          + ' · 硬币可换更多名额：<a href="/account#coinSection">去个人中心兑换</a>';
+      }
     }
     renderSites(data.sites);
   } catch { /* 静默：统计保持占位符 */ }

@@ -927,6 +927,83 @@ async function run() {
   );
   check('创作者主页带自己的站点', creator.body?.sites?.some((s) => s.name === SITE), JSON.stringify(creator.body?.sites?.map((s) => s.name)));
 
+  // ---------------------------------------------------------- 5b. 硬币投币
+  console.log('\n硬币投币');
+
+  // 注册赠币：b 是新注册账号，应该已经拿到注册币
+  const bCoins = await api('/api/coins', { cookie: b.cookie });
+  check('注册赠币已入账', bCoins.body?.balance >= 3, JSON.stringify(bCoins.body));
+  check(
+    '赠币有流水记录',
+    (bCoins.body?.ledger ?? []).some((row) => row.reason === 'register'),
+    JSON.stringify(bCoins.body?.ledger),
+  );
+
+  // 每日签到：/api/me 会发一次，同一天重复调不再发
+  const meFirst = await api('/api/me', { cookie: b.cookie });
+  const balanceAfterFirst = meFirst.body?.user?.coins ?? 0;
+  const meSecond = await api('/api/me', { cookie: b.cookie });
+  check(
+    '同一天重复访问不再发币',
+    meSecond.body?.user?.coins === balanceAfterFirst,
+    `${balanceAfterFirst} → ${meSecond.body?.user?.coins}`,
+  );
+
+  // 投币：b 给 a 的站点投 1 枚，币 1:1 进作者余额
+  const coin1 = await api(apiSite(`/coin`), { cookie: b.cookie, method: 'POST', body: { count: 1 } });
+  check('投币成功', coin1.body?.ok === true, JSON.stringify(coin1.body));
+  check(
+    '投币后投币者余额 -1',
+    coin1.body?.balance === balanceAfterFirst - 1,
+    `balance=${coin1.body?.balance} 期望=${balanceAfterFirst - 1}`,
+  );
+  const aMeAfterCoin = await api('/api/me', { cookie: a.cookie });
+  check('作者余额等额增加', (aMeAfterCoin.body?.user?.coins ?? 0) >= 1, JSON.stringify(aMeAfterCoin.body?.user?.coins));
+
+  const statAfterCoin = await api(apiSite('/stats'), { cookie: b.cookie });
+  check('站点收到硬币数 = 1', statAfterCoin.body?.stats?.coins === 1, JSON.stringify(statAfterCoin.body?.stats));
+  check('我投了几枚回显正确', statAfterCoin.body?.stats?.coined === 1, JSON.stringify(statAfterCoin.body?.stats));
+
+  // 每人每站上限 2 枚
+  const coin2 = await api(apiSite(`/coin`), { cookie: b.cookie, method: 'POST', body: { count: 1 } });
+  check('第二次投币成功', coin2.body?.ok === true, JSON.stringify(coin2.body));
+  const coin3 = await api(apiSite(`/coin`), { cookie: b.cookie, method: 'POST', body: { count: 1 } });
+  check('超过每人每站 2 枚 → 409', coin3.res.status === 409, `status=${coin3.res.status} ${JSON.stringify(coin3.body)}`);
+
+  // 数量校验：只接受 1..MAX_COINS_PER_SITE
+  const badCount = await api(apiSite(`/coin`), { cookie: b.cookie, method: 'POST', body: { count: 3 } });
+  check('一次投超过上限 → 400', badCount.res.status === 400, `status=${badCount.res.status}`);
+  const zeroCount = await api(apiSite(`/coin`), { cookie: b.cookie, method: 'POST', body: { count: 0 } });
+  check('投 0 枚 → 400', zeroCount.res.status === 400, `status=${zeroCount.res.status}`);
+
+  // 不能给自己投币
+  const selfCoin = await api(apiSite(`/coin`), { cookie: a.cookie, method: 'POST', body: { count: 1 } });
+  check('给自己投币 → 400', selfCoin.res.status === 400, `status=${selfCoin.res.status} ${JSON.stringify(selfCoin.body)}`);
+
+  // 未登录不能投
+  const anonCoin = await api(apiSite(`/coin`), { method: 'POST', body: { count: 1 } });
+  check('未登录投币 → 401', anonCoin.res.status === 401, `status=${anonCoin.res.status}`);
+
+  // 投币不可撤回：和点赞不同，没有 DELETE 接口
+  const undoCoin = await api(apiSite(`/coin`), { cookie: b.cookie, method: 'DELETE' });
+  check('投币不能撤回（DELETE 不存在）→ 404', undoCoin.res.status === 404, `status=${undoCoin.res.status}`);
+
+  // 通知：a 收到投币事件
+  const coinNotifs = await api('/api/notifications', { cookie: a.cookie });
+  check(
+    '投币事件进通知流',
+    (coinNotifs.body?.items ?? []).some((it) => it.type === 'coin'),
+    JSON.stringify((coinNotifs.body?.items ?? []).map((it) => it.type)),
+  );
+
+  // 创作者主页带「收到的硬币」
+  const creatorCoins = await api('/api/u/smoke-a/profile');
+  check(
+    '创作者主页带收到的硬币数',
+    typeof creatorCoins.body?.stats?.coinsReceived === 'number' && creatorCoins.body.stats.coinsReceived >= 2,
+    JSON.stringify(creatorCoins.body?.stats),
+  );
+
   // ---------------------------------------------------------- 6. 权限边界
   console.log('\n权限边界');
 
@@ -1080,6 +1157,44 @@ async function run() {
   const backRenamed = await api('/api/account/username', { body: { username: A_NAME }, cookie: aCookie, method: 'POST' });
   check('改回原用户名', backRenamed.body?.username === A_NAME, JSON.stringify(backRenamed.body));
 
+  // ---------------------------------------------------------- 10b. 硬币换配额
+  console.log('\n硬币换配额');
+
+  // a 现在有从 b 那里收到的币，够兑换一份
+  const beforeQuota = (await api('/api/sites', { cookie: aCookie })).body?.quota ?? 0;
+  const redeem = await api('/api/coins/quota', { cookie: aCookie, method: 'POST' });
+  check('兑换配额成功', redeem.body?.ok === true, JSON.stringify(redeem.body));
+  check('配额 +1', (redeem.body?.quota ?? 0) === beforeQuota + 1, `before=${beforeQuota} after=${redeem.body?.quota}`);
+  const quotaAfterRedeem = (await api('/api/sites', { cookie: aCookie })).body?.quota;
+  check('我的站点列表配额同步', quotaAfterRedeem === beforeQuota + 1, JSON.stringify(quotaAfterRedeem));
+
+  // 余额不够兑换就拒绝
+  const bRedeem = await api('/api/coins/quota', { cookie: b.cookie, method: 'POST' });
+  check('余额不足兑换 → 402', bRedeem.res.status === 402, `status=${bRedeem.res.status} ${JSON.stringify(bRedeem.body)}`);
+
+  // ---------------------------------------------------------- 10c. ZIP 建站也要过配额
+  console.log('\nZIP 建站配额');
+
+  // 把 a 的配额占满再试 ZIP 建新站。这条之前是漏洞：ZIP 绕过 createSite 的配额检查。
+  const quotaNow = (await api('/api/sites', { cookie: aCookie })).body?.quota ?? QUOTA;
+  const existing = (await api('/api/sites', { cookie: aCookie })).body?.sites?.length ?? 0;
+  for (let i = existing; i < quotaNow; i += 1) {
+    await api('/api/upload', { body: { html: '<p>占位</p>', name: `zip-quota-fill-${i}` }, cookie: aCookie, method: 'POST' });
+  }
+  const zipOverQuota = await api(apiSite(`/zip`, 'zip-over-quota'), {
+    cookie: aCookie, method: 'POST', raw: goodZip, type: 'application/zip',
+  });
+  check(
+    'ZIP 建站超过配额 → 429',
+    zipOverQuota.res.status === 429,
+    `status=${zipOverQuota.res.status} ${JSON.stringify(zipOverQuota.body)}`,
+  );
+  const zipOverMissing = await api(apiSite('', 'zip-over-quota'), { cookie: aCookie });
+  check('超配额的 ZIP 不留半个站点', zipOverMissing.res.status === 404, `status=${zipOverMissing.res.status}`);
+  for (const s of (await api('/api/sites', { cookie: aCookie })).body?.sites ?? []) {
+    if (s.name.startsWith('zip-quota-fill-')) await api(apiSite('', s.name), { cookie: aCookie, method: 'DELETE' });
+  }
+
   // ---------------------------------------------------------- 11. 删除与级联
   console.log('\n删除与级联');
 
@@ -1088,8 +1203,16 @@ async function run() {
   const files3 = await api(apiSite(`/files`), { cookie: aCookie });
   check('删除后文件列表剩 2 个', files3.body?.files?.length === 2, JSON.stringify(files3.body?.files?.map((f) => f.path)));
 
+  // 删站点：coin_charges 跟着级联清掉，但作者余额不回退——币在投出时就已经转手了
+  const aBalanceBeforeDel = (await api('/api/coins', { cookie: aCookie })).body?.balance ?? 0;
   const delSite = await api(apiSite(), { cookie: aCookie, method: 'DELETE' });
   check('删除站点成功', delSite.body?.ok === true, JSON.stringify(delSite.body));
+  const aBalanceAfterDel = (await api('/api/coins', { cookie: aCookie })).body?.balance ?? 0;
+  check(
+    '删站点不回退已收到的币',
+    aBalanceAfterDel === aBalanceBeforeDel,
+    `${aBalanceBeforeDel} → ${aBalanceAfterDel}`,
+  );
   const afterDel = await api(pageUrl());
   check('删除后访问 404', afterDel.res.status === 404, `status=${afterDel.res.status}`);
   const filesAfter = await api(apiSite(`/files`), { cookie: aCookie });

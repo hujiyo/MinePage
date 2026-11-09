@@ -98,10 +98,12 @@ function renderProfile() {
 
   renderActions(isOwn);
 
-  // 点赞 / 被收藏没有聚合接口，按 TA 的公开站点求和（同一份数据，不额外请求）
+  // 点赞 / 被收藏没有聚合接口，按 TA 的公开站点求和（同一份数据，不额外请求）。
+  // 硬币是平台统一统计的（作者花掉不会减少），直接用 stats.coinsReceived。
   aboutStats.innerHTML = [
     ['获得点赞', MP.fmtNum(sum(sites, 'likes'))],
     ['被收藏', MP.fmtNum(sum(sites, 'favorites'))],
+    ['获赠硬币', MP.fmtNum(stats.coinsReceived ?? 0)],
     ['作品数', stats.sites],
   ].map(([label, val]) => '<div class="stat"><b>' + val + '</b><span>' + label + '</span></div>').join('');
 

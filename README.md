@@ -41,6 +41,7 @@ lib/users.js                  用户与会话的数据操作、管理员种子
 lib/sites.js                  站点的数据操作
 lib/covers.js                 卡片自定义封面：类型嗅探 + 读写 site_covers
 lib/social.js                 社区互动数据操作（点赞 / 评论 / 收藏 / 关注 / 通知 / 浏览量 / 创作者主页）
+lib/coins.js                  硬币数据操作（余额 / 流水 / 投币 / 每日签到 / 配额兑换）
 lib/names.js                  站名 / 用户名校验
 lib/addressing.js             「用户名+站名 ⇄ 访问地址」的唯一映射点，换地址形态只改这里
 lib/email.js                  发信（SMTP），未配置时退化为控制台打印
@@ -49,8 +50,9 @@ lib/mcp/tokens.js             MCP 密钥：铸造 / 列表 / 吊销 / 鉴权（�
 lib/mcp/tools.js              MCP 工具注册表（唯一真源）+ 10 个 backend
 lib/mcp/server.js             MCP 的 JSON-RPC 分发，零依赖手写
 scripts/mcp-smoke.mjs         MCP 冒烟测试（69 项，见下）
-scripts/api-smoke.mjs         全站接口冒烟测试（208 项，自己拉起临时服务，见下）
+scripts/api-smoke.mjs         全站接口冒烟测试（232 项，自己拉起临时服务，见下）
 scripts/upload-page-smoke.mjs 投稿页交互冒烟测试（42 项，无头 Edge，见下）
+scripts/coin-page-smoke.mjs   投币交互冒烟测试（17 项，无头 Edge，见下）
 scripts/migrate-user-space.mjs  把「全局站名」的老库迁到用户空间模型（幂等，见下）
 public/index.html             上传页的跳转兜底
 public/discover.html          社区首页（/）
@@ -68,7 +70,7 @@ public/app.js                 公共前端脚本（顶栏 / 图标 / 站点卡�
 public/style.css              共享样式
 ```
 
-## 十五张表
+## 十七张表
 
 | 表 | 存什么 |
 |---|---|
@@ -87,6 +89,8 @@ public/style.css              共享样式
 | `messages` | 私信，`read_at` 为空表示未读 |
 | `mcp_tokens` | MCP 密钥的 sha256、名称、最后使用时间（明文不落库） |
 | `banners` | 首页轮播位（管理员指定第几个位置放哪个站，`title` / `subtitle` 空串表示跟随站点；站点删除级联清掉） |
+| `coin_ledger` | 硬币流水（余额的**唯一事实源**，`users.coin_balance` 只是缓存）。`reason`：`register` / `signin` / `charge` / `received` / `quota`；`UNIQUE(user_id, reason, ref)` 兼做签到幂等 |
+| `coin_charges` | 投给某站点的硬币（一人一站一条，`count ≤ 2`）。**只增不改**，没有删除路径——页面「收到多少枚」是永久记录，作者花掉自己的币不会让它变小 |
 
 ## 接口
 
@@ -108,8 +112,11 @@ public/style.css              共享样式
 | GET | `/api/u/:username/profile` | 创作者主页数据（资料 / 粉丝关注数 / 总浏览量 / TA 的站点） |
 | GET | `/api/sites` | 我的站点（带 `username`、`quota`，以及内容标签词表 `tags`，投稿页选标签用） |
 | POST | `/api/upload` | 上传 HTML（需登录，占配额） |
-| GET | `/api/sites/:用户名/:站名/stats` | 站点互动数字（浏览 / 赞 / 评 / 藏） |
+| GET | `/api/sites/:用户名/:站名/stats` | 站点互动数字（浏览 / 赞 / 评 / 藏 / 投币） |
 | POST / DELETE | `/api/sites/:用户名/:站名/like` | 点赞 / 取消（需登录） |
+| POST | `/api/sites/:用户名/:站名/coin` | 投币 `{count:1\|2}`（需登录、不能投自己、每人每站最多 2 枚、**不可撤回**） |
+| GET | `/api/coins` | 我的硬币：余额 / 站点配额 / 累计获赠 / 最近流水 |
+| POST | `/api/coins/quota` | 花硬币换 +1 份站点配额 |
 | GET / POST | `/api/sites/:用户名/:站名/comments` | 评论列表 / 发评论（回复带 replyTo） |
 | DELETE | `/api/sites/:用户名/:站名/comments/:id` | 删评论（作者或管理员） |
 | POST / DELETE | `/api/sites/:用户名/:站名/favorite` | 收藏 / 取消（可选 folder 名字） |
@@ -176,7 +183,7 @@ node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项（需
 冒烟库的表，跑完自己收拾：
 
 ```
-node scripts/api-smoke.mjs          # 208 项：注册/登录/站点/文件/社交/权限/后台/改密/配额/改名/注销
+node scripts/api-smoke.mjs          # 232 项：注册/登录/站点/文件/社交/硬币/权限/后台/改密/配额/改名/注销
 node scripts/api-smoke.mjs --json   # 末尾多打印一段 JSON，换库前后可以拿来对比
 ```
 
@@ -190,6 +197,17 @@ $env:BASE_URL='http://127.0.0.1:3105'; node scripts/upload-page-smoke.mjs   # 42
 
 它用无头 Edge + CDP，账号读 `SMOKE_LOGIN` / `SMOKE_PASSWORD`（默认 smokeadmin /
 smoke-admin-pass）；本机没有 Edge 时直接跳过，不算失败。
+
+投币的弹层、按钮禁用、余额回填也是 DOM 事件，同样单独一支（`npm run smoke:coin`）：
+
+```
+$env:PORT=3211; $env:MYSQL_DATABASE='minepage_smoke'; node server.js
+$env:BASE_URL='http://127.0.0.1:3211'; $env:SMOKE_LOGIN='uitester'; $env:SMOKE_PASSWORD='pw123456';
+node scripts/coin-page-smoke.mjs   # 17 项
+```
+
+它测的是 `/view/uitester/ui-site`，需要**该页面存在、且 uitester 不是它的作者**
+（自己投自己会被服务端拒掉）。换页面用 `SMOKE_VIEW`。
 
 ### 老库迁移到用户空间
 
@@ -228,7 +246,11 @@ node scripts/migrate-user-space.mjs             # 真跑（先备份！）
 | `MYSQL_PASSWORD` | 空 | 数据库密码 |
 | `MYSQL_DATABASE` | `minepage` | 库名；跑回归脚本时指向 `minepage_smoke` |
 | `USER_SPACE_PREFIX` | `qwq` | 用户空间前缀：站点地址是 `/<前缀>/<用户名>/<站名>` |
-| `MAX_SITES_PER_USER` | `10` | 每人站点配额 |
+| `MAX_SITES_PER_USER` | `10` | 每人基础站点配额（硬币兑换可再加） |
+| `COIN_REGISTER_BONUS` | `3` | 注册赠送硬币 |
+| `COIN_DAILY` | `1` | 每日首次访问发放的硬币 |
+| `MAX_COINS_PER_SITE` | `2` | 每人每站最多能投几枚 |
+| `QUOTA_COINS_PER_SLOT` | `5` | 换一份额外站点配额要几枚 |
 | `ADMIN_USERNAME` | `admin` | 管理员用户名 |
 | `ADMIN_PASSWORD` | `123` | 管理员密码，首次创建时生效 |
 | `ADMIN_EMAIL` | `admin@minepage.local` | 管理员邮箱 |
@@ -240,4 +262,4 @@ node scripts/migrate-user-space.mjs             # 真跑（先备份！）
 - 自动化测试只盖到接口层（`npm run smoke`），页面上的 JS 交互还没覆盖
 - lint / 格式化配置
 - 除了站点配额，其他接口还没有限流
-- B 站式硬币换配额（先有真实用户量再说）
+- 硬币没有后台管理入口（不能手动补发、没有流水审计页）

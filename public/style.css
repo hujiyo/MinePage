@@ -1228,18 +1228,17 @@ body.watch-page { background: var(--panel); }
 .wbtn svg { width: 17px; height: 17px; flex: none; }
 .wbtn .wnum { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
 
-/* 还没上线的功能（投币）：虚线边框 + 灰度，点得到但一眼看得出是「未开放」 */
-.wbtn.pending { border-style: dashed; color: var(--muted); }
-.wbtn.pending:hover { color: var(--muted2); border-color: var(--border); }
-.wbtn.pending svg { opacity: .7; }
-.wbtn .soon {
-  padding: 0 6px;
-  border-radius: 99px;
-  background: rgba(0, 0, 0, .05);
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.6;
+/* 投币弹层：余额说明 + 1/2 枚两个选项 */
+.coinInfo {
+  margin: 0 0 14px;
+  color: var(--muted2);
+  font-size: 13px;
+  line-height: 1.9;
 }
+.coinInfo b { color: var(--pink); font-weight: 600; }
+.coinPick { display: flex; gap: 8px; }
+.coinPick .mbtn { flex: 1; }
+.coinPick .mbtn:disabled { opacity: .45; cursor: not-allowed; }
 
 /* 键盘可达：按钮虽然去掉了默认 outline，焦点必须看得见 */
 .wbtn:focus-visible,
@@ -1697,8 +1696,6 @@ body.view-fs.snap-collapsed .snapHandle { display: flex; }
   .wcomments { padding: 16px 0 0; }
   .wanums b { font-size: 14px; }
   .wubtns .wbtn { padding: 6px 10px; }
-  /* 窄屏放不下「未开放」小标签：省掉它，四个操作按钮才能挤进一行（说明仍在 title 里） */
-  .wbtn .soon { display: none; }
   .wbtn { padding: 7px 11px; }
   .relThumb { width: 88px; }
   .cfoot .hint { display: none; }
