@@ -787,14 +787,15 @@ async function run() {
      SELECT s.id, 'big.bin', '', 110 * 1024 * 1024, ? FROM sites s WHERE s.name = 'legacy-big'`,
     [new Date().toISOString()],
   );
-  const legacyShrink = await api(apiSite(`/files?path=big.bin`, 'legacy-big', 'smoke-storage'), {
-    cookie: quotaAccount.cookie, method: 'POST', raw: '<h1>small</h1>', type: 'text/html',
-  });
-  check('存量已超限的站点仍可把文件换成更小的版本', legacyShrink.res.status === 200, `status=${legacyShrink.res.status}`);
+  // 先测「再增内容被拒」：换小文件会让这个站不再超限，顺序反过来就测不到存量超限的状态了。
   const legacyGrow = await api(apiSite(`/files?path=more.html`, 'legacy-big', 'smoke-storage'), {
     cookie: quotaAccount.cookie, method: 'POST', raw: storageChunk, type: 'text/html',
   });
   check('存量已超限的站点再增内容 → 413', legacyGrow.res.status === 413, `status=${legacyGrow.res.status} ${JSON.stringify(legacyGrow.body)}`);
+  const legacyShrink = await api(apiSite(`/files?path=big.bin`, 'legacy-big', 'smoke-storage'), {
+    cookie: quotaAccount.cookie, method: 'POST', raw: '<h1>small</h1>', type: 'text/html',
+  });
+  check('存量已超限的站点仍可把文件换成更小的版本', legacyShrink.res.status === 200, `status=${legacyShrink.res.status}`);
 
   // 回归：账号已用量必须逐站聚合 —— 单页站的 sites.size 和多页站的文件不能「取大」了事。
   // 造一个同时有单页站和多页站的账号，确认 storageUsedBytes 把两者都算进去。
@@ -1152,7 +1153,8 @@ async function run() {
   check('GET /admin 200', adminPage.res.status === 200, `status=${adminPage.res.status}`);
 
   const users = await api('/api/admin/users', { cookie: admin.cookie });
-  check('用户列表含 3 个账号', (users.body?.users?.length ?? 0) === 3, JSON.stringify(users.body?.users?.map((u) => u.email)));
+  // A/B/管理员 + 存储上限用例新开的 smoke-storage / smoke-mixed
+  check('用户列表含 5 个账号', (users.body?.users?.length ?? 0) === 5, JSON.stringify(users.body?.users?.map((u) => u.email)));
   check('用户列表不含 password_hash', !JSON.stringify(users.body).includes('password_hash'));
 
   const adminSites = await api('/api/admin/sites', { cookie: admin.cookie });

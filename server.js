@@ -32,7 +32,7 @@ import {
 } from './lib/config.js';
 import { checkName, checkUsername } from './lib/names.js';
 import { absoluteUrlForSite, urlForSite, urlForView } from './lib/addressing.js';
-import { closeDb } from './lib/db.js';
+import { closeDb, get } from './lib/db.js';
 import { buildCookie, parseCookies, looksLikeEmail, verifyPassword } from './lib/auth.js';
 import {
   authenticate,
