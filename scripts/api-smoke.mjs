@@ -1023,6 +1023,9 @@ async function run() {
     `status=${notifications.res.status} ${JSON.stringify(notifications.body)?.slice(0, 200)}`,
   );
   check('新通知带未读状态', notifications.body?.items?.some((item) => item.unread === true));
+  // 读取即已读：列表接口自己推进游标，不需要等前端再打 /seen
+  const notificationsAgain = await api('/api/notifications', { cookie: a.cookie });
+  check('再拉一次列表已变成已读', notificationsAgain.body?.items?.every((item) => item.unread === false));
   const seen = await api('/api/notifications/seen', { cookie: a.cookie, method: 'POST' });
   check('标记通知已读成功', seen.body?.ok === true, JSON.stringify(seen.body));
   const seenAgain = await api('/api/notifications', { cookie: a.cookie });

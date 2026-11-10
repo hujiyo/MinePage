@@ -1925,7 +1925,8 @@ async function handleMessagesPage(req, res) {
   await sendPage(res, 'messages.html');
 }
 
-/** 通知列表：谁赞 / 评 / 藏 / 关注了我。 */
+/** 通知列表：谁赞 / 评 / 藏 / 关注了我。
+ *  这个接口同时把已读游标推到本批最新一条，所以「打开通知页」就等于读过这批。 */
 async function handleNotificationsList(req, res) {
   const user = await requireLogin(req, res);
   if (!user) return;

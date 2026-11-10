@@ -154,6 +154,8 @@ document.getElementById('seen').addEventListener('click', async () => {
   try {
     const data = await MP.api('/api/notifications');
     items = data.items;
+    // 列表接口已经把已读游标推到本批最新一条，顶栏那个红点当场就过期了。
+    document.querySelector('.tact[href="/notifications"] .dot')?.remove();
     render();
   } catch (err) {
     emptyBox.hidden = false;
