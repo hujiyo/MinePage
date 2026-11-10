@@ -131,6 +131,7 @@ import {
   listFavorites,
   listFavoriteFolders,
   listFollows,
+  FOLLOW_LIST_LIMIT,
   listHistory,
   listMessagesWith,
   listNotifications,
@@ -1807,7 +1808,7 @@ async function handleFollowList(req, res, [id]) {
   const type = url.searchParams.get('type') === 'following' ? 'following' : 'followers';
   const viewer = await currentUser(req);
   const users = await listFollows(target.id, type, viewer?.id ?? null);
-  sendJson(res, 200, { ok: true, type, users });
+  sendJson(res, 200, { ok: true, type, users, limit: FOLLOW_LIST_LIMIT });
 }
 
 /** tag key -> 中文标签。 */
