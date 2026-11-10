@@ -127,6 +127,9 @@ public/style.css              共享样式
 | POST / DELETE | `/api/sites/:用户名/:站名/favorite` | 收藏 / 取消（可选 folder 名字） |
 | GET / PUT / DELETE | `/api/sites/:用户名/:站名` | 站点详情 / 保存单页 HTML / 删除 |
 | GET / POST / DELETE | `/api/sites/:用户名/:站名/files` | 多页站文件列表 / 上传 / 删除 |
+| POST | `/api/sites/:用户名/:站名/draft` | 开上传草稿（多文件上传第一步，对外不可见，同名重复调用幂等） |
+| POST | `/api/sites/:用户名/:站名/publish` | 把草稿一次性发布上线（校验入口 HTML，事务内翻 status） |
+| POST | `/api/sites/:用户名/:站名/zip` | zip 整包发布（解压后逐条校验，建站与文件在一个事务里） |
 | GET / PUT / DELETE | `/api/sites/:用户名/:站名/cover` | 自定义卡片封面（≤2MB，png/jpg/webp/gif；不设置时卡片显示站点实时画面） |
 | PUT | `/api/sites/:用户名/:站名/meta` | 站点标题 / 简介 / 标签 |
 | POST / DELETE | `/api/users/:id/follow` | 关注 / 取关（不能关注自己） |
@@ -294,6 +297,16 @@ node scripts/migrate-user-space.mjs             # 真跑（先备份！）
 这些上限由 `GET /api/sites` 和站点详情接口的 `limits` 字段下发，页面文案和提交前预检都读它，
 不在前端另写数字。限制只在写入时校验：已经超限的存量站点（模板导入的站最大 171 MB）
 仍可把文件换成同样大或更小的版本，但任何增量都会被拒。
+
+## 多文件上传的原子性
+
+单页 HTML 和 zip 整包本来就是一次事务；多文件（拖文件夹 / 多选）是 N 个请求，
+所以分成三步：`POST .../draft` 先建一个 `status='draft'` 的草稿 → 文件逐个写进去 →
+全部成功再 `POST .../publish` 在事务里切成 `active`。草稿对外一律 404、不进「我的站点」、
+不进广场和搜索，中途断网只会留下一个不可见的草稿，不会出现「半个站已经上线」。
+
+放弃的草稿按 `updated_at` 定时清理（开机一次 + 每天一次），保留时长由
+`DRAFT_TTL_HOURS`（默认 24 小时）控制；草稿在清理前仍占一个站点配额和它的存储额度。
 
 ## 还没做
 

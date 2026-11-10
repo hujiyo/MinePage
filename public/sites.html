@@ -131,6 +131,7 @@
                 <li>单页站所有 CSS / JS 请内嵌在 HTML 里</li>
                 <li>多页站必须包含 <code>index.html</code> 作为入口</li>
                 <li>也可以整包拖入一个 <code>.zip</code>，解压后按多页站规则校验</li>
+                <li>文件夹和多个文件是逐个上传的，全部传完才会发布；中途失败站点不会上线，重试会接着传</li>
                 <li id="limitFile">单个文件有上限</li>
                 <li id="limitCount">每个站点最多若干个文件</li>
                 <li id="limitStorage">单站与账号各有容量上限</li>
@@ -980,9 +981,19 @@ form.addEventListener('submit', async (e) => {
         showResult(false, escapeHtml(data.message || '发布失败'));
       }
     } else {
-      // 多页：4 路并发上传 + 断点续传（失败后再点发布，跳过已成功的文件）
+      // 多页：先开草稿 → 4 路并发上传 + 断点续传 → 全部成功才 publish 上线
       if (!picked.some((it) => /\.html?$/i.test(it.path))) {
         showResult(false, '至少要有一个 HTML 文件作为入口页');
+        return;
+      }
+
+      // 站点先以「草稿」落地：文件是逐个请求传的，中途断网只会留下一个对外不可见的
+      // 草稿（访问一律 404），不会像以前那样第一个文件到站就把半个站上线。
+      // 同名草稿重复调用是幂等的，续传和重试都走这里。
+      const draftRes = await fetch(apiBase(siteName) + '/draft', { method: 'POST' });
+      const draft = await draftRes.json().catch(() => ({}));
+      if (!draft.ok) {
+        showResult(false, escapeHtml(draft.message || '开不了上传草稿（HTTP ' + draftRes.status + '）'));
         return;
       }
 
@@ -1040,6 +1051,16 @@ form.addEventListener('submit', async (e) => {
 
       const url = siteUrlOf(siteName);
       if (failures.length === 0) {
+        // 最后一步：把草稿切成上线。这一步失败也不丢文件，草稿还在，再点一次就能续上
+        const pubRes = await fetch(apiBase(siteName) + '/publish', { method: 'POST' });
+        const pub = await pubRes.json().catch(() => ({}));
+        if (!pub.ok) {
+          showResult(false,
+            '文件都传好了（' + doneCount + ' 个），但最后一步发布失败：'
+            + escapeHtml(pub.message || 'HTTP ' + pubRes.status)
+            + '<br>站点还是草稿状态，对外看不到。再点一次「发布页面」会跳过已传的文件，接着完成发布。');
+          return;
+        }
         await finishPublish(
           '上传完成，共 ' + doneCount + ' 个文件'
           + (skipped ? '（跳过已传的 ' + skipped + ' 个）' : '')
@@ -1051,7 +1072,7 @@ form.addEventListener('submit', async (e) => {
           '成功 ' + doneCount + '/' + total + ' 个，失败 ' + failures.length + ' 个：<br>'
           + failures.slice(0, 3).map(escapeHtml).join('<br>')
           + (failures.length > 3 ? '<br>…' : '')
-          + '<br>再点一次「发布页面」会跳过已成功的文件，从中断处继续传。');
+          + '<br>站点还没有发布（草稿对外不可见）。再点一次「发布页面」会跳过已成功的文件，从中断处继续。');
       }
     }
   } catch (err) {
