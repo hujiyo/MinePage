@@ -52,7 +52,7 @@ lib/mcp/tokens.js             MCP 密钥：铸造 / 列表 / 吊销 / 鉴权（�
 lib/mcp/tools.js              MCP 工具注册表（唯一真源）+ 10 个 backend
 lib/mcp/server.js             MCP 的 JSON-RPC 分发，零依赖手写
 scripts/mcp-smoke.mjs         MCP 冒烟测试（69 项，见下）
-scripts/api-smoke.mjs         全站接口冒烟测试（262 项，自己拉起临时服务，见下）
+scripts/api-smoke.mjs         全站接口冒烟测试（263 项，自己拉起临时服务，见下）
 scripts/upload-page-smoke.mjs 投稿页交互冒烟测试（42 项，无头 Edge，见下）
 scripts/coin-page-smoke.mjs   投币交互冒烟测试（17 项，无头 Edge，见下）
 scripts/migrate-user-space.mjs  把「全局站名」的老库迁到用户空间模型（幂等，见下）
@@ -131,8 +131,8 @@ public/style.css              共享样式
 | PUT | `/api/sites/:用户名/:站名/meta` | 站点标题 / 简介 / 标签 |
 | POST / DELETE | `/api/users/:id/follow` | 关注 / 取关（不能关注自己） |
 | GET | `/api/users/:id/social` | 粉丝数 / 关注数 / 是否已关注 |
-| GET | `/api/notifications` | 通知列表（最近的互动事件，新到旧，最多 50 条） |
-| POST | `/api/notifications/seen` | 推进已读时间戳（进通知页自动调用） |
+| GET | `/api/notifications` | 通知列表（最近的互动事件，新到旧，最多 50 条；返回时把已读游标推到本批最新一条） |
+| POST | `/api/notifications/seen` | 一键全部标为已读（把已读时间戳推到当前时刻） |
 | POST | `/api/account/username` | 改用户名（旧名立即释放，旧地址跟着失效） |
 | POST | `/api/account/delete` | 注销账号（密码确认，级联删掉名下所有站点） |
 | GET | `/api/admin/users` | 用户列表 |
@@ -190,7 +190,7 @@ node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项（需
 冒烟库的表，跑完自己收拾：
 
 ```
-node scripts/api-smoke.mjs          # 262 项：注册/登录/站点/文件/社交/硬币/权限/后台/改密/配额/存储上限/改名/注销
+node scripts/api-smoke.mjs          # 263 项：注册/登录/站点/文件/社交/硬币/权限/后台/改密/配额/存储上限/改名/注销
 node scripts/api-smoke.mjs --json   # 末尾多打印一段 JSON，换库前后可以拿来对比
 ```
 

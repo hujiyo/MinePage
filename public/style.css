@@ -1044,6 +1044,38 @@ section { margin-top: 32px; }
 .utabs a.on { color: var(--pink); border-bottom-color: var(--pink); font-weight: 600; }
 .utabs a:hover { color: var(--pink); }
 
+/* 粉丝 / 关注：数字是可点开名单的按钮，字形和旁边的纯文本保持一致 */
+.uwho .usub .ustat {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.uwho .usub .ustat:hover { color: var(--pink); }
+
+/* 名单弹层里的一行：头像 + 用户名 + 关注按钮 */
+.followList { margin-top: -4px; }
+.frow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--panel2);
+}
+.frow:last-child { border-bottom: 0; }
+.fuser {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+}
+.fuser:hover .fname { color: var(--pink); }
+.fname { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ============================================================
    观看页（/view/:用户名/:站名）
    常态：B 站播放页排布 —— 16:9 播放器 + 标题 / 操作栏 / 简介 /

@@ -89,12 +89,24 @@ function renderProfile() {
   nameBox.textContent = user.username;
   document.getElementById('aboutBio').textContent = user.bio || '这个人很懒，什么都没写。';
 
-  statsBox.innerHTML = [
-    ['粉丝', MP.fmtNum(stats.followers)],
-    ['关注', MP.fmtNum(stats.following)],
+  // 粉丝 / 关注有名单可看（/api/users/:id/follow-list），做成按钮；
+  // 作品和总浏览没有对应列表，保持纯文本。
+  statsBox.textContent = '';
+  [
+    ['粉丝', MP.fmtNum(stats.followers), () => openFollowList('followers')],
+    ['关注', MP.fmtNum(stats.following), () => openFollowList('following')],
     ['作品', stats.sites],
     ['总浏览', MP.fmtNum(stats.views)],
-  ].map(([label, val]) => '<span><b>' + val + '</b> ' + label + '</span>').join('');
+  ].forEach(([label, val, onClick]) => {
+    const el = document.createElement(onClick ? 'button' : 'span');
+    if (onClick) {
+      el.type = 'button';
+      el.className = 'ustat';
+      el.addEventListener('click', onClick);
+    }
+    el.innerHTML = '<b>' + val + '</b> ' + label;
+    statsBox.appendChild(el);
+  });
 
   renderActions(isOwn);
 
@@ -154,6 +166,110 @@ function renderActions(isOwn) {
   msg.href = '/messages?to=' + profile.user.id;
   msg.innerHTML = '<button type="button" class="ghost">' + MP.icon('message') + ' 私信</button>';
   actionsBox.appendChild(msg);
+}
+
+// ---------------------------------------------------------------- 粉丝 / 关注名单
+
+/**
+ * 名单里的每一行：头像 + 用户名（点进 TA 的主页）+ 关注按钮。
+ * 关注状态只改这一行按钮，不重绘整个弹层（重绘会把滚动位置也弄丢）。
+ */
+function followRow(user) {
+  const row = document.createElement('div');
+  row.className = 'frow';
+
+  const a = document.createElement('a');
+  a.className = 'fuser';
+  a.href = '/qwq/' + encodeURIComponent(user.username);
+  a.title = user.username;
+  const av = document.createElement('span');
+  av.className = 'avatar sm';
+  av.textContent = String(user.name || '?').charAt(0).toUpperCase();
+  const name = document.createElement('span');
+  name.className = 'fname';
+  name.textContent = user.name;
+  a.append(av, name);
+  row.appendChild(a);
+
+  // 自己的名字后面不摆按钮（不能关注自己），未登录时按钮只是引导去登录
+  if (me && me.id === user.id) return row;
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  const paint = () => {
+    btn.className = 'tiny' + (user.isFollowing ? ' ghost' : '');
+    btn.textContent = user.isFollowing ? '已关注' : '+ 关注';
+  };
+  paint();
+  btn.addEventListener('click', async () => {
+    if (!me) {
+      location.href = '/login?next=' + encodeURIComponent(location.pathname);
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const { following } = await MP.api('/api/users/' + user.id + '/follow', {
+        method: user.isFollowing ? 'DELETE' : 'POST',
+      });
+      user.isFollowing = following;
+      paint();
+      MP.toast(following ? '已关注' : '已取消关注');
+    } catch (err) {
+      MP.toast(err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  row.appendChild(btn);
+  return row;
+}
+
+async function openFollowList(type) {
+  const isFollowers = type === 'followers';
+
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  mask.innerHTML = '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="followTitle">'
+    + '<button class="modal-x" type="button" aria-label="关闭">×</button>'
+    + '<h2 class="modal-title" id="followTitle">' + (isFollowers ? '粉丝' : '关注') + '</h2>'
+    + '<div class="followList"><div class="hint">加载中…</div></div>'
+    + '</div>';
+  const listBox = mask.querySelector('.followList');
+
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    mask.remove();
+  };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  mask.querySelector('.modal-x').addEventListener('click', close);
+  mask.addEventListener('mousedown', (e) => { if (e.target === mask) close(); });
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(mask);
+
+  let data;
+  try {
+    data = await MP.api('/api/users/' + profile.user.id + '/follow-list?type=' + type);
+  } catch (err) {
+    listBox.innerHTML = '<div class="empty">' + MP.esc(err.message) + '</div>';
+    return;
+  }
+
+  const { users } = data;
+  if (!users.length) {
+    listBox.innerHTML = '<div class="empty">'
+      + (isFollowers ? '还没有粉丝。' : '还没有关注任何人。') + '</div>';
+    return;
+  }
+  listBox.textContent = '';
+  users.forEach((u) => listBox.appendChild(followRow(u)));
+
+  // 接口按关注时间倒序最多给 N 位；到顶就说清楚，别让人以为名单就这么多人
+  if (users.length >= data.limit) {
+    const more = document.createElement('div');
+    more.className = 'hint';
+    more.textContent = '只列出最近 ' + data.limit + ' 位。';
+    listBox.appendChild(more);
+  }
 }
 
 // ---------------------------------------------------------------- 作品

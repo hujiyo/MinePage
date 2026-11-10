@@ -131,6 +131,7 @@ import {
   listFavorites,
   listFavoriteFolders,
   listFollows,
+  FOLLOW_LIST_LIMIT,
   listHistory,
   listMessagesWith,
   listNotifications,
@@ -1807,7 +1808,7 @@ async function handleFollowList(req, res, [id]) {
   const type = url.searchParams.get('type') === 'following' ? 'following' : 'followers';
   const viewer = await currentUser(req);
   const users = await listFollows(target.id, type, viewer?.id ?? null);
-  sendJson(res, 200, { ok: true, type, users });
+  sendJson(res, 200, { ok: true, type, users, limit: FOLLOW_LIST_LIMIT });
 }
 
 /** tag key -> 中文标签。 */
@@ -1925,7 +1926,8 @@ async function handleMessagesPage(req, res) {
   await sendPage(res, 'messages.html');
 }
 
-/** 通知列表：谁赞 / 评 / 藏 / 关注了我。 */
+/** 通知列表：谁赞 / 评 / 藏 / 关注了我。
+ *  这个接口同时把已读游标推到本批最新一条，所以「打开通知页」就等于读过这批。 */
 async function handleNotificationsList(req, res) {
   const user = await requireLogin(req, res);
   if (!user) return;
