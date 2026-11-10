@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import {
   HOST,
   PORT,
+  MAX_DRAFTS_PER_USER,
   MAX_HTML_BYTES,
   MAX_BODY_BYTES,
   MAX_FILE_BYTES,
@@ -19,6 +20,8 @@ import {
   PASSWORD_MIN,
   SITE_TITLE_MAX,
   SITE_DESC_MAX,
+  SITE_MESSAGE_MAX,
+  SITE_MESSAGES_KEEP,
   BIO_MAX,
   COMMENT_MAX,
   MYSQL_HOST,
@@ -56,6 +59,8 @@ import { issueCode, consumeCode } from './lib/verification.js';
 import { handleMcp } from './lib/mcp/server.js';
 import { createMcpToken, listMcpTokens, revokeMcpToken } from './lib/mcp/tokens.js';
 import {
+  addSiteMessage,
+  countDraftsByOwner,
   countSiteFiles,
   countSites,
   countSitesByOwner,
@@ -69,7 +74,9 @@ import {
   isValidSiteTag,
   listAllSites,
   listSiteFiles,
+  listSiteMessages,
   listSitesByOwner,
+  publishDraft,
   publishSiteZip,
   removeSiteFile,
   setSiteStatus,
@@ -308,6 +315,12 @@ async function currentUser(req) {
   return publicUser(row);
 }
 
+/** 当前请求者是不是这个站的作者（草稿可见性判断用）。 */
+async function isSiteOwner(req, site) {
+  const user = await currentUser(req);
+  return Boolean(user) && (site.owner_id === user.id || user.isAdmin);
+}
+
 function readJsonBody(req, limit = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -482,6 +495,24 @@ async function handleSitesPage(req, res) {
     return;
   }
   await sendPage(res, 'sites.html');
+}
+
+/** 新建网页：空态对话栏（图 4），agent 开始编码后跳到工作区。 */
+async function handleStudioNewPage(req, res) {
+  if (!(await currentUser(req))) {
+    sendLoginRedirect(req, res);
+    return;
+  }
+  await sendPage(res, 'studio-new.html');
+}
+
+/** 工作区（图 3）：左边对话栏，右边预览 / 代码。 */
+async function handleWorkspacePage(req, res) {
+  if (!(await currentUser(req))) {
+    sendLoginRedirect(req, res);
+    return;
+  }
+  await sendPage(res, 'workspace.html');
 }
 
 /** 站点管理编辑页（单页编辑 / 多页文件管理，也是未来智能体辅助编辑的挂载点）。 */
@@ -891,6 +922,8 @@ async function handleMySites(req, res) {
     username: user.username,
     prefix: USER_SPACE_PREFIX,
     quota: MAX_SITES_PER_USER,
+    published: sites.filter((s) => s.status !== 'draft').length,
+    maxDrafts: MAX_DRAFTS_PER_USER,
     sites,
   });
 }
@@ -1290,6 +1323,224 @@ async function handleSiteFileDelete(req, res, [username, name]) {
   sendJson(res, 200, { ok: true });
 }
 
+// ---------------------------------------------------------------- 创作工作区（草稿 / 对话）
+
+/** 新建草稿时给一个能直接预览的占位页，省得工作区一打开就是 404。 */
+const STARTER_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>还没有内容</title>
+<style>
+  html,body{height:100%;margin:0}
+  body{display:grid;place-items:center;background:#0f1115;color:#e8eaed;
+       font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+  .tip{text-align:center;max-width:28rem;padding:2rem}
+  .tip h1{font-size:22px;margin:0 0 .6rem}
+  .tip p{margin:0;color:#9aa0a8;font-size:14px}
+</style>
+</head>
+<body>
+<div class="tip">
+  <h1>空白草稿</h1>
+  <p>在左侧告诉 agent 你想要什么，或切到「代码」直接写。</p>
+</div>
+</body>
+</html>`;
+
+/**
+ * POST /api/studio/drafts：建一张草稿站（status='draft'，不占站点配额）。
+ * body {name?}：带了就用它当站名，没带就按时间戳生成一个。
+ * 草稿统一走多文件模式，先落一个 index.html，预览 / 代码都有东西可看。
+ */
+async function handleStudioDraftCreate(req, res) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const wanted = body.name === undefined || body.name === null
+    ? ''
+    : String(body.name).trim().toLowerCase();
+
+  const name = wanted || `page-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const checked = checkName(name);
+  if (!checked.ok) {
+    sendJson(res, 400, { ok: false, message: checked.reason });
+    return;
+  }
+
+  try {
+    const site = await createSite({
+      name: checked.name,
+      html: '',
+      ownerId: user.id,
+      status: 'draft',
+    });
+    await upsertSiteFile(site.id, 'index.html', Buffer.from(STARTER_HTML, 'utf8'));
+    sendJson(res, 201, {
+      ok: true,
+      site: { id: site.id, name: site.name, status: site.status, url: urlForSite(user.username, site.name) },
+      drafts: await countDraftsByOwner(user.id),
+      maxDrafts: MAX_DRAFTS_PER_USER,
+    });
+  } catch (err) {
+    if (err.code === 'NAME_TAKEN') {
+      sendJson(res, 409, { ok: false, message: err.message });
+      return;
+    }
+    if (err.code === 'DRAFT_QUOTA_EXCEEDED') {
+      sendJson(res, 429, { ok: false, message: err.message });
+      return;
+    }
+    console.error('[studio-draft-create]', err);
+    sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+  }
+}
+
+/** POST /api/sites/:用户名/:站名/publish：把草稿发布成一张全新的正式站（草稿保留）。 */
+async function handleSitePublishDraft(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await findSiteHeaderByUsername(username, name);
+  if (!site) {
+    sendJson(res, 404, { ok: false, message: '没有这个站点' });
+    return;
+  }
+  if (site.owner_id !== user.id && !user.isAdmin) {
+    sendJson(res, 403, { ok: false, message: '只能发布自己的草稿' });
+    return;
+  }
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const targetName = String(body.name ?? '').trim().toLowerCase();
+  const checked = checkName(targetName);
+  if (!checked.ok) {
+    sendJson(res, 400, { ok: false, message: checked.reason });
+    return;
+  }
+
+  const title = String(body.title ?? '').trim();
+  const description = String(body.description ?? '').trim();
+  const tag = String(body.tag ?? '').trim();
+
+  if (title.length > SITE_TITLE_MAX) {
+    sendJson(res, 400, { ok: false, message: `标题最多 ${SITE_TITLE_MAX} 字` });
+    return;
+  }
+  if (description.length > SITE_DESC_MAX) {
+    sendJson(res, 400, { ok: false, message: `简介最多 ${SITE_DESC_MAX} 字` });
+    return;
+  }
+  if (!isValidSiteTag(tag)) {
+    sendJson(res, 400, { ok: false, message: '内容标签不对' });
+    return;
+  }
+
+  try {
+    const created = await publishDraft({
+      draftSiteId: site.id,
+      ownerId: user.id,
+      name: checked.name,
+      title,
+      description,
+      tag,
+    });
+    sendJson(res, 201, {
+      ok: true,
+      site: {
+        id: created.id,
+        name: created.name,
+        url: absoluteUrlForSite(originOf(req), user.username, created.name),
+        viewUrl: urlForView(user.username, created.name),
+      },
+      fileCount: created.fileCount,
+    });
+  } catch (err) {
+    if (err.code === 'NAME_TAKEN') {
+      sendJson(res, 409, { ok: false, message: err.message });
+      return;
+    }
+    if (err.code === 'QUOTA_EXCEEDED') {
+      sendJson(res, 429, { ok: false, message: err.message });
+      return;
+    }
+    if (err.code === 'NOT_DRAFT' || err.code === 'NOT_FOUND' || err.code === 'FORBIDDEN') {
+      sendJson(res, 400, { ok: false, message: err.message });
+      return;
+    }
+    console.error('[site-publish]', err);
+    sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+  }
+}
+
+/** 只允许操作自己名下的站点（草稿 / 对话都走这一层）。 */
+async function ownDraftOrRespond(req, res, user, username, name) {
+  const site = await findSiteHeaderByUsername(username, name);
+  if (!site) {
+    sendJson(res, 404, { ok: false, message: '没有这个站点' });
+    return null;
+  }
+  if (site.owner_id !== user.id && !user.isAdmin) {
+    sendJson(res, 403, { ok: false, message: '只能操作自己的站点' });
+    return null;
+  }
+  return site;
+}
+
+/** GET /api/sites/:用户名/:站名/messages：工作区对话记录。 */
+async function handleSiteMessagesList(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  sendJson(res, 200, {
+    ok: true,
+    messages: await listSiteMessages(site.id, SITE_MESSAGES_KEEP),
+  });
+}
+
+/**
+ * POST /api/sites/:用户名/:站名/messages：追加一条用户消息。
+ * 本轮 agent 只回一句占位话（不接模型），一起入库，刷新后对话还在。
+ */
+async function handleSiteMessageAdd(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const content = String(body.content ?? '').trim();
+  if (!content) {
+    sendJson(res, 400, { ok: false, message: '说点什么再发送' });
+    return;
+  }
+  if (content.length > SITE_MESSAGE_MAX) {
+    sendJson(res, 413, { ok: false, message: `一条消息最多 ${SITE_MESSAGE_MAX} 字` });
+    return;
+  }
+
+  const mine = await addSiteMessage(site.id, 'user', content);
+  const reply = await addSiteMessage(
+    site.id,
+    'agent',
+    '（占位回复）已开始生成…',
+  );
+
+  sendJson(res, 201, { ok: true, user: mine, agent: reply });
+}
+
 // ---------------------------------------------------------------- 社区互动接口（阶段 1 数据层）
 
 /** 按「作者用户名 + 站名」取站点头部，不存在时已回 404 并返回 null。 */
@@ -1601,7 +1852,12 @@ async function handleCreatorProfile(req, res, [username]) {
     stats: page.stats,
     isFollowing: await isFollowing(viewer?.id ?? null, page.user.id),
     isOwn: viewer?.id === page.user.id,
-    sites: (await withViewerFlags(page.sites, viewer?.id)).map((s) => ({ ...s, tagLabel: tagLabelOf(s.tag) })),
+    sites: (await withViewerFlags(page.sites, viewer?.id)).map((s) => ({
+      ...s,
+      tagLabel: tagLabelOf(s.tag),
+      // 卡片上的作者区、访问 / 编辑 / 删除按钮都要靠这个拼地址
+      author: { id: page.user.id, name: page.user.username, username: page.user.username },
+    })),
   });
 }
 
@@ -2288,9 +2544,32 @@ async function handleSite(req, res, [username, name, rest = '']) {
     sendHtml(res, 404, messagePage('404', `没有找到 /${username}/${name} 这个页面。`));
     return;
   }
+  const isDraft = site.status === 'draft';
+
   if (site.status !== 'active') {
-    sendHtml(res, 451, messagePage('已下线', '这个页面已被管理员下线。'));
-    return;
+    if (!isDraft) {
+      sendHtml(res, 451, messagePage('已下线', '这个页面已被管理员下线。'));
+      return;
+    }
+
+    // 草稿只有作者本人（带自己的登录态）能看：工作区预览、封面都靠这条通道；
+    // 对其他人一律当成「不存在」，别让草稿地址泄露出去。
+    //
+    // 但「作者」只能靠登录 Cookie 认，而站点是在沙箱 iframe 里跑的：沙箱文档的源
+    // 是不透明的，它发出的请求（css / js / 图片 / 字体，以及站内跳转）会被算成跨站，
+    // 浏览器按 SameSite=Lax 根本不会带 Cookie（实测 Sec-Fetch-Site: cross-site）。
+    // 之前这里对每个请求都校验归属，导致草稿的每张 css / js / 图片都拿到 404，
+    // 再被 ORB 拦成 ERR_BLOCKED_BY_ORB —— 用户看到的就是「样式和图片全没了」。
+    //
+    // 所以只在「有人直接拿地址访问这个草稿」时校验：顶层文档请求（地址栏 / 打开草稿）。
+    // iframe 里的一切放行，子页面也才能正常点开；草稿站名是随机生成的（page-xxxxxxxx），
+    // 外人本来就猜不到。
+    const dest = req.headers['sec-fetch-dest'];
+    const directOpen = dest === 'document' || (dest === undefined && (rest === '' || rest === '/'));
+    if (directOpen && (await isSiteOwner(req, site)) === false) {
+      sendHtml(res, 404, messagePage('404', `没有找到 /${username}/${name} 这个页面。`));
+      return;
+    }
   }
 
   // 让浏览器的最终 URL 与入口文件所在目录一致，相对 CSS/JS/图片才能正确解析。
@@ -2319,8 +2598,8 @@ async function handleSite(req, res, [username, name, rest = '']) {
 
   const content = await getSiteFile(site.id, filePath);
   if (content) {
-    // 浏览量简单版：只有入口页 +1，站内 css / js 等子资源不算
-    if (isEntryRequest) await incrementViews(site.id);
+    // 浏览量简单版：只有入口页 +1，站内 css / js 等子资源不算；草稿不算浏览
+    if (isEntryRequest && !isDraft) await incrementViews(site.id);
     serveSiteFile(req, res, filePath, forCover && /\.html?$/i.test(filePath) ? injectPeekProxy(content) : content);
     return;
   }
@@ -2329,7 +2608,7 @@ async function handleSite(req, res, [username, name, rest = '']) {
   if (isRoot) {
     const legacy = await findSiteByUsername(username, name);
     if (legacy && legacy.html && legacy.html.trim() !== '') {
-      await incrementViews(site.id);
+      if (!isDraft) await incrementViews(site.id);
       sendHtml(res, 200, forCover ? injectPeekProxy(legacy.html) : legacy.html, {
         'Content-Security-Policy': SANDBOX_CSP,
         'Cache-Control': 'no-cache',
@@ -2357,6 +2636,8 @@ const ROUTES = [
   ['GET', /^\/login$/, handleLoginPage],
   ['GET', /^\/account$/, handleAccountPage],
   ['GET', /^\/sites$/, handleSitesPage],
+  ['GET', /^\/new$/, handleStudioNewPage],
+  ['GET', /^\/workspace\/([a-z0-9-]+)$/, handleWorkspacePage],
   ['GET', /^\/edit\/([a-z0-9-]+)$/, handleSiteEditPage],
   ['GET', /^\/admin$/, handleAdminPage],
   ['GET', /^\/settings$/, handleSettingsPage],
@@ -2384,6 +2665,7 @@ const ROUTES = [
 
   ['GET', /^\/api\/sites$/, handleMySites],
   ['POST', /^\/api\/upload$/, handleUpload],
+  ['POST', /^\/api\/studio\/drafts$/, handleStudioDraftCreate],
   // 管理接口也带用户名：站名只在作者名下唯一，光凭站名定位不了
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)$`), handleSiteDetail],
   ['PUT', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)$`), handleSiteSaveHtml],
@@ -2394,6 +2676,9 @@ const ROUTES = [
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/zip$`), handleSiteZipUpload],
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files\\/content$`), handleSiteFileContent],
   ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files$`), handleSiteFileDelete],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/publish$`), handleSitePublishDraft],
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/messages$`), handleSiteMessagesList],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/messages$`), handleSiteMessageAdd],
 
   // 社区互动：站名只在作者名下唯一，所以公开接口一律带用户名
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/stats$`), handleSiteStats],

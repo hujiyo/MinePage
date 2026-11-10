@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>工作区 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body class="wsBody">
+<main class="wsShell">
+  <header class="wsHead">
+    <div class="wsHeadL">
+      <a class="wsBack" href="/sites" title="回创作页">←</a>
+      <span class="wsTitle" id="wsTitle">草稿</span>
+      <span class="badge" id="wsBadge">草稿</span>
+    </div>
+    <div class="wsHeadR">
+      <button type="button" class="ghost tiny" id="openDraft">打开草稿</button>
+      <button type="button" class="wsPub" id="publish">发布</button>
+    </div>
+  </header>
+
+  <div class="wsMain">
+    <aside class="wsChat">
+      <div class="wsMsgs" id="msgs"></div>
+      <div class="wsComposer">
+        <textarea id="input" rows="1" placeholder="说说要改什么…"></textarea>
+        <div class="wsBar">
+          <button type="button" class="iconBtn" id="plus" title="附加内容">＋</button>
+          <span class="wsModel">GLM-5.3-Flash · 适中</span>
+          <button type="button" class="miniChip" id="skill">技能</button>
+          <span class="spacer"></span>
+          <button type="button" class="sendBtn" id="send" title="发送（Enter）">↑</button>
+        </div>
+      </div>
+    </aside>
+
+    <section class="wsPane">
+      <div class="wsTabs">
+        <div class="wsTabBtns">
+          <button type="button" class="wsTab on" data-tab="preview">预览</button>
+          <button type="button" class="wsTab" data-tab="code">代码</button>
+        </div>
+        <button type="button" class="wsReload" id="reload" title="刷新预览">↻</button>
+      </div>
+
+      <div class="wsView" id="viewPreview">
+        <iframe id="frame" class="wsFrame" sandbox="allow-scripts allow-forms allow-popups"
+                referrerpolicy="no-referrer" title="草稿预览"></iframe>
+      </div>
+
+      <div class="wsView" id="viewCode" hidden>
+        <div class="wsCode">
+          <div class="wsFiles">
+            <div class="wsFilesHead">文件</div>
+            <div class="wsFileList" id="fileList"></div>
+          </div>
+          <div class="wsEditor">
+            <div class="wsEditHead">
+              <span class="wsEditPath" id="editPath">未选择文件</span>
+              <span class="spacer"></span>
+              <span class="muted wsEditState" id="editState"></span>
+              <button type="button" class="tiny" id="saveFile" disabled>保存</button>
+            </div>
+            <div class="wsEditBody" id="editBody">
+              <div class="wsEditEmpty" id="editEmpty">从左边的文件列表里选一个文件</div>
+              <div class="wsCodeWrap" id="codeWrap" hidden>
+                <pre class="wsGutter" id="gutter" aria-hidden="true"></pre>
+                <textarea id="code" spellcheck="false" wrap="off" aria-label="文件内容"></textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </aside>
+</main>
+
+<script src="/_assets/app.js"></script>
+<script src="/_assets/studio.js"></script>
+<script>
+const NAME = decodeURIComponent(location.pathname.split('/').pop());
+let USERNAME = '';
+let SITE = { name: NAME, status: 'draft', title: '' };
+let FILES = [];
+let currentPath = '';
+let savedText = '';
+let dirty = false;
+let sending = false;
+
+const msgs = document.getElementById('msgs');
+const input = document.getElementById('input');
+const send = document.getElementById('send');
+const frame = document.getElementById('frame');
+const fileList = document.getElementById('fileList');
+const code = document.getElementById('code');
+const gutter = document.getElementById('gutter');
+const editPath = document.getElementById('editPath');
+const editState = document.getElementById('editState');
+const saveFile = document.getElementById('saveFile');
+const codeWrap = document.getElementById('codeWrap');
+const editEmpty = document.getElementById('editEmpty');
+
+if (!/^[a-z0-9-]+$/.test(NAME)) location.href = '/sites';
+
+MP.topbar({ active: 'create' });
+MP.autoGrow(input);
+
+/* ---------------------------------------------------------------- 顶栏与预览 */
+
+function reload() {
+  frame.src = MP.draftUrl(USERNAME, NAME) + '?t=' + Date.now();
+}
+
+function setTitle() {
+  const t = SITE.title || NAME;
+  document.getElementById('wsTitle').textContent = t;
+  document.title = t + ' · 工作区';
+}
+
+/** 草稿打开后先把预览挂上，不等对话记录。 */
+async function boot() {
+  const me = await MP.me();
+  if (!me) {
+    location.href = '/login?next=' + encodeURIComponent('/workspace/' + NAME);
+    return;
+  }
+  USERNAME = me.username;
+
+  // 用站点详情确认归属与状态（草稿/正式站都能进工作区，草稿才是主场景）
+  try {
+    const data = await MP.api(MP.siteApiOf(USERNAME, NAME, ''));
+    SITE = Object.assign({}, data.site, { name: NAME });
+    setTitle();
+    document.getElementById('wsBadge').textContent = SITE.status === 'draft' ? '草稿' : '已发布';
+  } catch (e) {
+    MP.alert(e.message || '打不开这个站点');
+    location.href = '/sites';
+    return;
+  }
+
+  reload();
+  loadMessages();
+  loadFiles();
+
+  // 从 /new 带过来的第一条消息：草稿已经建好，这里补发一次
+  const first = sessionStorage.getItem('mp:firstMessage:' + NAME);
+  if (first) {
+    sessionStorage.removeItem('mp:firstMessage:' + NAME);
+    sendMessage(first);
+  }
+}
+
+function loadMessages() {
+  MP.loadSiteMessages(USERNAME, NAME)
+    .then((list) => MP.renderMessages(msgs, list, '有什么想改的，直接说。'))
+    .catch(() => MP.renderMessages(msgs, [], '对话记录加载失败，可以继续发消息。'));
+}
+
+/* ---------------------------------------------------------------- 发送 */
+
+async function sendMessage(text) {
+  if (sending) return;
+  const content = String(text == null ? input.value : text).trim();
+  if (!content) return;
+  sending = true;
+  send.disabled = true;
+  if (text == null) input.value = '';
+  MP.autoGrow(input)();
+
+  try {
+    await MP.pushMessage({ list: msgs, username: USERNAME, name: NAME, content });
+  } catch (e) {
+    MP.toast(e.message || '发送失败');
+  } finally {
+    sending = false;
+    send.disabled = false;
+    input.focus();
+  }
+}
+
+send.addEventListener('click', () => sendMessage(null));
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    sendMessage(null);
+  }
+});
+document.getElementById('plus').addEventListener('click', () => {
+  MP.toast('这一版还不支持附加文件');
+});
+document.getElementById('skill').addEventListener('click', () => {
+  MP.alert('技能还没接上，先把要改的说清楚就行');
+});
+
+/* ---------------------------------------------------------------- tab 切换 */
+
+document.querySelectorAll('.wsTab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.wsTab').forEach((t) => t.classList.toggle('on', t === tab));
+    const isCode = tab.dataset.tab === 'code';
+    document.getElementById('viewPreview').hidden = isCode;
+    document.getElementById('viewCode').hidden = !isCode;
+    if (isCode) loadFiles();
+  });
+});
+
+document.getElementById('reload').addEventListener('click', () => {
+  reload();
+  if (!document.getElementById('viewCode').hidden) loadFile(currentPath);
+});
+
+/* ---------------------------------------------------------------- 文件列表 */
+
+async function loadFiles() {
+  try {
+    const data = await MP.api(MP.siteApiOf(USERNAME, NAME, '/files'));
+    FILES = data.files || [];
+    fileList.textContent = '';
+    if (!FILES.length) {
+      const tip = document.createElement('div');
+      tip.className = 'wsFilesEmpty';
+      tip.textContent = '这个草稿还没有文件';
+      fileList.appendChild(tip);
+      return;
+    }
+    FILES.forEach((f) => fileList.appendChild(fileRow(f)));
+    // 默认打开入口页
+    if (!currentPath) {
+      const entry = FILES.find((f) => f.path === 'index.html') || FILES[0];
+      if (entry) loadFile(entry.path);
+    }
+  } catch (e) {
+    fileList.textContent = '';
+    const tip = document.createElement('div');
+    tip.className = 'wsFilesEmpty';
+    tip.textContent = e.message || '文件列表加载失败';
+    fileList.appendChild(tip);
+  }
+}
+
+function fileRow(f) {
+  const el = document.createElement('button');
+  el.type = 'button';
+  el.className = 'wsFile' + (f.path === currentPath ? ' on' : '');
+  el.dataset.path = f.path;
+  el.innerHTML = '<span class="wsFileName"></span><span class="wsFileSize"></span>';
+  el.querySelector('.wsFileName').textContent = f.path;
+  el.querySelector('.wsFileSize').textContent = fmtSize(f.size);
+  el.addEventListener('click', () => loadFile(f.path));
+  return el;
+}
+
+function fmtSize(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+function markFileRow(path) {
+  fileList.querySelectorAll('.wsFile').forEach((el) => {
+    el.classList.toggle('on', el.dataset.path === path);
+  });
+}
+
+/* ---------------------------------------------------------------- 编辑器 */
+
+/** 行号栏跟着内容重画（行数与 textarea 的行数一致）。 */
+function drawGutter() {
+  const lines = code.value.split('\n').length;
+  const parts = [];
+  for (let i = 1; i <= lines; i += 1) parts.push(i);
+  gutter.textContent = parts.join('\n');
+  gutter.scrollTop = code.scrollTop;
+}
+
+function setDirty(v) {
+  dirty = v;
+  editState.textContent = v ? '未保存' : '';
+  editState.classList.toggle('warn', v);
+  saveFile.disabled = !v;
+}
+
+async function loadFile(path) {
+  if (!path) return;
+  if (dirty) {
+    const ok = await MP.ask({
+      text: '当前文件还没保存，切换后会丢掉改动。',
+      buttons: [
+        { key: 'drop', label: '丢弃改动', primary: true },
+        { key: 'stay', label: '留在这里' },
+      ],
+    });
+    if (ok !== 'drop') return;
+  }
+  currentPath = path;
+  markFileRow(path);
+  editPath.textContent = path;
+
+  try {
+    const data = await MP.api(MP.siteApiOf(USERNAME, NAME, '/files/content?path=' + encodeURIComponent(path)));
+    if (data.binary) {
+      codeWrap.hidden = true;
+      editEmpty.hidden = false;
+      editEmpty.textContent = '这是二进制文件，不能在线编辑';
+      savedText = '';
+      setDirty(false);
+      return;
+    }
+    savedText = data.content;
+    code.value = data.content;
+    codeWrap.hidden = false;
+    editEmpty.hidden = true;
+    setDirty(false);
+    drawGutter();
+  } catch (e) {
+    codeWrap.hidden = true;
+    editEmpty.hidden = false;
+    editEmpty.textContent = e.message || '读取失败';
+  }
+}
+
+code.addEventListener('input', () => {
+  setDirty(code.value !== savedText);
+  drawGutter();
+});
+code.addEventListener('scroll', () => { gutter.scrollTop = code.scrollTop; });
+code.addEventListener('keydown', (e) => {
+  // Tab 插入两个空格，别把焦点跳走
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const s = code.selectionStart;
+    const t = code.selectionEnd;
+    code.value = code.value.slice(0, s) + '  ' + code.value.slice(t);
+    code.selectionStart = code.selectionEnd = s + 2;
+    setDirty(code.value !== savedText);
+    drawGutter();
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+    e.preventDefault();
+    saveCurrent();
+  }
+});
+
+async function saveCurrent() {
+  if (!currentPath || !dirty) return;
+  saveFile.disabled = true;
+  saveFile.textContent = '保存中…';
+  try {
+    // 文件接口按原始字节存，这里直接传文本
+    await fetch(MP.siteApiOf(USERNAME, NAME, '/files?path=' + encodeURIComponent(currentPath)), {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      body: code.value,
+    }).then(async (res) => {
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error((data && data.message) || '保存失败');
+      }
+    });
+    savedText = code.value;
+    setDirty(false);
+    MP.toast('已保存');
+    reload();
+  } catch (e) {
+    MP.toast(e.message || '保存失败');
+    saveFile.disabled = !dirty;
+  } finally {
+    saveFile.textContent = '保存';
+  }
+}
+
+saveFile.addEventListener('click', saveCurrent);
+
+// 有未保存改动时离开页面先拦一下
+window.addEventListener('beforeunload', (e) => {
+  if (!dirty) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
+
+/* ---------------------------------------------------------------- 发布 */
+
+document.getElementById('publish').addEventListener('click', () => {
+  if (dirty) {
+    MP.alert('先把代码保存了再发布');
+    return;
+  }
+  MP.publishDialog({
+    username: USERNAME,
+    draft: { name: NAME, title: SITE.title, description: SITE.description, tag: SITE.tag },
+    onPublished: () => {
+      SITE.status = 'active';
+      document.getElementById('wsBadge').textContent = '已发布';
+    },
+  });
+});
+
+document.getElementById('openDraft').addEventListener('click', () => {
+  window.open(MP.draftUrl(USERNAME, NAME), '_blank', 'noopener');
+});
+
+boot();
+</script>
+</body>
+</html>

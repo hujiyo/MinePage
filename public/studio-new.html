@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>新建对话 · MinePage</title>
+<link rel="stylesheet" href="/_assets/style.css">
+</head>
+<body class="studioNewBody">
+<main class="newWrap">
+  <div class="newInner">
+    <div class="newHintTop">描述你想要的页面，我先搭出一版草稿，再慢慢改。</div>
+
+    <div class="newBox">
+      <textarea id="prompt" rows="1" placeholder="想让这个页面做点什么？"></textarea>
+      <div class="newBar">
+        <button type="button" class="iconBtn" id="plus" title="附加内容">＋</button>
+        <span class="newModel">GLM-5.3-Flash · 适中</span>
+        <span class="spacer"></span>
+        <span class="newAt">或 @ 使用技能</span>
+        <button type="button" class="sendBtn" id="send" title="发送">↑</button>
+      </div>
+    </div>
+
+    <div class="newFoot">
+      <span><kbd>Tab</kbd> <kbd>↵</kbd> 发送</span>
+      <span id="qHint"></span>
+    </div>
+    <div class="newErr" id="err" hidden></div>
+  </div>
+</main>
+
+<script src="/_assets/app.js"></script>
+<script src="/_assets/studio.js"></script>
+<script>
+let USERNAME = '';
+let DRAFTS = 0;
+let MAXD = 20;
+let sending = false;
+
+const prompt = document.getElementById('prompt');
+const send = document.getElementById('send');
+const err = document.getElementById('err');
+const qHint = document.getElementById('qHint');
+
+MP.topbar({ active: 'create' });
+MP.autoGrow(prompt);
+
+function showErr(msg) {
+  err.hidden = false;
+  err.textContent = msg;
+}
+function clearErr() { err.hidden = true; err.textContent = ''; }
+
+/** 读用户名与草稿余量；未登录直接去登录页。 */
+async function boot() {
+  const me = await MP.me();
+  if (!me) {
+    location.href = '/login?next=' + encodeURIComponent('/new');
+    return;
+  }
+  try {
+    const data = await MP.api('/api/sites');
+    USERNAME = data.username || me.username;
+    DRAFTS = (data.sites || []).filter((s) => s.status === 'draft').length;
+    MAXD = data.maxDrafts || 20;
+    qHint.textContent = '草稿 ' + DRAFTS + ' / ' + MAXD;
+  } catch (e) {
+    USERNAME = me.username;
+  }
+}
+
+/**
+ * 第一条消息：建草稿（空 index.html）→ 落库这条消息 → 跳工作区。
+ * 草稿建好后即使发消息失败也照样跳过去，用户在工作区里能重新发。
+ */
+async function submit() {
+  if (sending) return;
+  clearErr();
+  const text = prompt.value.trim();
+  if (!text) { showErr('先说点什么'); prompt.focus(); return; }
+  if (!USERNAME) { showErr('还没拿到用户名，稍等一下'); await boot(); return; }
+  if (DRAFTS >= MAXD) { showErr('草稿已经有 ' + MAXD + ' 个了，先去创作页发布或删掉一些'); return; }
+
+  sending = true;
+  send.disabled = true;
+  prompt.readOnly = true;
+  send.classList.add('busy');
+
+  let site = null;
+  try {
+    const data = await MP.createDraft();
+    site = data.site;
+    sessionStorage.setItem('mp:firstMessage:' + site.name, text);
+    location.href = '/workspace/' + encodeURIComponent(site.name);
+  } catch (e) {
+    sending = false;
+    send.disabled = false;
+    prompt.readOnly = false;
+    send.classList.remove('busy');
+    showErr(e.message || '没能建出草稿');
+  }
+}
+
+send.addEventListener('click', submit);
+prompt.addEventListener('input', clearErr);
+prompt.addEventListener('keydown', (e) => {
+  // Tab 也发送（图里的「Tab ↵」）；Shift+Tab 留给键盘导航
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+  else if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); submit(); }
+});
+
+document.getElementById('plus').addEventListener('click', () => {
+  MP.toast('这一版还不支持附带文件，先把需求说清楚就行');
+});
+
+boot().then(() => prompt.focus());
+</script>
+</body>
+</html>

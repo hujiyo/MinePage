@@ -8,401 +8,405 @@
 </head>
 <body>
 <main class="page">
-  <div class="secHead">
+  <div class="studioHead">
     <h1 style="margin:0">创作</h1>
+    <button type="button" id="newBtn">新建网页</button>
   </div>
-  <p class="sub">管理你已经发布的页面，或者投稿一个新的。</p>
+  <p class="sub">草稿随便改、反复发布；发布出来的正式页面在个人主页「作品」里管理。</p>
 
-  <div class="workGrid">
-    <!-- 左侧标签页 -->
-    <nav class="workNav" id="workNav">
-      <a data-tab="published" class="on">
-        <span class="wic" id="navIconPublished"></span><span>已发布</span>
-        <span class="cnt" id="navCount"></span>
-      </a>
-      <a data-tab="upload">
-        <span class="wic" id="navIconUpload"></span><span>投稿</span>
-      </a>
-    </nav>
+  <div class="homeGrid">
+    <div>
+      <div id="draftGrid" class="draftGrid"></div>
+      <div id="draftEmpty" class="draftEmpty" hidden>
+        还没有草稿。点右上角「新建网页」开始对话，或者把文件夹拖到下面直接部署。
+      </div>
 
-    <div class="workBody">
-      <!-- ------------------------------------------------ 已发布 -->
-      <section id="panel-published">
-        <div class="stats">
-          <div class="stat"><b id="statSites">–</b><span>站点</span></div>
-          <div class="stat"><b id="statFiles">–</b><span>文件</span></div>
-          <div class="stat"><b id="statSize">–</b><span>总大小</span></div>
+      <div id="bigDrop" class="bigDrop">
+        <div class="bdIcon">⇪</div>
+        <div class="bdTitle" id="bdTitle">想部署一个新项目吗？把你的文件夹拖拽到这里</div>
+        <div class="bdSub">单个 HTML、多个文件、整个文件夹或 zip 包都行；整套传完才会生成草稿</div>
+        <div class="bdBtns">
+          <button type="button" class="ghost" id="pickFiles">选择文件</button>
+          <button type="button" class="ghost" id="pickFolder">选择文件夹</button>
         </div>
+        <div class="bdProg" id="bdProg" hidden></div>
+        <div class="pickList" id="pickList" hidden></div>
+      </div>
 
-        <div class="rows" id="siteList" style="margin-top:16px"></div>
-        <div id="sitesEmpty" class="empty" hidden>还没有页面，去「投稿」标签上传一个吧。</div>
-
-        <div id="msg" class="result" hidden></div>
-      </section>
-
-      <!-- ------------------------------------------------ 投稿 -->
-      <section id="panel-upload" hidden>
-        <div class="homeGrid" style="margin-top:0">
-          <div>
-            <div id="needLogin" class="result" hidden>
-              需要先登录才能上传。 <a href="/login">去登录或注册</a>
-            </div>
-
-            <form id="form" novalidate hidden>
-              <label class="field">
-                <span class="label">页面名字</span>
-                <div class="slug">
-                  <span class="prefix" id="urlPrefix">/qwq/…/</span>
-                  <input id="name" type="text" placeholder="mypage1" autocomplete="off"
-                         spellcheck="false" maxlength="40">
-                </div>
-                <span class="hint">小写字母、数字、连字符，3–32 位；这就是页面的访问地址（挂在你的名字下面）</span>
-              </label>
-
-              <div class="field">
-                <span class="label">页面内容</span>
-                <div id="drop" class="drop hero">
-                  <div class="dropIcon">⇪</div>
-                  <div class="dropTitle" id="dropTitle">把 HTML 文件、多个文件或整个文件夹拖到这里</div>
-                  <div class="dropSub">也可以用下面的按钮选择</div>
-                  <div class="dropBtns">
-                    <button type="button" class="ghost" id="pickFiles">选择文件</button>
-                    <button type="button" class="ghost" id="pickFolder">选择文件夹</button>
-                  </div>
-                  <div id="pickList" class="pickList" hidden></div>
-                  <div id="modeTag" class="modeTag" hidden></div>
-                </div>
-                <input id="fileInput" type="file" multiple hidden>
-                <input id="folderInput" type="file" webkitdirectory multiple hidden>
-                <span class="hint">单页站：1 个 .html（CSS / JS 请内嵌）；多页站：入口必须是 index.html，
-                  单文件 ≤ 10 MB，每站最多 200 个文件</span>
-              </div>
-
-              <button id="submit" type="submit" class="block lg">发布页面</button>
-              <span class="hint" id="quotaHint"></span>
-            </form>
-
-            <div id="result" class="result" hidden></div>
-          </div>
-
-          <aside class="homeSide">
-            <div class="panel">
-              <h2>投稿须知</h2>
-              <ul class="muted" style="font-size:13px;margin:0;padding-left:18px;line-height:1.9">
-                <li>单页站所有 CSS / JS 请内嵌在 HTML 里</li>
-                <li>多页站必须包含 <code>index.html</code> 作为入口</li>
-                <li>单个文件不超过 10 MB</li>
-                <li>每个站点最多 200 个文件</li>
-                <li>页面会在沙箱中运行，请勿引用本机资源</li>
-              </ul>
-            </div>
-            <div class="panel">
-              <h2>发布之后</h2>
-              <p class="muted" style="font-size:13px;margin:0">
-                页面会出现在首页信息流里，其他用户可以搜索、收藏、点赞和评论。
-                上传完的站点在左侧「已发布」里管理。
-              </p>
-            </div>
-          </aside>
-        </div>
-      </section>
+      <input id="fileInput" type="file" multiple hidden>
+      <input id="folderInput" type="file" webkitdirectory multiple hidden>
     </div>
+
+    <aside class="homeSide">
+      <div class="panel">
+        <h2>投稿须知</h2>
+        <ul class="muted" style="font-size:13px;margin:0;padding-left:18px;line-height:1.9">
+          <li>多页站建议带 <code>index.html</code> 作入口，没有的话会自动挑最浅的那张 HTML</li>
+          <li>单个文件不超过 90 MB，一个页面最多 5000 个文件、合计 512 MB</li>
+          <li>页面在沙箱里运行，请勿引用本机资源</li>
+          <li>上传中途断掉不会留下任何东西，整套传完才会生成草稿</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h2>发布之后</h2>
+        <p class="muted" style="font-size:13px;margin:0">
+          点草稿卡片上的「发布」会新建一个正式页面，草稿本身保留，可以反复发布。
+          正式页面不归创作页管，去个人主页的「作品」里访问、编辑或删除。
+        </p>
+      </div>
+    </aside>
   </div>
 </main>
 
 <script src="/_assets/app.js"></script>
+<script src="/_assets/studio.js"></script>
 <script>
 MP.topbar({ active: 'create' });
 
-document.getElementById('navIconPublished').innerHTML = MP.icon('grid');
-document.getElementById('navIconUpload').innerHTML = MP.icon('upload');
+// ---------------------------------------------------------------- 常量与状态
 
-// ---------------------------------------------------------------- 标签切换
+const DROP_HINT = '想部署一个新项目吗？把你的文件夹拖拽到这里';
 
-const TABS = ['published', 'upload'];
-const navLinks = Array.from(document.querySelectorAll('#workNav a'));
+// 与服务端 lib/config.js 对齐，本地先挡掉注定失败的包，免得白传一遍
+const MAX_FILE_BYTES = 90 * 1024 * 1024;
+const MAX_FILES_PER_SITE = 5000;
+const MAX_SITE_TOTAL_BYTES = 512 * 1024 * 1024;
+const MAX_ZIP_BYTES = 95 * 1024 * 1024;
 
-function showTab(tab) {
-  const name = TABS.includes(tab) ? tab : 'published';
-  navLinks.forEach((a) => a.classList.toggle('on', a.dataset.tab === name));
-  TABS.forEach((t) => { document.getElementById('panel-' + t).hidden = t !== name; });
-  const url = name === 'published' ? '/sites' : '/sites?tab=' + name;
-  history.replaceState(null, '', url);
-  return name;
-}
+// 「上传中断即不保存」的兜底：草稿建好后先记一笔账，传完才划掉。
+// 上传期间每 8 秒续一次心跳；查账时心跳超过 30 秒没动就算断了，直接删掉这张草稿。
+// 记在 localStorage：关标签页会清掉 sessionStorage，账就丢了。
+const PENDING_KEY = 'mp.pendingDrafts';
+const PENDING_STALE_MS = 30 * 1000;
+const PENDING_BEAT_MS = 8 * 1000;
 
-navLinks.forEach((a) => {
-  a.addEventListener('click', (e) => { e.preventDefault(); showTab(a.dataset.tab); });
-});
-
-// ---------------------------------------------------------------- 通用
-
-// 当前用户名：上传 / 删除接口都要带上它（站名只在作者名下唯一）
-let MY_USERNAME = '';
-
-const msg = document.getElementById('msg');
-
-function fmtSize(n) {
-  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
-  if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
-  return n + ' B';
-}
-
-function showMsg(ok, text) {
-  msg.hidden = false;
-  msg.className = 'result ' + (ok ? 'ok' : 'err');
-  msg.textContent = text;
-}
-
-// ---------------------------------------------------------------- 站点列表
-
-function renderSites(sites) {
-  const wrap = document.getElementById('siteList');
-  const empty = document.getElementById('sitesEmpty');
-  wrap.textContent = '';
-  empty.hidden = sites.length !== 0;
-
-  let files = 0;
-  let size = 0;
-
-  sites.forEach((site) => {
-    files += site.fileCount;
-    size += site.totalSize;
-
-    const row = document.createElement('div');
-    row.className = 'rowItem';
-
-    // 缩略图：渐变 + 标题首字
-    const thumb = document.createElement('div');
-    thumb.className = 'rthumb';
-    thumb.style.background = MP.grad(site);
-    thumb.textContent = MP.initial(site);
-    row.appendChild(thumb);
-
-    const grow = document.createElement('div');
-    grow.className = 'grow';
-
-    const t = document.createElement('div');
-    t.className = 't';
-    const a = document.createElement('a');
-    a.href = site.viewUrl;
-    a.textContent = site.title || site.name;
-    t.appendChild(a);
-    t.appendChild(document.createTextNode(' '));
-
-    if (site.tag) {
-      const tagTag = document.createElement('span');
-      tagTag.className = 'badge tag';
-      tagTag.textContent = site.tagLabel;
-      t.appendChild(tagTag);
-      t.appendChild(document.createTextNode(' '));
-    }
-    const statusTag = document.createElement('span');
-    statusTag.className = 'badge' + (site.status === 'active' ? ' ok' : ' bad');
-    statusTag.textContent = site.status === 'active' ? '正常' : '已下线';
-    t.appendChild(statusTag);
-    grow.appendChild(t);
-
-    const d = document.createElement('div');
-    d.className = 'd';
-    d.textContent = (site.kind === 'multi' ? '多页 · ' + site.fileCount + ' 个文件' : '单页')
-      + ' · ' + fmtSize(site.totalSize)
-      + ' · 更新于 ' + new Date(site.updatedAt).toLocaleString('zh-CN');
-    grow.appendChild(d);
-
-    row.appendChild(grow);
-
-    const actions = document.createElement('div');
-    actions.className = 'row';
-    actions.style.cssText = 'gap:8px;flex:none';
-
-    const view = document.createElement('a');
-    view.href = site.url + '/';
-    view.target = '_blank';
-    view.rel = 'noopener';
-    view.innerHTML = '<button type="button" class="ghost tiny">访问</button>';
-    actions.appendChild(view);
-
-    const edit = document.createElement('a');
-    edit.href = '/edit/' + site.name;
-    edit.innerHTML = '<button type="button" class="ghost tiny">编辑</button>';
-    actions.appendChild(edit);
-
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'danger tiny';
-    del.textContent = '删除';
-    del.addEventListener('click', async () => {
-      if (!confirm('确定删除 ' + site.url + ' 吗？删了就找不回来了。')) return;
-      // 删除接口带用户名：站名只在作者名下唯一
-      const res = await fetch('/api/sites/' + encodeURIComponent(MY_USERNAME) + '/'
-        + encodeURIComponent(site.name), { method: 'DELETE' });
-      const data = await res.json();
-      if (data.ok) {
-        showMsg(true, '已删除 ' + site.url);
-        loadSites();
-      } else {
-        showMsg(false, data.message || '删除失败');
-      }
-    });
-    actions.appendChild(del);
-    row.appendChild(actions);
-
-    wrap.appendChild(row);
-  });
-
-  document.getElementById('statSites').textContent = sites.length;
-  document.getElementById('statFiles').textContent = files;
-  document.getElementById('statSize').textContent = fmtSize(size);
-  document.getElementById('navCount').textContent = sites.length ? sites.length : '';
-}
-
-async function loadSites() {
-  try {
-    const res = await fetch('/api/sites');
-    const data = await res.json();
-    if (!data.ok) return;
-
-    // 自己的用户名决定访问地址前缀，顺便把配额提示出来
-    if (data.username) {
-      document.getElementById('urlPrefix').textContent = '/qwq/' + data.username + '/';
-      MY_USERNAME = data.username;
-    }
-    if (data.prefix) QWQ = data.prefix;
-    if (typeof data.quota === 'number') {
-      const hint = document.getElementById('quotaHint');
-      hint.textContent = '已用 ' + data.sites.length + ' / ' + data.quota
-        + ' 个站点配额，每个站点内的文件数另算（每站最多 200 个）';
-    }
-    renderSites(data.sites);
-  } catch { /* 静默：统计保持占位符 */ }
-}
-
-// ---------------------------------------------------------------- 投稿：选择与拖放
-
-const needLogin = document.getElementById('needLogin');
-const form = document.getElementById('form');
-const nameInput = document.getElementById('name');
-const drop = document.getElementById('drop');
-const dropTitle = document.getElementById('dropTitle');
+const draftGrid = document.getElementById('draftGrid');
+const draftEmpty = document.getElementById('draftEmpty');
+const drop = document.getElementById('bigDrop');
+const dropTitle = document.getElementById('bdTitle');
+const prog = document.getElementById('bdProg');
 const pickList = document.getElementById('pickList');
-const modeTag = document.getElementById('modeTag');
 const fileInput = document.getElementById('fileInput');
 const folderInput = document.getElementById('folderInput');
-const submit = document.getElementById('submit');
-const result = document.getElementById('result');
 
-function escapeHtml(text) {
-  return String(text).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[c]);
-}
-
-function showResult(ok, html) {
-  result.hidden = false;
-  result.className = 'result ' + (ok ? 'ok' : 'err');
-  result.innerHTML = html;
-}
-
+let MY = { username: '', maxDrafts: 20 };
+let drafts = [];
 let picked = [];        // [{ path, file }]
 let pickedMode = null;  // 'single' | 'zip' | 'multi'
+let busy = false;
 
-// 系统垃圾文件黑名单（与服务端 lib/config.js JUNK_SEGMENTS 对齐），
-// 收文件时就跳过，别把 Thumbs.db / node_modules 这类东西传上去。
+// ---------------------------------------------------------------- 草稿卡片
+
+function renderDrafts() {
+  draftGrid.textContent = '';
+
+  if (!drafts.length) {
+    draftGrid.style.display = 'none';
+    draftEmpty.hidden = false;
+    return;
+  }
+  draftGrid.style.display = '';
+  draftEmpty.hidden = true;
+
+  drafts.forEach((d) => {
+    const card = document.createElement('div');
+    card.className = 'draftCard';
+
+    const box = document.createElement('div');
+    box.className = 'coverBox';
+    card.appendChild(box);
+
+    const body = document.createElement('div');
+    body.className = 'draftBody';
+
+    const title = document.createElement('div');
+    title.className = 'draftTitle';
+    title.style.cursor = 'pointer';
+    title.textContent = d.title || '未命名草稿';
+    title.title = '打开工作区';
+    title.addEventListener('click', () => {
+      location.href = '/workspace/' + encodeURIComponent(d.name);
+    });
+    body.appendChild(title);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tiny';
+    btn.textContent = '发布';
+    btn.addEventListener('click', () => openPublish(d));
+    body.appendChild(btn);
+
+    // 删草稿：默认不显示，鼠标移上去才露面，免得一排卡片上全是删除按钮
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'tiny danger draftDel';
+    del.textContent = '删除';
+    del.title = '删除这个草稿';
+    del.addEventListener('click', () => removeDraft(d, del));
+    body.appendChild(del);
+
+    card.appendChild(body);
+    draftGrid.appendChild(card);
+
+    MP.liveCover(box, MP.draftUrl(MY.username, d.name));
+  });
+}
+
+/**
+ * 删掉一张草稿：先二次确认，再调 DELETE /api/sites/<用户名>/<站名>。
+ * 只删草稿（卡片列表本来就只装草稿），正式站归个人主页「作品」管。
+ */
+async function removeDraft(draft, btn) {
+  const ok = await MP.ask({
+    text: '删除草稿「' + (draft.title || draft.name) + '」？它下面的所有文件都会一起删掉，删了不能恢复。',
+    buttons: [
+      { key: 'cancel', label: '取消' },
+      { key: 'delete', label: '删除', primary: true },
+    ],
+  });
+  if (ok !== 'delete') return;
+
+  btn.disabled = true;
+  btn.textContent = '删除中…';
+  try {
+    await MP.api(MP.siteApiOf(MY.username, draft.name), { method: 'DELETE' });
+    forgetPending(draft.name);
+    await loadMine();
+    MP.toast('草稿已删除');
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = '删除';
+    MP.alert(err.message || '删除失败');
+  }
+}
+
+/** 打开发布弹窗；草稿只在服务端保留，发布成功/关窗都回来刷一遍卡片。 */
+function openPublish(draft) {
+  MP.publishDialog({
+    username: MY.username,
+    draft: {
+      name: draft.name,
+      title: draft.title || '',
+      description: draft.description || '',
+      tag: draft.tag || '',
+    },
+    onClosed: () => { loadMine().catch(() => {}); },
+  });
+}
+
+async function loadMine() {
+  const data = await MP.api('/api/sites');
+  if (data.username) MY.username = data.username;
+  if (typeof data.maxDrafts === 'number') MY.maxDrafts = data.maxDrafts;
+  // 创作页只管草稿，正式站归个人主页「作品」
+  drafts = (data.sites || []).filter((s) => s.status === 'draft');
+  renderDrafts();
+}
+
+// ---------------------------------------------------------------- 残留草稿清理
+
+function readPending() {
+  try { return JSON.parse(localStorage.getItem(PENDING_KEY) || '[]'); } catch { return []; }
+}
+function writePending(list) {
+  try { localStorage.setItem(PENDING_KEY, JSON.stringify(list)); } catch { /* 无痕模式等 */ }
+}
+function rememberPending(name) {
+  writePending(readPending().concat([{ name, ts: Date.now() }]));
+}
+/** 续心跳：正在传的草稿不能被别处的清理逻辑当成残留删掉。 */
+function beatPending(name) {
+  writePending(readPending().map((it) => (
+    it.name === name ? { name, ts: Date.now() } : it
+  )));
+}
+function forgetPending(name) {
+  writePending(readPending().filter((it) => it.name !== name));
+}
+
+/**
+ * 把没传完就断了的草稿删掉。只认草稿，绝不碰正式站。
+ * 心跳超过 30 秒没动的才算断：别的标签页正在传时会一直续心跳，不会被误删。
+ */
+async function cleanLeftovers() {
+  const list = readPending();
+  if (!list.length) return false;
+
+  let removed = false;
+  const keep = [];
+  for (const it of list) {
+    if (Date.now() - (it.ts || 0) < PENDING_STALE_MS) { keep.push(it); continue; }
+    if (!drafts.some((d) => d.name === it.name)) continue;
+    try {
+      await MP.api(MP.siteApiOf(MY.username, it.name), { method: 'DELETE' });
+      removed = true;
+    } catch { /* 删不掉就留着，下次再试 */ }
+  }
+  writePending(keep);
+  return removed;
+}
+
+// ---------------------------------------------------------------- 选文件 / 拖放
+
 const JUNK_SEGMENTS = new Set([
   'thumbs.db', 'desktop.ini', 'ehthumbs.db', 'ehthumbs_vista.db', '__macosx', 'node_modules',
 ]);
-function isJunkPath(p) {
-  return p.split('/').some((s) => s.startsWith('.') || JUNK_SEGMENTS.has(s.toLowerCase()));
+
+// 与 lib/sites.js 的 isValidSitePath 同口径：每段必须以字母或数字开头。
+// 不合规的一律在本地跳过 —— 传上去只会拿到 400，而原子上传会因此整单回滚。
+// 常见的：_done.marker、sass 的 _partials.scss、带空格的「Read Me.txt」、.git 之类。
+const PATH_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+function isBadPath(p) {
+  if (!p || p.length > 200) return true;
+  if (p.startsWith('/') || p.includes('\\')) return true;
+  return p.split('/').some(
+    (s) => !PATH_SEGMENT.test(s) || s === '.' || s === '..' || JUNK_SEGMENTS.has(s.toLowerCase()),
+  );
 }
 
-// 断点续传：同一站名上传失败后，再次提交跳过已成功的文件。
-// 换了文件选择或换了站名就作废重来。
-let resumeKey = '';
-let resumeDone = new Set();
-function resetResume(key) {
-  if (resumeKey !== key) { resumeKey = key; resumeDone = new Set(); }
+/**
+ * 找出真正的「站点根」。选/拖文件夹时第一段目录名会被剥掉（它就是站点根），
+ * 但如果选中的是网站的上一层目录，剥完还剩一层带中文/空格的目录名，
+ * 每个文件传上去都会是「文件路径不合法」，原子上传因此整单回滚。
+ *
+ * 规则：看最浅的那批 HTML 在哪一层。
+ *  - 就在根上（目录为空）→ 不用动，返回 ''；
+ *  - 全在同一个非法目录里（如「产品分销管理后台模板_21252/」）→ 返回该目录，调用方剥掉；
+ *  - 落在多个不同目录（选中了「后台」「测试网页」这种装着多个站的父目录）→ 返回 null，调用方拦下。
+ * 目录名本身合法时一律不动，避免把「html 在子目录、资源在上一层」的正常站点拆散。
+ */
+function siteRootOf(list) {
+  const htmls = list.filter((it) => /\.html?$/i.test(it.path));
+  if (!htmls.length) return '';
+
+  const depth = Math.min(...htmls.map((it) => it.path.split('/').length));
+  const dirs = new Set();
+  htmls.filter((it) => it.path.split('/').length === depth)
+    .forEach((it) => dirs.add(it.path.split('/').slice(0, -1).join('/')));
+
+  const roots = [...dirs];
+  if (roots.length === 1) {
+    const root = roots[0];
+    const segs = root.split('/');
+    if (!segs[0] || PATH_SEGMENT.test(segs[0])) return '';
+    // 只有所有文件都在这层目录下面，才能断定它是包装目录；
+    // 否则说明选中的是装着多个站的父目录（这层目录只是其中一个站），交给调用方拦下
+    return list.every((it) => it.path.startsWith(root + '/')) ? root : null;
+  }
+  // 多个候选根：只有当它们全部以非法段开头时才判定为「选到了父目录」
+  return roots.every((r) => !PATH_SEGMENT.test(r.split('/')[0])) ? null : '';
 }
-function clearResume() { resumeKey = ''; resumeDone = new Set(); }
 
-/** 统一入口：根据收集到的文件决定上传模式并刷新界面。 */
-function applyPick(list, source) {
-  picked = list;
-  clearResume();
-  pickList.textContent = '';
-  modeTag.hidden = true;
-
-  if (list.length === 0) {
-    pickedMode = null;
-    drop.classList.remove('ready');
-    dropTitle.textContent = '把 HTML 文件、文件夹或 zip 包拖到这里';
-    pickList.hidden = true;
-    return;
-  }
-
-  const onlyOneHtml = source !== 'folder'
-    && list.length === 1 && /\.html?$/i.test(list[0].path);
-
-  if (onlyOneHtml) {
-    pickedMode = 'single';
-    drop.classList.add('ready');
-    dropTitle.textContent = list[0].path;
-    modeTag.hidden = false;
-    modeTag.innerHTML = '<span class="badge">单页模式 · 整个站点就是这一个 HTML</span>';
-    pickList.hidden = true;
-    return;
-  }
-
-  // 单个 zip：整包丢给服务端解压发布（Netlify Drop 式）
-  if (list.length === 1 && /\.zip$/i.test(list[0].path)) {
-    pickedMode = 'zip';
-    drop.classList.add('ready');
-    dropTitle.textContent = list[0].path;
-    modeTag.hidden = false;
-    modeTag.innerHTML = '<span class="badge ok">ZIP 模式 · 解压后整包发布</span>';
-    pickList.hidden = true;
-    return;
-  }
-
-  // 多页模式
-  pickedMode = 'multi';
-  drop.classList.add('ready');
-  dropTitle.textContent = list.length + ' 个文件';
-  const hasIndex = list.some((it) => it.path === 'index.html');
-  const hasAnyHtml = list.some((it) => /\.html?$/i.test(it.path));
-  modeTag.hidden = false;
-  if (hasIndex) {
-    modeTag.innerHTML = '<span class="badge ok">多页模式 · 入口 index.html</span>';
-  } else if (hasAnyHtml) {
-    // 没有根 index.html 也能发：服务端 pickEntryPath 会自动挑最浅的 html 当入口
-    modeTag.innerHTML = '<span class="badge ok">多页模式 · 入口自动识别（缺 index.html）</span>';
+function setProg(text) {
+  if (text) {
+    prog.hidden = false;
+    prog.textContent = text;
   } else {
-    modeTag.innerHTML = '<span class="badge bad">多页模式 · 没有任何 HTML 文件，上传会被拒绝</span>';
+    prog.hidden = true;
+    prog.textContent = '';
   }
+}
+
+/** 清掉当前这批选择，把拖放区恢复成初始文案。 */
+function resetPickUI() {
+  picked = [];
+  pickedMode = null;
+  pickList.hidden = true;
+  pickList.textContent = '';
+  dropTitle.textContent = DROP_HINT;
+}
+
+/** 收下这批文件，判定上传模式，然后立刻开始上传。 */
+function applyPick(list, source) {
+  if (busy) return;
+
+  if (!list.length) {
+    resetPickUI();
+    MP.alert('这里没有可以上传的文件');
+    return;
+  }
+
+  const onlyOneHtml = source !== 'folder' && list.length === 1 && /\.html?$/i.test(list[0].path);
+  const onlyOneZip = list.length === 1 && /\.zip$/i.test(list[0].path);
+
+  // 路径不合规的在本地就剔掉：服务端会 400，而「全有或全无」会因此整单回滚
+  let skipped = [];
+  let items = list;
+  if (onlyOneHtml) {
+    // 单个 HTML 一律落成入口 index.html，源文件名不合规也无所谓
+    picked = [{ path: 'index.html', file: list[0].file }];
+    pickedMode = 'single';
+  } else if (onlyOneZip) {
+    // zip 的包体不走路径校验，包内条目由服务端逐个过滤
+    picked = list;
+    pickedMode = 'zip';
+  } else {
+    // 选/拖的是网站的上一层目录时，剥掉多出来的那层目录名，让站点根落在模板目录上
+    const root = siteRootOf(list);
+    if (root === null) {
+      resetPickUI();
+      MP.alert(
+        '这个文件夹里的页面不在同一层，没法确定站点根在哪。\n'
+        + '请直接选（拖）目标站点自己的那个文件夹，比如「产品分销管理后台模板_21252」，'
+        + '而不是它上一层的「后台」；也可以把它打成 zip 再选。',
+      );
+      return;
+    }
+    if (root) {
+      const cut = root.length + 1;
+      items = list
+        .filter((it) => it.path.startsWith(root + '/'))
+        .map((it) => ({ path: it.path.slice(cut), file: it.file }));
+    }
+
+    // 顺手剔掉 0 字节文件：服务端会以「文件内容是空的」拒收，同样会触发整单回滚
+    skipped = items.filter((it) => isBadPath(it.path) || it.file.size === 0);
+    picked = items.filter((it) => !isBadPath(it.path) && it.file.size > 0);
+    pickedMode = 'multi';
+  }
+
+  if (!picked.length) {
+    resetPickUI();
+    MP.alert(
+      '这些文件都没法传：\n' + skipped.slice(0, 3).map((it) => it.path).join('\n')
+      + (skipped.length > 3 ? '\n…' : '')
+      + '\n\n路径每段必须字母或数字开头、不能含空格，隐藏文件（. 或 _ 开头）和空文件会跳过。',
+    );
+    return;
+  }
+
+  dropTitle.textContent = pickedMode === 'zip' ? picked[0].path : picked.length + ' 个文件';
 
   pickList.hidden = false;
-  list.slice(0, 100).forEach((it) => {
+  pickList.textContent = '';
+  items.slice(0, 100).forEach((it) => {
     const line = document.createElement('div');
-    line.textContent = it.path + '（' + it.file.size + ' B）';
+    line.textContent = (it.path || it.file.name) + '（' + it.file.size + ' B）';
     pickList.appendChild(line);
   });
-  if (list.length > 100) {
+  if (items.length > 100) {
     const more = document.createElement('div');
-    more.textContent = '…还有 ' + (list.length - 100) + ' 个文件';
+    more.textContent = '…还有 ' + (items.length - 100) + ' 个文件';
     pickList.appendChild(more);
   }
+  if (skipped.length) {
+    const note = document.createElement('div');
+    note.className = 'pickSkip';
+    note.textContent = '已跳过 ' + skipped.length + ' 个没法传的文件（如 ' + skipped[0].path + '）';
+    pickList.appendChild(note);
+  }
+
+  startUpload();
 }
 
-document.getElementById('pickFiles').addEventListener('click', () => fileInput.click());
-document.getElementById('pickFolder').addEventListener('click', () => folderInput.click());
+document.getElementById('pickFiles').addEventListener('click', () => { if (!busy) fileInput.click(); });
+document.getElementById('pickFolder').addEventListener('click', () => { if (!busy) folderInput.click(); });
 
 fileInput.addEventListener('change', () => {
-  applyPick(
-    Array.from(fileInput.files || [])
-      .map((f) => ({ path: f.name, file: f }))
-      .filter((it) => !isJunkPath(it.path)),
-    'files',
-  );
+  const list = Array.from(fileInput.files || []).map((f) => ({ path: f.name, file: f }));
+  fileInput.value = '';
+  applyPick(list, 'files');
 });
 
 folderInput.addEventListener('change', () => {
@@ -410,10 +414,10 @@ folderInput.addEventListener('change', () => {
   for (const f of Array.from(folderInput.files || [])) {
     // webkitRelativePath 形如「文件夹名/css/style.css」，去掉第一段
     const rel = (f.webkitRelativePath || '').split('/').slice(1).join('/');
-    // 跳过点开头的隐藏文件/文件夹和系统垃圾文件
-    if (!rel || isJunkPath(rel)) continue;
+    if (!rel) continue;
     list.push({ path: rel, file: f });
   }
+  folderInput.value = '';
   applyPick(list, 'folder');
 });
 
@@ -436,7 +440,7 @@ function readAllEntries(reader) {
 async function walkEntry(entry) {
   if (entry.isFile) {
     const file = await new Promise((res, rej) => entry.file(res, rej));
-    // fullPath 形如「/站点名/css/style.css」，去掉前两段得到站内相对路径；
+    // fullPath 形如「/站点名/css/style.css」，去掉最前面的文件夹名才是站内相对路径；
     // 直接拖单个文件时是「/foo.html」，回退用文件名
     const parts = entry.fullPath.split('/').filter(Boolean);
     const rel = parts.length > 1 ? parts.slice(1).join('/') : file.name;
@@ -452,17 +456,29 @@ async function walkEntry(entry) {
 ['dragenter', 'dragover'].forEach((type) => {
   drop.addEventListener(type, (e) => {
     e.preventDefault();
+    if (busy) return;
     drop.classList.add('over');
   });
 });
 
-['dragleave', 'dragend'].forEach((type) => {
-  drop.addEventListener(type, () => drop.classList.remove('over'));
+drop.addEventListener('dragleave', (e) => {
+  // 在子元素之间移动也会触发 dragleave，relatedTarget 还在拖放区里就忽略
+  if (e.relatedTarget && drop.contains(e.relatedTarget)) return;
+  drop.classList.remove('over');
+});
+drop.addEventListener('dragend', () => drop.classList.remove('over'));
+
+// 拖到拖放区外面时也别让浏览器直接打开这个文件
+['dragover', 'drop'].forEach((type) => {
+  window.addEventListener(type, (e) => {
+    if (!drop.contains(e.target)) e.preventDefault();
+  });
 });
 
 drop.addEventListener('drop', async (e) => {
   e.preventDefault();
   drop.classList.remove('over');
+  if (busy) return;
 
   const items = e.dataTransfer && e.dataTransfer.items;
   const entries = items
@@ -472,7 +488,7 @@ drop.addEventListener('drop', async (e) => {
   if (entries.length === 0) {
     // 兜底：拿不到 entry 就当散文件处理
     const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
-    applyPick(files.map((f) => ({ path: f.name, file: f })).filter((it) => !isJunkPath(it.path)), 'files');
+    applyPick(files.map((f) => ({ path: f.name, file: f })), 'files');
     return;
   }
 
@@ -481,189 +497,193 @@ drop.addEventListener('drop', async (e) => {
     const list = [];
     for (const entry of entries) list.push(...await walkEntry(entry));
     const source = list.some((it) => it.fromDir) ? 'folder' : 'files';
-    applyPick(list.filter((it) => !isJunkPath(it.path)), source);
+    applyPick(list, source);
   } catch (err) {
-    applyPick([], 'files');
-    dropTitle.textContent = '读取拖入内容失败：' + err.message;
+    resetPickUI();
+    MP.alert('读取拖入的内容失败：' + err.message);
   }
 });
 
-// ---------------------------------------------------------------- 投稿：上传
+// 点拖放区的空白处也能开选文件；按钮和文件清单各有自己的行为
+drop.addEventListener('click', (e) => {
+  if (busy) return;
+  if (e.target.closest('button') || e.target.closest('.pickList')) return;
+  fileInput.click();
+});
 
-/** 站点接口前缀：/api/sites/<我的用户名>/<站名>（站名只在作者名下唯一）。 */
-function apiBase(siteName) {
-  return '/api/sites/' + encodeURIComponent(MY_USERNAME) + '/' + encodeURIComponent(siteName);
-}
+// ---------------------------------------------------------------- 上传（全有或全无）
 
-/** 站点的公开访问地址：/<前缀>/<我的用户名>/<站名>/ */
-function siteUrlOf(siteName) {
-  return '/' + QWQ + '/' + encodeURIComponent(MY_USERNAME) + '/' + encodeURIComponent(siteName) + '/';
-}
-
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  result.hidden = true;
-
-  const siteName = nameInput.value.trim();
-  if (!siteName) { showResult(false, '先给页面起个名字'); return; }
-  // 与后端 checkName（lib/names.js）同口径。服务端站点接口的路由正则只认小写字母/数字/连字符，
-  // 不合法的名字（如中文）根本匹配不上路由，只会拿到 404 HTML 页，前端解析 JSON 就报
-  // 「Unexpected token '<'」—— 所以必须在发请求前拦下。
-  if (!/^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(siteName)) {
-    showResult(false,
-      '页面名字要 3-32 位小写字母、数字或连字符，且不能以连字符开头或结尾，例如 my-page-4');
-    return;
+/** 上传前先在本地过一遍，注定失败的包不建草稿。 */
+function precheck() {
+  if (!MY.username) return '页面还在加载，稍等一下再拖';
+  if (!picked.length) return '先把要发布的文件拖进来';
+  if (drafts.length >= MY.maxDrafts) {
+    return '草稿太多了（上限 ' + MY.maxDrafts + ' 个），先去工作区用「发布」腾一个位置';
   }
-  if (picked.length === 0) { showResult(false, '先选择要上传的内容'); return; }
 
-  submit.disabled = true;
-  submit.textContent = '上传中…';
+  if (pickedMode === 'zip') {
+    if (picked[0].file.size > MAX_ZIP_BYTES) return 'zip 包太大了，上限 95 MB';
+    return null;
+  }
 
-  try {
-    if (pickedMode === 'single') {
-      // 单页：1 个 HTML 文件
-      const html = await picked[0].file.text();
-      const res = await fetch('/api/upload', {
+  if (!picked.some((it) => /\.html?$/i.test(it.path))) return '至少要有一个 HTML 文件作为页面';
+  if (picked.length > MAX_FILES_PER_SITE) return '文件太多了，一个页面最多 5000 个文件';
+
+  let total = 0;
+  for (const it of picked) {
+    if (it.file.size > MAX_FILE_BYTES) return it.path + ' 超过单文件上限 90 MB';
+    total += it.file.size;
+    if (total > MAX_SITE_TOTAL_BYTES) return '文件总大小超过 512 MB';
+  }
+  return null;
+}
+
+/** 上传站点里的一个文件；返回 undefined 表示成功，失败抛错。 */
+async function uploadOne(siteName, item) {
+  const url = MP.siteApiOf(MY.username, siteName, '/files') + '?path=' + encodeURIComponent(item.path);
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let err = null;
+    try {
+      const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: siteName, html }),
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: await item.file.arrayBuffer(),
       });
-      const data = await res.json();
-      if (data.ok) {
-        showResult(true,
-          '好了。地址是 <a href="' + data.url + '" target="_blank" rel="noopener">' + data.url + '</a>'
-          + '，也可以去左侧「已发布」看看。');
-        form.reset();
-        applyPick([], 'files');
-        loadSites();
-      } else {
-        showResult(false, data.message || '上传失败');
+      const type = res.headers.get('content-type') || '';
+      // 路由没命中时回的是 HTML 错误页，直接 json() 会抛看不懂的解析错误
+      if (!type.includes('application/json')) {
+        throw Object.assign(new Error('服务端返回异常（HTTP ' + res.status + '）'), { fatal: true });
       }
-    } else if (pickedMode === 'zip') {
-      // ZIP 模式：整包丢给服务端解压发布（建站 + 所有文件在一个事务里）
-      submit.textContent = '解压发布中…';
-      const res = await fetch(
-        apiBase(siteName) + '/zip',
-        { method: 'POST', headers: { 'Content-Type': 'application/zip' },
-          body: await picked[0].file.arrayBuffer() },
-      );
       const data = await res.json();
-      if (data.ok) {
-        const url = siteUrlOf(siteName);
-        let msg = '解压发布完成，收下 ' + data.saved + ' 个文件';
-        if (data.skipped) msg += '，跳过 ' + data.skipped + ' 个';
-        msg += '。地址：<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>';
-        if (data.skipList && data.skipList.length) {
-          msg += '<details><summary>被跳过的条目</summary>'
-            + data.skipList.map((it) => escapeHtml(it.path + '（' + it.reason + '）')).join('<br>')
-            + '</details>';
-        }
-        showResult(true, msg);
-        form.reset();
-        applyPick([], 'files');
-        loadSites();
-      } else {
-        showResult(false, escapeHtml(data.message || '发布失败'));
-      }
-    } else {
-      // 多页：4 路并发上传 + 断点续传（失败后再点发布，跳过已成功的文件）
-      if (!picked.some((it) => /\.html?$/i.test(it.path))) {
-        showResult(false, '至少要有一个 HTML 文件作为入口页');
+      if (res.ok && data.ok) return;
+      throw Object.assign(new Error(data.message || ('上传失败（' + res.status + '）')), {
+        fatal: res.status < 500,
+      });
+    } catch (e) {
+      err = e;
+    }
+    // 4xx 是业务错误，重试没意义；网络抖动和 5xx 再试两次
+    if (err.fatal || attempt === 3) throw err;
+    await new Promise((r) => setTimeout(r, 400 * attempt));
+  }
+}
+
+/** 多文件：3 路并发，任一文件失败就整体中止（已传的部分靠删站回收）。 */
+async function uploadFiles(siteName) {
+  const total = picked.length;
+  const queue = picked.slice();
+  let cursor = 0;
+  let done = 0;
+  let failure = null;
+
+  const worker = async () => {
+    for (;;) {
+      if (failure) return;
+      const i = cursor++;
+      if (i >= queue.length) return;
+      try {
+        await uploadOne(siteName, queue[i]);
+        done++;
+        setProg('上传中 ' + done + '/' + total);
+      } catch (err) {
+        // 带上具体文件路径：只报「文件路径不合法」时根本看不出是哪个文件、哪一段目录名有问题
+        failure = failure || new Error(queue[i].path + '：' + (err.message || '上传失败'));
         return;
       }
-
-      resetResume(siteName);
-      const queue = picked.filter((it) => !resumeDone.has(it.path));
-      const skipped = picked.length - queue.length;
-      const total = picked.length;
-      let doneCount = skipped;
-      const failures = [];
-      let cursor = 0;
-
-      const uploadOne = async (item) => {
-        // 网络抖动重试 2 次；服务端返回的业务错误（4xx）重试没意义，直接回传
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          try {
-            const res = await fetch(
-              apiBase(siteName) + '/files?path=' + encodeURIComponent(item.path),
-              { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' },
-                body: await item.file.arrayBuffer() },
-            );
-            // 服务端没命中路由或出错时回的是 HTML 错误页，直接 json() 会抛
-            // 「Unexpected token '<'」这种让人看不懂的错；先验类型再解析
-            if (!(res.headers.get('content-type') || '').includes('application/json')) {
-              return '服务端返回异常（HTTP ' + res.status + '），请检查页面名字是否合法';
-            }
-            const data = await res.json();
-            if (data.ok) return null;
-            return data.message || '未知错误';
-          } catch (err) {
-            if (attempt === 3) return '网络出错：' + err.message;
-            await new Promise((r) => setTimeout(r, 500 * attempt));
-          }
-        }
-        return '网络出错';
-      };
-
-      const worker = async () => {
-        for (;;) {
-          const i = cursor++;
-          if (i >= queue.length) return;
-          const item = queue[i];
-          const errMsg = await uploadOne(item);
-          if (errMsg === null) {
-            resumeDone.add(item.path);
-            doneCount++;
-          } else {
-            failures.push(item.path + '：' + errMsg);
-          }
-          submit.textContent = '上传中 ' + doneCount + '/' + total;
-        }
-      };
-
-      const CONCURRENCY = 4;
-      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
-
-      const url = siteUrlOf(siteName);
-      if (failures.length === 0) {
-        showResult(true,
-          '上传完成，共 ' + doneCount + ' 个文件'
-          + (skipped ? '（跳过已传的 ' + skipped + ' 个）' : '')
-          + '。地址：<a href="' + url + '" target="_blank" rel="noopener">'
-          + url + '</a>，也可以去左侧「已发布」看看。');
-        form.reset();
-        applyPick([], 'files');
-        loadSites();
-      } else {
-        showResult(false,
-          '成功 ' + doneCount + '/' + total + ' 个，失败 ' + failures.length + ' 个：<br>'
-          + failures.slice(0, 3).map(escapeHtml).join('<br>')
-          + (failures.length > 3 ? '<br>…' : '')
-          + '<br>再点一次「发布页面」会跳过已成功的文件，从中断处继续传。');
-      }
     }
-  } catch (err) {
-    showResult(false, '网络出问题了：' + err.message);
-  } finally {
-    submit.disabled = false;
-    submit.textContent = '发布页面';
+  };
+
+  await Promise.all(Array.from({ length: Math.min(3, queue.length) }, worker));
+  if (failure) throw failure;
+}
+
+/** zip：服务端在一个事务里解压 + 全量写入，天然不会留下半成品。 */
+async function uploadZip(siteName) {
+  setProg('正在解压…');
+  const res = await fetch(MP.siteApiOf(MY.username, siteName, '/zip'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/zip' },
+    body: await picked[0].file.arrayBuffer(),
+  });
+  const type = res.headers.get('content-type') || '';
+  if (!type.includes('application/json')) throw new Error('服务端返回异常（HTTP ' + res.status + '）');
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.message || '上传失败');
+}
+
+/** 中断/失败时把刚建的草稿整张删掉，做到「什么都没留下」。 */
+async function discardDraft(name) {
+  try {
+    await MP.api(MP.siteApiOf(MY.username, name), { method: 'DELETE' });
+  } catch { /* 尽力而为，删不掉就交给下次进页面时的清理 */ }
+  forgetPending(name);
+}
+
+async function startUpload() {
+  const problem = precheck();
+  if (problem) {
+    resetPickUI();
+    MP.alert(problem);
+    return;
   }
-});
+
+  busy = true;
+  drop.classList.add('busy');
+  dropTitle.textContent = '准备上传…';
+  setProg(pickedMode === 'zip' ? '正在准备' : '上传中 0/' + picked.length);
+
+  let tempName = null;
+  let beat = null;
+  try {
+    const created = await MP.createDraft();
+    tempName = created.site && created.site.name;
+    if (!tempName) throw new Error('建草稿失败，请稍后再试');
+    rememberPending(tempName);
+    // 上传期间一直续心跳，别的标签页的清理逻辑就不会把这张在传的草稿删掉
+    beat = setInterval(() => { if (tempName) beatPending(tempName); }, PENDING_BEAT_MS);
+
+    // 新建草稿自带一张占位 index.html，先删掉，免得盖住真正上传的入口页
+    await MP.api(MP.siteApiOf(MY.username, tempName, '/files') + '?path=index.html', { method: 'DELETE' })
+      .catch(() => {});
+
+    if (pickedMode === 'zip') await uploadZip(tempName);
+    else await uploadFiles(tempName);
+
+    const draftName = tempName;
+    tempName = null;          // 成功了，不再回滚
+    forgetPending(draftName);
+
+    setProg('');
+    resetPickUI();
+    await loadMine();
+
+    const draft = drafts.find((d) => d.name === draftName);
+    openPublish(draft || { name: draftName, title: '', description: '', tag: '' });
+  } catch (err) {
+    if (tempName) await discardDraft(tempName);
+    setProg('');
+    resetPickUI();
+    MP.alert((err && err.message ? err.message : '上传失败') + '\n这次没有保存任何东西，可以重新拖一次。');
+  } finally {
+    if (beat) clearInterval(beat);
+    busy = false;
+    drop.classList.remove('busy');
+    dropTitle.textContent = DROP_HINT;
+  }
+}
 
 // ---------------------------------------------------------------- 启动
 
-let QWQ = 'qwq';   // 用户空间前缀，从 /api/sites 里读回来，兜底用默认值
+document.getElementById('newBtn').addEventListener('click', () => { location.href = '/new'; });
 
-showTab(new URLSearchParams(location.search).get('tab'));
-
-MP.me().then((me) => {
+MP.me().then(async (me) => {
   if (!me) {
-    location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+    location.href = '/login?next=' + encodeURIComponent(location.pathname);
     return;
   }
-  loadSites();
-  form.hidden = false;
-  needLogin.hidden = true;
+  await loadMine();
+  if (await cleanLeftovers()) await loadMine();
 });
 </script>
 </body>
