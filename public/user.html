@@ -32,6 +32,18 @@
 
     <section id="tabWorks">
       <div class="chips" id="chips" style="margin:16px 0 4px"></div>
+
+      <!-- 自己的作品可以批量删除；别人的主页不显示这一排 -->
+      <div class="row" id="workOps" hidden style="margin-top:6px;gap:8px">
+        <button class="tiny ghost" type="button" id="selectBtn">批量操作</button>
+      </div>
+      <div class="selBar" id="selBar" hidden>
+        <label class="selItem"><input type="checkbox" id="pickAll"> 全选</label>
+        <button class="selItem" type="button" id="batchDeleteBtn">删除</button>
+        <span class="selCount" id="pickCount">已选择 0 个作品</span>
+        <button class="selItem done" type="button" id="doneBtn">完成</button>
+      </div>
+
       <div class="cards" id="cards"></div>
     </section>
 
@@ -65,6 +77,11 @@ const statsBox = document.getElementById('pStats');
 const actionsBox = document.getElementById('actions');
 const chipsBox = document.getElementById('chips');
 const cardsBox = document.getElementById('cards');
+const workOps = document.getElementById('workOps');
+const selBar = document.getElementById('selBar');
+const pickAll = document.getElementById('pickAll');
+const pickCount = document.getElementById('pickCount');
+const batchDeleteBtn = document.getElementById('batchDeleteBtn');
 const favTab = document.querySelector('#utabs a[data-tab="favs"]');
 const favChipsBox = document.getElementById('favChips');
 const favCardsBox = document.getElementById('favCards');
@@ -75,6 +92,8 @@ let me = null;        // 当前登录用户（可能为 null）
 let tag = '';         // 作品标签筛选
 let favFolders = [];  // 自己的收藏夹（按后端 folder 分组）
 let favFolder = 0;
+let selecting = false;     // 作品是否处于批量操作模式（默认不显示勾选框）
+const picked = new Set();  // 已勾选的作品站名
 
 const sum = (list, key) => list.reduce((n, s) => n + (s[key] || 0), 0);
 
@@ -107,6 +126,12 @@ function renderProfile() {
 
   // 收藏夹是私密的，只有本人能看；别人的主页不显示这个标签
   favTab.hidden = !isOwn;
+  // 批量操作只对自己有用，别人的主页连入口都不显示
+  if (!isOwn) {
+    selecting = false;
+    picked.clear();
+  }
+  syncWorksChrome();
 }
 
 function renderActions(isOwn) {
@@ -168,27 +193,149 @@ function renderChips() {
   chipsBox.textContent = '';
   const sites = profile.sites;
   chipsBox.appendChild(chip('全部 ' + sites.length, tag === '', () => {
-    tag = ''; renderChips(); renderWorks();
+    tag = ''; picked.clear(); renderChips(); renderWorks();
   }));
   MP.TAGS.forEach((t) => {
     if (!t.key) return;
     const count = sites.filter((s) => s.tag === t.key).length;
     if (!count) return;
     chipsBox.appendChild(chip(t.label + ' ' + count, tag === t.key, () => {
-      tag = t.key; renderChips(); renderWorks();
+      tag = t.key; picked.clear(); renderChips(); renderWorks();
     }));
   });
 }
 
 function renderWorks() {
   const sites = tag ? profile.sites.filter((s) => s.tag === tag) : profile.sites;
+  const isOwn = Boolean(me && me.id === profile.user.id);
   if (!sites.length) {
+    // 筛选后可能一个都不剩，勾选集合要跟着清掉，避免对不存在的作品操作
+    picked.clear();
     cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">'
       + (tag ? '这个标签下还没有页面。' : '还没有发布任何页面。') + '</div>';
+    syncWorksChrome();
+    renderPickBar(sites);
     return;
   }
-  MP.renderCards(cardsBox, sites);
+  // 自己的主页多一排「编辑 / 删除」，别人看到的是普通卡片
+  MP.renderCards(cardsBox, sites, isOwn ? { manage: true, onDelete: afterDelete } : undefined);
+  if (isOwn && selecting) mountPickers(sites);
+  syncWorksChrome();
+  renderPickBar(sites);
 }
+
+/** 切换「批量操作」入口和批量操作条：批量模式下才显示勾选框和工具栏。 */
+function syncWorksChrome() {
+  const isOwn = Boolean(profile && me && me.id === profile.user.id);
+  // 一个作品都没有时不给入口，省得点进去只有一个空态
+  const canSelect = isOwn && profile.sites.length > 0;
+  workOps.hidden = !canSelect || selecting;
+  selBar.hidden = !(canSelect && selecting);
+}
+
+/** 刷新批量操作条：已选数量、全选状态、按钮可用性。 */
+function renderPickBar(sites) {
+  pickCount.textContent = '已选择 ' + picked.size + ' 个作品';
+  pickAll.checked = sites.length > 0 && picked.size === sites.length;
+  pickAll.indeterminate = picked.size > 0 && picked.size < sites.length;
+  pickAll.disabled = sites.length === 0;
+  batchDeleteBtn.disabled = picked.size === 0;
+}
+
+/** 给卡片挂勾选框（renderCards 不支持扩展，渲染完再补）。 */
+function mountPickers(sites) {
+  const cards = cardsBox.querySelectorAll('.vcard');
+  sites.forEach((s, i) => {
+    const card = cards[i];
+    if (!card) return;
+    card.classList.toggle('picked', picked.has(s.name));
+
+    const label = document.createElement('label');
+    label.className = 'pick';
+    label.title = '选中后可批量删除';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = picked.has(s.name);
+    box.addEventListener('change', () => {
+      if (box.checked) picked.add(s.name);
+      else picked.delete(s.name);
+      card.classList.toggle('picked', box.checked);
+      renderPickBar(sites);
+    });
+    label.appendChild(box);
+    card.appendChild(label);
+  });
+}
+
+/** 删除成功后本地同步：列表、作品数、标签筛选一起刷新，不重新请求接口。 */
+function afterDelete(site) {
+  profile.sites = profile.sites.filter((s) => s !== site);
+  profile.stats.sites = Math.max(0, (profile.stats.sites || 1) - 1);
+  picked.delete(site.name);
+  // 当前筛选的标签下已经没有作品了就退回「全部」
+  if (tag && !profile.sites.some((s) => s.tag === tag)) tag = '';
+  renderProfile();
+  renderChips();
+  renderWorks();
+}
+
+// ---------------------------------------------------------------- 作品批量操作
+
+document.getElementById('selectBtn').addEventListener('click', () => {
+  selecting = true;
+  picked.clear();
+  renderWorks();
+  MP.toast('勾选要删除的作品，或点「全选」');
+});
+
+document.getElementById('doneBtn').addEventListener('click', () => {
+  selecting = false;
+  picked.clear();
+  renderWorks();
+});
+
+pickAll.addEventListener('change', () => {
+  const sites = tag ? profile.sites.filter((s) => s.tag === tag) : profile.sites;
+  picked.clear();
+  if (pickAll.checked) sites.forEach((s) => picked.add(s.name));
+  renderWorks();
+});
+
+batchDeleteBtn.addEventListener('click', async () => {
+  if (!picked.size) return;
+  if (!window.confirm('确定删除选中的 ' + picked.size + ' 个作品？删了就找不回来了。')) return;
+  // 逐个调已有的删除接口：中途失败也能知道哪些已经删掉了
+  const failed = [];
+  const done = [];
+  batchDeleteBtn.disabled = true;
+  for (const name of Array.from(picked)) {
+    const site = profile.sites.find((s) => s.name === name);
+    if (!site) { picked.delete(name); continue; }
+    try {
+      await MP.api(MP.siteApi(site), { method: 'DELETE' });
+      done.push(site);
+      picked.delete(name);
+    } catch {
+      failed.push(site.title || name);
+    }
+  }
+  batchDeleteBtn.disabled = false;
+
+  if (done.length) {
+    done.forEach((site) => {
+      profile.sites = profile.sites.filter((s) => s !== site);
+    });
+    profile.stats.sites = Math.max(0, (profile.stats.sites || done.length) - done.length);
+    if (tag && !profile.sites.some((s) => s.tag === tag)) tag = '';
+    if (!profile.sites.length) selecting = false;
+    renderProfile();
+    renderChips();
+    renderWorks();
+  }
+
+  if (failed.length) MP.toast('删除失败：' + failed.join('、'));
+  else if (done.length) MP.toast('已删除 ' + done.length + ' 个作品');
+});
 
 // ---------------------------------------------------------------- 我的收藏
 

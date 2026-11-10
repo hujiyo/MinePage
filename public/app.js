@@ -733,6 +733,42 @@
     ops.appendChild(fav);
     card.appendChild(ops);
 
+    // 自己主页的「作品」：卡片底部多一排管理按钮（编辑 / 删除）。
+    // 访问入口就是封面和标题，不再单独放「访问」按钮。
+    // 别人的主页不传 opt.manage，就看不到这一排。
+    if (o.manage) {
+      const manage = document.createElement('div');
+      manage.className = 'vmanage';
+
+      const edit = document.createElement('a');
+      edit.href = '/edit/' + encodeURIComponent(site.name);
+      edit.innerHTML = '<button type="button" class="ghost tiny">编辑</button>';
+      manage.appendChild(edit);
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'danger tiny';
+      del.textContent = '删除';
+      del.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        if (!confirm('确定删除 ' + siteUrl(site) + ' 吗？删了就找不回来了。')) return;
+        del.disabled = true;
+        try {
+          await MP.api(siteApi(site), { method: 'DELETE' });
+          MP.toast('已删除 ' + (site.title || site.name));
+          if (o.onDelete) o.onDelete(site);
+        } catch (err) {
+          MP.toast(err.message);
+        } finally {
+          del.disabled = false;
+        }
+      });
+      manage.appendChild(del);
+
+      card.appendChild(manage);
+    }
+
     if (o.peek !== false) attachPeek(card, site, cover);
 
     return card;

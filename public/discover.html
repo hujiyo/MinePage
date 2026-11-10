@@ -75,27 +75,104 @@ async function mountBanner() {
   el.className = 'banner';
   let idx = 0;
   let timer = null;
+  let resizeTimer = null;
+
+  // 轮播位里显示站点真实首屏：和卡片封面同一套虚拟视口（1280×720，按宽度等比缩放，
+  // 多出来的高度由 .banner 的 overflow:hidden 裁掉）。固定 720 是为了让站点的
+  // 100vh 全屏首屏按真实尺寸排版——视口高度乱改会让 hero 被压扁或撑出可见区。
+  const PREVIEW_W = 1280;
+  const PREVIEW_H = 720;
+
+  // 已载入过的轮播项不重复下载：iframe 从 DOM 里摘掉就会销毁浏览上下文，
+  // 再插回去等于重新载入整站，所以这里改成「留在 DOM 里、用 hidden 隐藏」。
+  // 同时最多留 CACHE_MAX 张，避免十个站点在后台一起跑动画。
+  const CACHE_MAX = 3;
+  const mounted = []; // 已挂进 el 的 bpreview，按载入先后排序（先进先出淘汰）
+
+  function mountPreview(b) {
+    // 换图前先把所有预览藏起来，避免上一张的残影盖在新渐变上；
+    // 同时撤掉 hasPreview，新画面出来前先用渐变 + 大字占位。
+    mounted.forEach((f) => { f.hidden = true; });
+    el.classList.remove('hasPreview');
+    // 没有作者名就拼不出站点地址（老数据 / 站点已删），保持渐变占位即可
+    if (!b.site.owner) return;
+    const w = el.clientWidth;
+    if (!w) return; // 还没布局好（隐藏 / 刚挂载），等 resize 或下一轮再补
+
+    let frame = mounted.find((f) => f.dataset.bid === String(b.id));
+    if (!frame) {
+      frame = document.createElement('iframe');
+      frame.className = 'bpreview';
+      frame.dataset.bid = String(b.id);
+      frame.referrerPolicy = 'no-referrer';
+      // 只给脚本不给同源：站点 JS 照常跑，但摸不到父页面和 cookie
+      frame.sandbox = 'allow-scripts';
+      frame.setAttribute('scrolling', 'no');
+      frame.style.width = PREVIEW_W + 'px';
+      frame.style.height = PREVIEW_H + 'px';
+      frame.style.transformOrigin = '0 0';
+      frame.addEventListener('load', () => {
+        frame.dataset.loaded = '1';
+        frame.classList.add('loaded');   // 淡入，见 style.css 的 .bpreview
+        // 只有当前在用的那张才让大字退场；后台缓存的旧 iframe 晚到时不能抢这个状态
+        if (!frame.hidden) el.classList.add('hasPreview');
+      }, { once: true });
+      // 首屏通常很快画完，不必等整站下完才露脸；到点先显示，没画出来的部分透出渐变占位
+      setTimeout(() => {
+        if (frame.hidden) return;
+        frame.classList.add('loaded');
+        el.classList.add('hasPreview');
+      }, 900);
+      frame.src = '/qwq/' + encodeURIComponent(b.site.owner) + '/'
+        + encodeURIComponent(b.site.name) + '/?mpcover=1';
+      mounted.push(frame);
+      // 超出上限就把最早的那张彻底移除（它的浏览上下文也随之释放）
+      while (mounted.length > CACHE_MAX) {
+        const old = mounted.shift();
+        if (old !== frame) old.remove();
+      }
+      const info = el.querySelector('.binfo');
+      if (info) el.insertBefore(frame, info);
+      else el.appendChild(frame);
+    }
+
+    // 复用时要按 banner 当前宽度重算缩放（窗口尺寸变了）
+    frame.style.transform = 'scale(' + (w / PREVIEW_W) + ')';
+    frame.hidden = false;
+    if (frame.dataset.loaded === '1') {
+      frame.classList.add('loaded');
+      el.classList.add('hasPreview');
+    }
+  }
+
+  // 骨架只搭一次：每次 paint 都重写 innerHTML 会把预览 iframe 一起冲掉，
+  // 换一张就得重新载入整站，轮播会一直闪白。所以这里只更新文字、配色和圆点。
+  el.innerHTML =
+    '<div class="bcover"><span class="bchar"></span></div>'
+    + '<div class="binfo"><b></b><span></span></div>'
+    + (list.length > 1
+      ? '<button type="button" class="bnav prev" title="上一张">' + MP.icon('left') + '</button>'
+        + '<button type="button" class="bnav next" title="下一张">' + MP.icon('right') + '</button>'
+        + '<div class="bdots">' + list.map((_, i) =>
+          '<i' + (i === idx ? ' class="on"' : '') + ' data-i="' + i + '"></i>').join('') + '</div>'
+      : '');
+
+  el.querySelector('.prev')?.addEventListener('click', (e) => { e.stopPropagation(); go(idx - 1); });
+  el.querySelector('.next')?.addEventListener('click', (e) => { e.stopPropagation(); go(idx + 1); });
+  el.querySelectorAll('.bdots i').forEach((d) => {
+    d.addEventListener('click', (e) => { e.stopPropagation(); go(Number(d.dataset.i)); });
+  });
 
   function paint() {
     const b = list[idx];
     const title = b.title || b.site.title || b.site.name;
     const sub = b.subtitle || b.site.description || '';
     el.style.background = MP.grad(b.site);
-    el.innerHTML =
-      '<div class="bcover"><span class="bchar">' + MP.esc(MP.initial(b.site)) + '</span></div>'
-      + '<div class="binfo"><b>' + MP.esc(title) + '</b><span>' + MP.esc(sub) + '</span></div>'
-      + (list.length > 1
-        ? '<button type="button" class="bnav prev" title="上一张">' + MP.icon('left') + '</button>'
-          + '<button type="button" class="bnav next" title="下一张">' + MP.icon('right') + '</button>'
-          + '<div class="bdots">' + list.map((_, i) =>
-            '<i class="' + (i === idx ? 'on' : '') + '" data-i="' + i + '"></i>').join('') + '</div>'
-        : '');
-
-    el.querySelector('.prev')?.addEventListener('click', (e) => { e.stopPropagation(); go(idx - 1); });
-    el.querySelector('.next')?.addEventListener('click', (e) => { e.stopPropagation(); go(idx + 1); });
-    el.querySelectorAll('.bdots i').forEach((d) => {
-      d.addEventListener('click', (e) => { e.stopPropagation(); go(Number(d.dataset.i)); });
-    });
+    el.querySelector('.bchar').textContent = MP.initial(b.site);
+    el.querySelector('.binfo b').textContent = title;
+    el.querySelector('.binfo span').textContent = sub;
+    el.querySelectorAll('.bdots i').forEach((d, i) => d.classList.toggle('on', i === idx));
+    mountPreview(b);
   }
 
   function go(i) {
@@ -116,9 +193,17 @@ async function mountBanner() {
       + '/' + encodeURIComponent(list[idx].site.name);
   });
 
+  // 窗口缩放后 banner 的宽高都变了，缩放比例得重算：等尺寸稳定了再重建一次预览，
+  // 否则画面会按旧比例拉伸（拖拽过程中每帧重建代价太高）。
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => mountPreview(list[idx]), 200);
+  });
+
+  // 先挂进文档再 paint：mountPreview 要读 clientWidth/Height，挂载前量到的是 0
+  bannerArea.appendChild(el);
   paint();
   restart();
-  bannerArea.appendChild(el);
 }
 
 // ---------------------------------------------------------------- 分类 chips
