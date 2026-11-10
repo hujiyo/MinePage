@@ -22,10 +22,10 @@
     </div>
 
     <aside class="homeSide">
-      <div>
+      <div id="rankSec">
         <div class="secHead">
-          <h2>热门榜单</h2>
-          <a class="more" href="/?sort=rank">更多</a>
+          <h2>收藏榜</h2>
+          <a class="more" href="/?sort=favorites">更多</a>
         </div>
         <div class="rankList" id="rank"></div>
       </div>
@@ -47,7 +47,9 @@ MP.topbar();
 
 const params = new URLSearchParams(location.search);
 const q = (params.get('q') || '').trim();
-const sortRank = params.get('sort') === 'rank';
+// 对外只有两个排序名：rank = 按浏览量，favorites = 按收藏。其余值都按推荐流。
+const sortKind = params.get('sort') === 'rank' ? 'views'
+  : params.get('sort') === 'favorites' ? 'favorites' : '';
 let tag = '';
 let page = Math.max(1, Number(params.get('page')) || 1);
 
@@ -57,6 +59,7 @@ const cardsBox = document.getElementById('cards');
 const pagerBox = document.getElementById('pager');
 const feedTitle = document.getElementById('feedTitle');
 const rankBox = document.getElementById('rank');
+const rankSec = document.getElementById('rankSec');
 
 // ---------------------------------------------------------------- 轮播位
 // 内容全部来自管理后台配置（/api/banners）：只返回启用中、且站点仍在线的。
@@ -157,24 +160,26 @@ function renderChips() {
   });
 }
 
-// ---------------------------------------------------------------- 侧栏热门榜单
+// ---------------------------------------------------------------- 侧栏收藏榜
 
+// 数据来自 GET /api/rank/favorites：只收「至少被收藏过一次」的已上线站点，
+// 按收藏数排。不够十条就少给几条；一条都没有时整段隐藏，
+// 不拿 0 收藏的新站凑满一屏 —— 那等于编一份榜出来。
 async function renderRank() {
   rankBox.textContent = '';
   try {
-    const data = await MP.api('/api/discover?sort=views&size=10');
-    data.sites.forEach((s, i) => {
+    const data = await MP.api('/api/rank/favorites');
+    const list = data.sites || [];
+    if (!list.length) { rankSec.hidden = true; return; }
+    list.forEach((s, i) => {
       const row = document.createElement('div');
       row.className = 'rankItem';
       row.innerHTML = '<span class="no">' + (i + 1) + '</span>'
         + '<span class="rw">' + MP.esc(s.title || s.name) + '</span>'
-        + '<span class="rv">' + MP.fmtNum(s.views) + '</span>';
+        + '<span class="rv" title="' + s.favorites + ' 人收藏">' + MP.fmtNum(s.favorites) + '</span>';
       row.addEventListener('click', () => { location.href = MP.viewUrl(s); });
       rankBox.appendChild(row);
     });
-    if (!data.sites.length) {
-      rankBox.innerHTML = '<div class="empty">还没有上榜的页面。</div>';
-    }
   } catch (err) {
     rankBox.innerHTML = '<div class="empty">' + MP.esc(err.message) + '</div>';
   }
@@ -236,14 +241,17 @@ function renderPager(total, pages) {
 // ---------------------------------------------------------------- 列表
 
 async function reload() {
-  feedTitle.textContent = q ? '搜索：' + q : (sortRank ? '按浏览量' : '推荐');
+  feedTitle.textContent = q ? '搜索：' + q
+    : sortKind === 'favorites' ? '按收藏'
+    : sortKind === 'views' ? '按浏览量' : '推荐';
   cardsBox.innerHTML = '<div class="empty" style="grid-column:1/-1">加载中…</div>';
 
   // 参数映射：服务端对非法参数只静默退化，所以 'hot' 这种前端伪标签必须显式换成 sort=views
   const search = new URLSearchParams();
   if (q) search.set('q', q);
   if (tag && tag !== 'hot') search.set('tag', tag);
-  if (tag === 'hot' || sortRank) search.set('sort', 'views');
+  if (sortKind) search.set('sort', sortKind);
+  else if (tag === 'hot') search.set('sort', 'views');
   search.set('page', String(page));
   search.set('size', '12');
 

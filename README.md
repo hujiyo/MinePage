@@ -42,8 +42,7 @@ lib/sites.js                  站点的数据操作
 lib/covers.js                 卡片自定义封面：类型嗅探 + 读写 site_covers
 lib/social.js                 社区互动数据操作（点赞 / 评论 / 收藏 / 关注 / 通知 / 浏览量 / 创作者主页）
 lib/coins.js                  硬币数据操作（余额 / 流水 / 投币 / 每日签到 / 配额兑换）
-lib/hot.js                    热门搜索：记录搜索词 + 按人数聚合出榜 + 屏蔽词
-lib/clock.js                  「哪一天」的唯一来源（UTC+8 自然日，签到与热搜窗口共用）
+lib/clock.js                  「哪一天」的唯一来源（UTC+8 自然日，签到等按日归属的地方共用）
 lib/names.js                  站名 / 用户名校验
 lib/addressing.js             「用户名+站名 ⇄ 访问地址」的唯一映射点，换地址形态只改这里
 lib/email.js                  发信（SMTP），未配置时退化为控制台打印
@@ -93,8 +92,6 @@ public/style.css              共享样式
 | `banners` | 首页轮播位（管理员指定第几个位置放哪个站，`title` / `subtitle` 空串表示跟随站点；站点删除级联清掉） |
 | `coin_ledger` | 硬币流水（余额的**唯一事实源**，`users.coin_balance` 只是缓存）。`reason`：`register` / `signin` / `charge` / `received` / `quota`；`UNIQUE(user_id, reason, ref)` 兼做签到幂等 |
 | `coin_charges` | 投给某站点的硬币（一人一站一条，`count ≤ 2`）。**只增不改**，没有删除路径——页面「收到多少枚」是永久记录，作者花掉自己的币不会让它变小 |
-| `search_queries` | 搜索词记录（热搜榜的唯一数据源）。`who` 是去重标识（登录 `user:<id>`，匿名访客的随机 Cookie id），不是外键；`UNIQUE(word, who, day)` 兼做防刷；超出 7 天窗口的每晚自动清掉 |
-| `search_blocklist` | 热搜屏蔽词（运营兜底）。和 `search_queries` 之间没有外键（方向会反）；屏蔽一个词时在事务里把它已有的记录一起删掉，不会出现「进了黑名单但榜首还挂着」 |
 
 ## 接口
 
@@ -112,8 +109,8 @@ public/style.css              共享样式
 | POST | `/api/auth/register` | 邮箱注册（`email` / `code` / `password` / `username`） |
 | POST | `/api/auth/login` | 登录（邮箱或用户名） |
 | POST | `/api/auth/logout` | 登出 |
-| GET | `/api/discover` | 社区发现流（?q= 模糊搜索，?tag= 标签筛选） |
-| GET | `/api/hot` | 热门搜索榜（窗口内至少两个人搜过的词，按人数排；没数据时返回空数组） |
+| GET | `/api/discover` | 社区发现流（?q= 模糊搜索，?tag= 标签筛选，?sort= 排序） |
+| GET | `/api/rank/favorites` | 收藏榜（首页侧栏；只收被收藏过的已上线站点，按收藏数排，实时算不缓存） |
 | GET | `/api/u/:username/profile` | 创作者主页数据（资料 / 粉丝关注数 / 总浏览量 / TA 的站点） |
 | GET | `/api/sites` | 我的站点（带 `username`、`quota`、内容标签词表 `tags`，以及当前上传上限 `limits`——投稿页文案与提交前预检都读它） |
 | POST | `/api/upload` | 上传 HTML（需登录，占配额） |
@@ -143,8 +140,8 @@ public/style.css              共享样式
 | GET | `/api/admin/sites` | 全部页面 |
 | POST | `/api/admin/sites/:id/status` | 下线 / 恢复 |
 | DELETE | `/api/admin/sites/:id` | 删除页面 |
-| GET / POST | `/api/admin/blocked-words` | 热搜屏蔽词列表 / 加一个（顺带删掉它已有的搜索记录） |
-| DELETE | `/api/admin/blocked-words/:词` | 解封一个词 |
+| GET / POST | `/api/admin/banners` | 轮播位列表 / 新建 |
+| PUT / DELETE | `/api/admin/banners/:id` | 改一条轮播 / 删一条 |
 | GET | `/api/mcp/tokens` | 我的 MCP 密钥列表 |
 | POST | `/api/mcp/tokens` | 创建 MCP 密钥（明文只回一次） |
 | POST | `/api/mcp/tokens/:id/revoke` | 吊销密钥 |
@@ -218,17 +215,6 @@ node scripts/coin-page-smoke.mjs   # 17 项
 
 它测的是 `/view/uitester/ui-site`，需要**该页面存在、且 uitester 不是它的作者**
 （自己投自己会被服务端拒掉）。换页面用 `SMOKE_VIEW`。
-
-顶栏「热门搜索」也是 DOM 行为（面板展开才拉数据、空榜要整段隐藏），单独一支（`npm run smoke:hot`）：
-
-```
-$env:PORT=3222; $env:MYSQL_DATABASE='minepage_smoke'; $env:HOT_CACHE_MS='0'; node server.js
-$env:BASE_URL='http://127.0.0.1:3222'; node scripts/hot-page-smoke.mjs   # 12 项
-```
-
-`HOT_CACHE_MS=0` 关掉热搜榜的 5 分钟缓存，否则写完记录看不到变化。脚本自己用匿名访客
-造一个热词，不需要登录。headless Edge 默认让页面拿不到窗口焦点，脚本用
-`Emulation.setFocusEmulationEnabled` + 真实鼠标输入点搜索框，才走得到 focus 回调。
 
 ### 老库迁移到用户空间
 
