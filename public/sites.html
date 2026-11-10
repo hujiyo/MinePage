@@ -42,7 +42,7 @@
         <h2>投稿须知</h2>
         <ul class="muted" style="font-size:13px;margin:0;padding-left:18px;line-height:1.9">
           <li>多页站建议带 <code>index.html</code> 作入口，没有的话会自动挑最浅的那张 HTML</li>
-          <li>单个文件不超过 90 MB，一个页面最多 5000 个文件、合计 512 MB</li>
+          <li id="limitLine">单个文件、单站总量与账号总量都有上限，具体数字以页面顶部提示为准</li>
           <li>页面在沙箱里运行，请勿引用本机资源</li>
           <li>上传中途断掉不会留下任何东西，整套传完才会生成草稿</li>
         </ul>
@@ -67,11 +67,25 @@ MP.topbar({ active: 'create' });
 
 const DROP_HINT = '想部署一个新项目吗？把你的文件夹拖拽到这里';
 
-// 与服务端 lib/config.js 对齐，本地先挡掉注定失败的包，免得白传一遍
-const MAX_FILE_BYTES = 90 * 1024 * 1024;
-const MAX_FILES_PER_SITE = 5000;
-const MAX_SITE_TOTAL_BYTES = 512 * 1024 * 1024;
-const MAX_ZIP_BYTES = 95 * 1024 * 1024;
+// 上传上限一律以接口下发的 limits 为准（GET /api/sites），前端不再各写一份数字：
+// 服务端的闸才是真的，前端这份只用来在拖进来时就挡掉注定失败的包。
+// 接口还没回来时用一组保守的兜底值，宁可先拦住也不要白传一遍才发现 413。
+const LIMITS_FALLBACK = {
+  htmlBytes: 5 * 1024 * 1024,
+  fileBytes: 10 * 1024 * 1024,
+  filesPerSite: 200,
+  siteTotalBytes: 50 * 1024 * 1024,
+  storageUsedBytes: 0,
+  userTotalBytes: 100 * 1024 * 1024,
+  zipBytes: 55 * 1024 * 1024,
+};
+let LIMITS = { ...LIMITS_FALLBACK };
+
+/** 字节数转「12 MB」这种人看的单位。 */
+function mbLabel(bytes) {
+  const mb = bytes / 1024 / 1024;
+  return (mb >= 10 ? Math.round(mb) : Math.round(mb * 10) / 10) + ' MB';
+}
 
 // 「上传中断即不保存」的兜底：草稿建好后先记一笔账，传完才划掉。
 // 上传期间每 8 秒续一次心跳；查账时心跳超过 30 秒没动就算断了，直接删掉这张草稿。
@@ -198,9 +212,21 @@ async function loadMine() {
   const data = await MP.api('/api/sites');
   if (data.username) MY.username = data.username;
   if (typeof data.maxDrafts === 'number') MY.maxDrafts = data.maxDrafts;
-  // 创作页只管草稿，正式站归个人主页「作品」
-  drafts = (data.sites || []).filter((s) => s.status === 'draft');
+  // 上传上限随接口下发，前端先挡的那一关跟着服务端走，不会再出现「文案和实际闸门不一致」
+  if (data.limits) LIMITS = { ...LIMITS_FALLBACK, ...data.limits };
+  syncLimitCopy();
+  // 创作页只展示草稿：/api/sites 的 sites 仍只装正式站，草稿走 drafts 字段
+  drafts = data.drafts || [];
   renderDrafts();
+}
+
+/** 把接口下发的上限写进「投稿须知」，数字只在这一处出现。 */
+function syncLimitCopy() {
+  const line = document.getElementById('limitLine');
+  if (!line) return;
+  line.textContent = '单个文件 ≤ ' + mbLabel(LIMITS.fileBytes)
+    + '，一个页面最多 ' + LIMITS.filesPerSite + ' 个文件、合计 ' + mbLabel(LIMITS.siteTotalBytes)
+    + '，账号总计 ' + mbLabel(LIMITS.userTotalBytes);
 }
 
 // ---------------------------------------------------------------- 残留草稿清理
@@ -522,18 +548,28 @@ function precheck() {
   }
 
   if (pickedMode === 'zip') {
-    if (picked[0].file.size > MAX_ZIP_BYTES) return 'zip 包太大了，上限 95 MB';
+    if (picked[0].file.size > LIMITS.zipBytes) return 'zip 包太大了，上限 ' + mbLabel(LIMITS.zipBytes);
     return null;
   }
 
   if (!picked.some((it) => /\.html?$/i.test(it.path))) return '至少要有一个 HTML 文件作为页面';
-  if (picked.length > MAX_FILES_PER_SITE) return '文件太多了，一个页面最多 5000 个文件';
+  if (picked.length > LIMITS.filesPerSite) {
+    return '文件太多了，一个页面最多 ' + LIMITS.filesPerSite + ' 个文件';
+  }
 
   let total = 0;
   for (const it of picked) {
-    if (it.file.size > MAX_FILE_BYTES) return it.path + ' 超过单文件上限 90 MB';
+    if (it.file.size > LIMITS.fileBytes) {
+      return it.path + ' 超过单文件上限 ' + mbLabel(LIMITS.fileBytes);
+    }
     total += it.file.size;
-    if (total > MAX_SITE_TOTAL_BYTES) return '文件总大小超过 512 MB';
+    if (total > LIMITS.siteTotalBytes) return '文件总大小超过 ' + mbLabel(LIMITS.siteTotalBytes);
+  }
+  // 账号总量也要看：单人 100 MB 额度，上传前先算一遍，别传到最后几个文件才 413
+  const used = Number(LIMITS.storageUsedBytes || 0);
+  if (used + total > LIMITS.userTotalBytes) {
+    return '账号容量不够了（已用 ' + mbLabel(used) + ' / ' + mbLabel(LIMITS.userTotalBytes)
+      + '），先删掉一些页面或文件再传';
   }
   return null;
 }

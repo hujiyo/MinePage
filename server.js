@@ -78,6 +78,7 @@ import {
   isValidSitePath,
   isValidSiteTag,
   listAllSites,
+  listDraftSitesByOwner,
   listSiteFiles,
   listSiteMessages,
   listSitesByOwner,
@@ -927,11 +928,12 @@ async function handleMySites(req, res) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const [sites, usedBytes] = await Promise.all([
+  const [sites, drafts, usedBytes] = await Promise.all([
     listSitesByOwner(user.id),
+    listDraftSitesByOwner(user.id),
     userContentBytes(user.id),
   ]);
-  const mapped = sites.map((s) => ({
+  const toClient = (s) => ({
     id: s.id,
     name: s.name,
     url: urlForSite(user.username, s.name),
@@ -950,7 +952,8 @@ async function handleMySites(req, res) {
     hasCover: Boolean(s.has_cover),
     createdAt: s.created_at,
     updatedAt: s.updated_at,
-  }));
+  });
+  const mapped = sites.map(toClient);
 
   sendJson(res, 200, {
     ok: true,
@@ -959,10 +962,13 @@ async function handleMySites(req, res) {
     // 配额不是常量：硬币兑换会加名额，页面上的「已用 x / y」要跟着变
     quota: await siteQuota(user.id),
     coins: await coinBalance(user.id),
+    // sites 仍然只装正式站（对外列表、后台、个人主页都靠它，草稿不在其中）；
+    // 草稿单独走 drafts，创作页的草稿卡片用它
     sites: mapped,
-    // 草稿不占正式站配额，工作区/创作页要单独显示草稿余量
-    published: mapped.filter((s) => s.status !== 'draft').length,
+    drafts: drafts.map(toClient),
+    published: mapped.length,
     maxDrafts: MAX_DRAFTS_PER_USER,
+    draftCount: drafts.length,
     // 上传上限随接口下发：前端不再各写一份数字，文案和真正生效的闸永远对得上
     limits: { ...uploadLimits(), storageUsedBytes: usedBytes },
     // 投稿页（站点还不存在）也要能选内容标签，所以词表跟着「我的站点」一起给
