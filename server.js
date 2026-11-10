@@ -1,7 +1,7 @@
 import http from 'node:http';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -33,6 +33,7 @@ import {
   MYSQL_PORT,
   MYSQL_DATABASE,
   USER_SPACE_PREFIX,
+  FAVORITE_RANK_LIMIT,
 } from './lib/config.js';
 import { checkName, checkUsername } from './lib/names.js';
 import { absoluteUrlForSite, urlForSite, urlForView } from './lib/addressing.js';
@@ -62,14 +63,6 @@ import {
 import { issueCode, consumeCode } from './lib/verification.js';
 import { handleMcp } from './lib/mcp/server.js';
 import { createMcpToken, listMcpTokens, revokeMcpToken } from './lib/mcp/tokens.js';
-import {
-  blockWord,
-  hotWords,
-  listBlockedWords,
-  pruneQueries,
-  recordQuery,
-  unblockWord,
-} from './lib/hot.js';
 import {
   addSiteMessage,
   assertStorageBudget,
@@ -132,6 +125,7 @@ import {
   FOLDER_NAME_MAX,
   followUser,
   getComment,
+  favoriteRank,
   hasFavorited,
   hasLiked,
   incrementViews,
@@ -336,27 +330,6 @@ function setSessionCookie(res, token, maxAge) {
 
 function sessionToken(req) {
   return parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? null;
-}
-
-// 匿名访客标识：热搜榜要按「不同的人」去重，未登录的人也得有个稳定的身份。
-// 用本机 IP 不行 —— 校园网 / 公司网 / 运营商 NAT 后面一堆人共用一个出口，
-// 十几个人会被算成一个人，榜就永远上不去。改成发一个随机 Cookie：
-// 无痕模式会丢、清 Cookie 能重置，这是刻意的取舍 —— 宁可被刷，也不把真人算成同一个。
-const VISITOR_COOKIE = 'mp_vid';
-const VISITOR_ID = /^[a-f0-9]{16,64}$/;
-
-/** 取匿名访客 id；没有就给新的，并在响应上种下 Cookie（HttpOnly，一年）。 */
-function visitorId(req, res) {
-  const existing = parseCookies(req.headers.cookie)[VISITOR_COOKIE] ?? '';
-  if (VISITOR_ID.test(existing)) return existing;
-
-  const id = randomBytes(16).toString('hex');
-  // 用 appendHeader 而不是 setHeader：登录接口等地方可能已经种过 Set-Cookie，别互相覆盖。
-  res.appendHeader(
-    'Set-Cookie',
-    buildCookie(VISITOR_COOKIE, id, { maxAge: 365 * 24 * 3600, secure: COOKIE_SECURE }),
-  );
-  return id;
 }
 
 /** 取当前登录用户。封禁中的账号按未登录处理。 */
@@ -2167,18 +2140,6 @@ async function handleDiscover(req, res) {
 
   const { total, sites } = await discoverSites({ q, tag, sort, limit: size, offset: (page - 1) * size });
 
-  // 记录搜索词，热搜榜的数据源。只记「有人真的在搜」的那一下：
-  // 翻页（page > 1）和空 q 都不重复计数，否则翻一页就等于又搜了一遍。
-  if (q && page === 1) {
-    const who = viewer ? `user:${viewer.id}` : `anon:${visitorId(req, res)}`;
-    try {
-      await recordQuery(q, who);
-    } catch (err) {
-      // 记录失败不该把搜索本身拖垮：结果照常返回，问题留在日志里。
-      console.error('[hot] 记录搜索词失败：', err?.message ?? err);
-    }
-  }
-
   sendJson(res, 200, {
     ok: true,
     total,
@@ -2189,9 +2150,9 @@ async function handleDiscover(req, res) {
   });
 }
 
-/** 热门搜索榜：公开接口。榜单达不到「至少两个人搜过」的门槛就是空数组，前端整段隐藏。 */
-async function handleHotSearch(req, res) {
-  sendJson(res, 200, { ok: true, words: await hotWords() });
+/** 收藏榜：公开接口，给首页侧栏用。 */
+async function handleFavoriteRank(req, res) {
+  sendJson(res, 200, { ok: true, sites: await favoriteRank(FAVORITE_RANK_LIMIT) });
 }
 
 // ---------------------------------------------------------------- 创作者主页（阶段 3）
@@ -2830,43 +2791,7 @@ async function handleAdminBannerDelete(req, res, [id]) {
   sendJson(res, 200, { ok: true, id: Number(id) });
 }
 
-// ---------------------------------------------------------------- 后台：热搜屏蔽词
-
-/** 后台：当前屏蔽词。 */
-async function handleAdminBlockedWords(req, res) {
-  if (!(await requireAdmin(req, res))) return;
-  sendJson(res, 200, { ok: true, words: await listBlockedWords() });
-}
-
-/** 后台：加一个屏蔽词（顺带清掉它已有的搜索记录）。 */
-async function handleAdminBlockWord(req, res) {
-  if (!(await requireAdmin(req, res))) return;
-
-  const body = await readBody(req, res);
-  if (!body) return;
-
-  try {
-    sendJson(res, 201, { ok: true, ...(await blockWord(body.word, body.note)) });
-  } catch (err) {
-    if (err.code === 'EMPTY_WORD') {
-      sendJson(res, 400, { ok: false, message: err.message });
-      return;
-    }
-    throw err;
-  }
-}
-
-/** 后台：解封一个词。 */
-async function handleAdminUnblockWord(req, res, [word]) {
-  if (!(await requireAdmin(req, res))) return;
-
-  if (await unblockWord(decodeURIComponent(word)) === 0) {
-    sendJson(res, 404, { ok: false, message: '这个词不在屏蔽名单里' });
-    return;
-  }
-
-  sendJson(res, 200, { ok: true });
-}
+// ---------------------------------------------------------------- 后台：用户 / 站点
 
 function serveSiteFile(req, res, filePath, content) {
   const ext = path.extname(filePath).toLowerCase();
@@ -3056,7 +2981,7 @@ const ROUTES = [
 
   ['GET', /^\/api\/me$/, handleMe],
   ['GET', /^\/api\/discover$/, handleDiscover],
-  ['GET', /^\/api\/hot$/, handleHotSearch],
+  ['GET', /^\/api\/rank\/favorites$/, handleFavoriteRank],
   ['GET', /^\/api\/banners$/, handleBannersPublic],
   ['GET', new RegExp(`^\\/api\\/u\\/([a-z0-9-]+)\\/profile$`), handleCreatorProfile],
   ['GET', /^\/api\/notifications$/, handleNotificationsList],
@@ -3143,9 +3068,6 @@ const ROUTES = [
   ['POST', /^\/api\/admin\/banners$/, handleAdminBannerCreate],
   ['PUT', /^\/api\/admin\/banners\/(\d+)$/, handleAdminBannerUpdate],
   ['DELETE', /^\/api\/admin\/banners\/(\d+)$/, handleAdminBannerDelete],
-  ['GET', /^\/api\/admin\/blocked-words$/, handleAdminBlockedWords],
-  ['POST', /^\/api\/admin\/blocked-words$/, handleAdminBlockWord],
-  ['DELETE', /^\/api\/admin\/blocked-words\/(.+)$/, handleAdminUnblockWord],
 
   // MCP：运行时用密钥，管理用登录态，两条路互不相交
   ['POST', /^\/mcp$/, handleMcpPost],
@@ -3262,14 +3184,6 @@ server.listen(PORT, HOST, async () => {
   try {
     const removed = await deleteExpiredSessions();
     if (removed > 0) console.log(`清理了 ${removed} 条过期会话`);
-
-    // 搜索记录只保留 HOT_WINDOW_DAYS 天：开机清一次，之后每天清一次，
-    // 表里永远只有窗口内的量，不用等它自己长大。
-    const pruned = await pruneQueries();
-    if (pruned > 0) console.log(`清理了 ${pruned} 条过期搜索记录`);
-    setInterval(() => {
-      pruneQueries().catch((err) => console.error('[hot] 清理搜索记录失败：', err?.message ?? err));
-    }, 24 * 3600_000).unref();
 
     // 没传完就放弃的上传草稿：开机清一次，之后每天一次，
     // 免得它们一直占着站点配额和账号存储额度

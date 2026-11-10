@@ -352,8 +352,8 @@
     { key: 'rank', label: '排行榜', href: '/?sort=rank' },
   ];
 
-  // 顶栏「热门搜索」的真数据来自 GET /api/hot（窗口内至少两个人搜过的词）。
-  // 没数据时整段隐藏 —— 顶栏有分类下面的 chips 做引导，不拿标签冒充热搜。
+  // 顶栏搜索下拉只有搜索历史和用户联想，不展示「热门搜索词」：
+  // 那是把用户私下搜的词公示给所有人，隐私上站不住。
 
   /** 顶栏用户区。me 为 null 时显示「未登录」入口。 */
   function tuserHtml(me) {
@@ -405,10 +405,6 @@
       +       '<div class="tsSec"><span>搜索历史</span><span class="clr" id="tsClear">清空</span></div>'
       +       '<div class="tsHist" id="tsHist"></div>'
       +       '<div id="tsUsers" hidden></div>'
-      +       '<div id="tsHotSec" hidden>'
-      +         '<div class="tsSec" style="margin-top:6px">' + icon('fire') + '<span style="flex:1">热门搜索</span></div>'
-      +         '<div class="tsHot" id="tsHot"></div>'
-      +       '</div>'
       +     '</div>'
       +   '</div>'
       +   '<div id="tuserSlot">' + tuserHtml(me) + '</div>'
@@ -432,8 +428,6 @@
     const ts = header.querySelector('#ts');
     const input = header.querySelector('#tsInput');
     const histBox = header.querySelector('#tsHist');
-    const hotBox = header.querySelector('#tsHot');
-    const hotSec = header.querySelector('#tsHotSec');
 
     const params = new URLSearchParams(location.search);
     if (params.get('q')) input.value = params.get('q');
@@ -451,40 +445,7 @@
       });
     }
 
-    /** 渲染热搜榜。空数组时整段（标题 + 列表）都隐藏，不留一个空标题。 */
-    function renderHot(list) {
-      hotSec.hidden = !list.length;
-      hotBox.textContent = '';
-      list.forEach((item, i) => {
-        const row = document.createElement('div');
-        row.className = 'hRow';
-        row.innerHTML = '<span class="hNo' + (i < 3 ? ' top' + (i + 1) : '') + '">' + (i + 1) + '</span>'
-          + '<span class="hWord">' + esc(item.word) + '</span>'
-          + '<span class="hVal">' + fmtNum(item.people) + '人</span>';
-        row.addEventListener('mousedown', (e) => { e.preventDefault(); MP.goSearch(item.word); });
-        hotBox.appendChild(row);
-      });
-    }
-
-    // 热搜只在面板真正展开时才拉，不占每次页面加载的请求。
-    let hotLoaded = false;
-    let hotLoading = false;
-    async function loadHot() {
-      if (hotLoaded || hotLoading) return;
-      hotLoading = true;
-      try {
-        const data = await MP.api('/api/hot');
-        hotLoaded = true;
-        renderHot(data.words || []);
-      } catch {
-        // 拉不到就保持隐藏：没有数据不等于「没有热门」，但也不该编造一份出来。
-        hotSec.hidden = true;
-      } finally {
-        hotLoading = false;
-      }
-    }
-
-    // 边打边搜用户：输入非空时把「用户」分区插在历史下面，回车仍然按页面搜索
+    // 用户联想：输入非空时把「用户」分区插在历史下面，回车仍然按页面搜索
     const usersBox = header.querySelector('#tsUsers');
     let searchTimer = null;
     let searchSeq = 0;
@@ -529,7 +490,7 @@
       renderHist();
     });
 
-    input.addEventListener('focus', () => { renderHist(); loadHot(); ts.classList.add('open'); });
+    input.addEventListener('focus', () => { renderHist(); ts.classList.add('open'); });
     input.addEventListener('blur', () => setTimeout(() => ts.classList.remove('open'), 120));
     // 点击搜索区域任意空白处也能展开面板
     ts.addEventListener('click', (e) => {
