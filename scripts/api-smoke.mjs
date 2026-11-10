@@ -401,6 +401,62 @@ async function run() {
   check('ZIP 首页可访问', goodZipPage.res.status === 200 && goodZipPage.text.includes('zip-ok'));
   await api(apiSite('', 'smoke-zip-good'), { cookie: a.cookie, method: 'DELETE' });
 
+  // 多文件上传的原子性：先草稿 → 逐个写文件 → publish 才上线。
+  // 中途任何时候草稿都不该被访问到，也不该出现在「我的站点」里。
+  const draftName = 'smoke-draft';
+  const draftOpen = await api(apiSite('/draft', draftName), { cookie: a.cookie, method: 'POST' });
+  check('开上传草稿 201', draftOpen.res.status === 201 && draftOpen.body?.ok === true,
+    `status=${draftOpen.res.status} ${JSON.stringify(draftOpen.body)}`);
+  check('草稿站点访问 404（不是 451）', (await api(pageUrl(draftName))).res.status === 404);
+  check('草稿不在我的站点列表里',
+    !(await api('/api/sites', { cookie: a.cookie })).body?.sites?.some((s) => s.name === draftName));
+
+  const draftFile = await api(apiSite(`/files?path=index.html`, draftName), {
+    cookie: a.cookie, method: 'POST', raw: '<h1>draft-ok</h1>', type: 'application/octet-stream',
+  });
+  check('草稿里可以写文件', draftFile.res.status === 201, `status=${draftFile.res.status}`);
+  check('写了文件但没发布，访问仍是 404', (await api(pageUrl(draftName))).res.status === 404);
+
+  const draftPublish = await api(apiSite('/publish', draftName), { cookie: a.cookie, method: 'POST' });
+  check('发布草稿 200', draftPublish.res.status === 200 && draftPublish.body?.ok === true,
+    `status=${draftPublish.res.status} ${JSON.stringify(draftPublish.body)}`);
+  const draftPage = await api(pageUrl(draftName));
+  check('发布后页面可访问', draftPage.res.status === 200 && draftPage.text.includes('draft-ok'));
+  const draftRepublish = await api(apiSite('/publish', draftName), { cookie: a.cookie, method: 'POST' });
+  check('重复发布是幂等的', draftRepublish.res.status === 200 && draftRepublish.body?.already === true,
+    `status=${draftRepublish.res.status} ${JSON.stringify(draftRepublish.body)}`);
+  const draftReopen = await api(apiSite('/draft', draftName), { cookie: a.cookie, method: 'POST' });
+  check('已上线的站不能再开同名草稿 → 409', draftReopen.res.status === 409, `status=${draftReopen.res.status}`);
+
+  const emptyDraftName = 'smoke-draft-empty';
+  await api(apiSite('/draft', emptyDraftName), { cookie: a.cookie, method: 'POST' });
+  const emptyPublish = await api(apiSite('/publish', emptyDraftName), { cookie: a.cookie, method: 'POST' });
+  check('空草稿发布 → 400', emptyPublish.res.status === 400, `status=${emptyPublish.res.status}`);
+  check('发布失败后草稿仍不可访问', (await api(pageUrl(emptyDraftName))).res.status === 404);
+  await api(apiSite(`/files?path=style.css`, emptyDraftName), {
+    cookie: a.cookie, method: 'POST', raw: 'body{}', type: 'application/octet-stream',
+  });
+  const noEntryPublish = await api(apiSite('/publish', emptyDraftName), { cookie: a.cookie, method: 'POST' });
+  check('没有 HTML 入口的草稿发布 → 400', noEntryPublish.res.status === 400, `status=${noEntryPublish.res.status}`);
+
+  const otherDraft = await api(apiSite('/draft', 'smoke-draft-mine', B_NAME), { cookie: a.cookie, method: 'POST' });
+  check('不能给别人开草稿 → 403', otherDraft.res.status === 403, `status=${otherDraft.res.status}`);
+
+  await api(apiSite('', draftName), { cookie: a.cookie, method: 'DELETE' });
+  await api(apiSite('', emptyDraftName), { cookie: a.cookie, method: 'DELETE' });
+  check('清理后的草稿地址 404', (await api(pageUrl(draftName))).res.status === 404);
+
+  // 同一个站名先开了草稿、又直接拖 zip：zip 是一次完整发布，应该顺带把草稿切成上线
+  const zipDraftName = 'smoke-draft-zip';
+  await api(apiSite('/draft', zipDraftName), { cookie: a.cookie, method: 'POST' });
+  const zipIntoDraft = await api(apiSite(`/zip`, zipDraftName), {
+    cookie: a.cookie, method: 'POST', raw: goodZip, type: 'application/zip',
+  });
+  check('zip 发到同名草稿 → 文件写入并直接上线',
+    zipIntoDraft.res.status === 201 && (await api(pageUrl(zipDraftName))).res.status === 200,
+    `zip=${zipIntoDraft.res.status}`);
+  await api(apiSite('', zipDraftName), { cookie: a.cookie, method: 'DELETE' });
+
   // 子目录入口：根地址要跳到真实入口文件，相对资源与封面代理都跟着走
   const nestedName = 'smoke-nested-entry';
   const nestedHtml = '<!doctype html><head><link rel="stylesheet" href="assets/a.css"></head><h1>nested-ok</h1>';
@@ -1167,6 +1223,14 @@ async function run() {
     JSON.stringify(adminSites.body?.sites?.map((s) => `${s.owner_username}/${s.name}`)),
   );
   const siteId = adminSites.body?.sites?.find((s) => s.name === SITE && s.owner_username === A_NAME)?.id;
+
+  // 上传草稿是「还没传完的站」，后台不该把它当成「已下线」的站列出来（否则点「恢复」等于替用户发布）
+  const hiddenDraft = await api(apiSite('/draft', 'smoke-draft-hidden'), { cookie: a.cookie, method: 'POST' });
+  const adminSitesWithDraft = await api('/api/admin/sites', { cookie: admin.cookie });
+  check('上传草稿不出现在后台站点列表',
+    hiddenDraft.res.status === 201 && !adminSitesWithDraft.body?.sites?.some((s) => s.name === 'smoke-draft-hidden'),
+    `draft=${hiddenDraft.res.status}`);
+  await api(apiSite('', 'smoke-draft-hidden'), { cookie: a.cookie, method: 'DELETE' });
 
   const ban = await api(`/api/admin/users/${b.user.id}/status`, { body: { status: 'banned' }, cookie: admin.cookie, method: 'POST' });
   check('封禁用户成功', ban.body?.ok === true, JSON.stringify(ban.body));

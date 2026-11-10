@@ -16,6 +16,7 @@ import {
   MAX_ZIP_BYTES,
   MAX_COVER_BYTES,
   MAX_USER_TOTAL_BYTES,
+  DRAFT_TTL_HOURS,
   SESSION_COOKIE,
   SESSION_TTL_DAYS,
   COOKIE_SECURE,
@@ -81,6 +82,9 @@ import {
   listAllSites,
   listSiteFiles,
   listSitesByOwner,
+  openSiteDraft,
+  publishDraftSite,
+  pruneDraftSites,
   publishSiteZip,
   removeSiteFile,
   setSiteStatus,
@@ -1078,6 +1082,74 @@ async function handleSiteFileUpload(req, res, [username, name]) {
 
   const saved = await upsertSiteFile(site.id, filePath, content);
   sendJson(res, isNew ? 201 : 200, { ok: true, path: saved.path, size: saved.size });
+}
+
+/**
+ * POST /api/sites/:用户名/:站名/draft：开一个上传草稿（多文件上传的第一阶段）。
+ * 草稿对外不可见，文件逐个写进去，全部成功后再调 /publish 一次性上线。
+ * 同名草稿重复调用是幂等的（续传/重试）。
+ */
+async function handleSiteDraft(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const checked = checkName(name);
+  if (!checked.ok) {
+    sendJson(res, 400, { ok: false, message: checked.reason });
+    return;
+  }
+  if (username !== user.username) {
+    sendJson(res, 403, { ok: false, message: '只能往自己的用户名下建站点' });
+    return;
+  }
+
+  try {
+    const draft = await openSiteDraft({ name: checked.name, ownerId: user.id });
+    sendJson(res, draft.resumed ? 200 : 201, { ok: true, resumed: draft.resumed });
+  } catch (err) {
+    if (err.code === 'NAME_TAKEN') {
+      sendJson(res, 409, { ok: false, message: err.message });
+      return;
+    }
+    if (err.code === 'QUOTA_EXCEEDED') {
+      sendJson(res, 429, { ok: false, message: err.message });
+      return;
+    }
+    console.error('[site-draft]', err);
+    sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+  }
+}
+
+/**
+ * POST /api/sites/:用户名/:站名/publish：把草稿一次性切成上线状态。
+ * 校验入口 HTML 存在、文件数非零后在一个事务里翻转 status，失败则草稿保持原样（可续传）。
+ */
+async function handleSitePublish(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const checked = checkName(name);
+  if (!checked.ok) {
+    sendJson(res, 400, { ok: false, message: checked.reason });
+    return;
+  }
+  if (username !== user.username) {
+    sendJson(res, 403, { ok: false, message: '只能操作自己的站点' });
+    return;
+  }
+
+  try {
+    const result = await publishDraftSite({ name: checked.name, ownerId: user.id });
+    sendJson(res, 200, { ok: true, files: result.files ?? 0, already: Boolean(result.already) });
+  } catch (err) {
+    const status = { NOT_FOUND: 404, NO_FILES: 400, NO_ENTRY: 400, BAD_STATUS: 409 }[err.code];
+    if (status) {
+      sendJson(res, status, { ok: false, message: err.message });
+      return;
+    }
+    console.error('[site-publish]', err);
+    sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+  }
 }
 
 /**
@@ -2610,6 +2682,11 @@ async function handleSite(req, res, [username, name, rest = '']) {
     return;
   }
   if (site.status !== 'active') {
+    // 草稿是「还没传完的站」，对外根本不存在；451 只留给被管理员下线的站
+    if (site.status === 'draft') {
+      sendHtml(res, 404, messagePage('404', `没有找到 /${username}/${name} 这个页面。`));
+      return;
+    }
     sendHtml(res, 451, messagePage('已下线', '这个页面已被管理员下线。'));
     return;
   }
@@ -2714,6 +2791,10 @@ const ROUTES = [
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files$`), handleSiteFilesList],
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files$`), handleSiteFileUpload],
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/zip$`), handleSiteZipUpload],
+  // 多文件上传：先开草稿 → 逐个文件写 → 最后 publish 一次性上线（跨请求没有事务，
+  // 只能靠 status 把「未传完的站」挡在对外访问之外）
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/draft$`), handleSiteDraft],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/publish$`), handleSitePublish],
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files\\/content$`), handleSiteFileContent],
   ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files$`), handleSiteFileDelete],
   // 卡片自定义封面：GET 公开（卡片匿名可见），PUT/DELETE 走「作者或管理员」
@@ -2889,6 +2970,15 @@ server.listen(PORT, HOST, async () => {
     if (pruned > 0) console.log(`清理了 ${pruned} 条过期搜索记录`);
     setInterval(() => {
       pruneQueries().catch((err) => console.error('[hot] 清理搜索记录失败：', err?.message ?? err));
+    }, 24 * 3600_000).unref();
+
+    // 没传完就放弃的上传草稿：开机清一次，之后每天一次，
+    // 免得它们一直占着站点配额和账号存储额度
+    const prunedDrafts = await pruneDraftSites(DRAFT_TTL_HOURS);
+    if (prunedDrafts > 0) console.log(`清理了 ${prunedDrafts} 个过期上传草稿`);
+    setInterval(() => {
+      pruneDraftSites(DRAFT_TTL_HOURS)
+        .catch((err) => console.error('[draft] 清理上传草稿失败：', err?.message ?? err));
     }, 24 * 3600_000).unref();
 
     const created = await ensureAdminAccount();
