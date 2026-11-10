@@ -127,7 +127,10 @@ function renderDrafts() {
     card.className = 'draftCard';
 
     const box = document.createElement('div');
-    box.className = 'coverBox';
+    box.className = 'coverBox coverLink';
+    box.title = '在新标签页预览';
+    // 点封面 = 发布弹窗里那个「预览」按钮：新标签页打开草稿的真实页面
+    box.addEventListener('click', () => previewDraft(d));
     card.appendChild(box);
 
     const body = document.createElement('div');
@@ -142,6 +145,17 @@ function renderDrafts() {
       location.href = '/workspace/' + encodeURIComponent(d.name);
     });
     body.appendChild(title);
+
+    // 修改 = 发布弹窗里那个「AI 帮我改」：进工作台，对话 / 代码都在这儿改
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'tiny ghost';
+    edit.textContent = '修改';
+    edit.title = '进工作台改内容';
+    edit.addEventListener('click', () => {
+      location.href = '/workspace/' + encodeURIComponent(d.name);
+    });
+    body.appendChild(edit);
 
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -192,6 +206,14 @@ async function removeDraft(draft, btn) {
     btn.textContent = '删除';
     MP.alert(err.message || '删除失败');
   }
+}
+
+/**
+ * 预览草稿：新标签页打开它的真实地址，和发布弹窗里的「预览」按钮完全一样。
+ * 草稿只有作者本人带登录态能打开，所以这里不需要额外处理权限。
+ */
+function previewDraft(draft) {
+  window.open(MP.draftUrl(MY.username, draft.name), '_blank', 'noopener');
 }
 
 /** 打开发布弹窗；草稿只在服务端保留，发布成功/关窗都回来刷一遍卡片。 */

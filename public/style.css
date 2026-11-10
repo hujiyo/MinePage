@@ -2055,10 +2055,24 @@ code.token {
   background: linear-gradient(135deg, #f7f8fa, #eceef1);
 }
 
+/* 封面可点：点一下就在新标签页预览整站（和发布弹窗的「预览」同一个效果）。
+   里面那张 liveFrame 是 pointer-events:none，所以点击一定落在盒子本身。 */
+.coverBox.coverLink { cursor: pointer; }
+.coverBox.coverLink::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: rgba(0, 0, 0, 0);
+  transition: background .15s;
+  pointer-events: none;
+}
+.coverBox.coverLink:hover::after { background: rgba(0, 0, 0, .06); }
+
 .draftBody {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   padding: 12px 14px;
 }
 .draftTitle {
@@ -2072,6 +2086,9 @@ code.token {
 }
 .draftTitle:hover { color: var(--pink); }
 .draftBody button { flex: none; }
+/* 卡片底部现在有三个按钮（修改 / 发布 / 删除），窄卡片上要能挤得下：
+   收紧内边距，标题自己用 flex:1 吸收剩余空间。 */
+.draftBody button.tiny { padding: 3px 8px; }
 /* 删草稿：平时淡出，卡片 hover 或键盘聚焦时才显形 */
 .draftBody .draftDel {
   opacity: 0;
