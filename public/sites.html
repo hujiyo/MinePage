@@ -63,7 +63,7 @@
                 <span class="label">页面内容</span>
                 <div id="drop" class="drop hero">
                   <div class="dropIcon">⇪</div>
-                  <div class="dropTitle" id="dropTitle">把 HTML 文件、多个文件或整个文件夹拖到这里</div>
+                  <div class="dropTitle" id="dropTitle">把 HTML 文件、文件夹或 zip 包拖到这里</div>
                   <div class="dropSub">也可以用下面的按钮选择</div>
                   <div class="dropBtns">
                     <button type="button" class="ghost" id="pickFiles">选择文件</button>
@@ -130,6 +130,7 @@
               <ul class="muted" style="font-size:13px;margin:0;padding-left:18px;line-height:1.9">
                 <li>单页站所有 CSS / JS 请内嵌在 HTML 里</li>
                 <li>多页站必须包含 <code>index.html</code> 作为入口</li>
+                <li>也可以整包拖入一个 <code>.zip</code>，解压后按多页站规则校验</li>
                 <li id="limitFile">单个文件有上限</li>
                 <li id="limitCount">每个站点最多若干个文件</li>
                 <li id="limitStorage">单站与账号各有容量上限</li>
@@ -432,7 +433,8 @@ let picked = [];         // [{ path, file }]
 let pickedMode = null;   // 'single' | 'zip' | 'multi'
 let pickSource = 'files'; // 'files' | 'folder'：决定「恰好一个 html」算不算单页模式
 
-const EMPTY_PICK_TITLE = '把 HTML 文件、文件夹或 zip 包拖到这里';
+// 空态文案直接取 HTML 里的初始文本，避免和 <div id="dropTitle"> 里的那句话漂成两份
+const EMPTY_PICK_TITLE = dropTitle.textContent;
 
 // 系统垃圾文件黑名单（与服务端 lib/config.js JUNK_SEGMENTS 对齐），
 // 收文件时就跳过，别把 Thumbs.db / node_modules 这类东西传上去。
