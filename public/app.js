@@ -42,6 +42,10 @@
     up: '<path d="M12 19V6"/><path d="M7 11l5-5 5 5"/>',
     down: '<path d="M12 5v13"/><path d="M7 13l5 5 5-5"/>',
     triUp: '<path d="M12 6.5l7.5 11h-15z" fill="currentColor" stroke="none"/>',
+    expand: '<path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/>',
+    contract: '<path d="M9 4v5H4"/><path d="M15 4v5h5"/><path d="M9 20v-5H4"/><path d="M15 20v-5h5"/>',
+    external: '<path d="M14 4h6v6"/><path d="M20 4L11 13"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+    refresh: '<path d="M20 12a8 8 0 1 1-2.35-5.65"/><path d="M20 4v4h-4"/>',
     plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
     grid: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
     list: '<path d="M8 6.5h12"/><path d="M8 12h12"/><path d="M8 17.5h12"/><path d="M4 6.5h.01M4 12h.01M4 17.5h.01"/>',
@@ -222,6 +226,7 @@
       email: user.email,
       isAdmin: Boolean(user.isAdmin),
       bio: user.bio || '',
+      coins: Number(user.coins ?? 0),
       createdAt: user.createdAt,
       unread: extra?.unread ?? 0,
       unreadMessages: extra?.unreadMessages ?? 0,
@@ -347,9 +352,8 @@
     { key: 'rank', label: '排行榜', href: '/?sort=rank' },
   ];
 
-  // 顶栏「热门搜索」：后端没有热搜接口，先用内容标签的词，点了就是按词搜索。
-  // 'hot' 是伪标签不是真实分类，不能出现在这里。有接口以后换成 GET /api/hot。
-  const HOT_WORDS = TAGS.filter((t) => t.key && t.key !== 'hot').map((t) => t.label);
+  // 顶栏「热门搜索」的真数据来自 GET /api/hot（窗口内至少两个人搜过的词）。
+  // 没数据时整段隐藏 —— 顶栏有分类下面的 chips 做引导，不拿标签冒充热搜。
 
   /** 顶栏用户区。me 为 null 时显示「未登录」入口。 */
   function tuserHtml(me) {
@@ -375,6 +379,7 @@
       +     '<hr>'
       +     '<a href="/qwq/' + encodeURIComponent(me.username) + '">' + icon('user') + '我的主页</a>'
       +     '<a href="/account">' + icon('settings') + '账号设置</a>'
+      +     '<a href="/account#coinSection">' + icon('coin') + '硬币 ' + fmtNum(me.coins) + ' 枚</a>'
       +     '<a href="/sites">' + icon('grid') + '创作</a>'
       +     (me.isAdmin ? '<a href="/admin">' + icon('shield') + '管理后台</a>' : '')
       +     '<hr>'
@@ -400,8 +405,10 @@
       +       '<div class="tsSec"><span>搜索历史</span><span class="clr" id="tsClear">清空</span></div>'
       +       '<div class="tsHist" id="tsHist"></div>'
       +       '<div id="tsUsers" hidden></div>'
-      +       '<div class="tsSec" style="margin-top:6px">' + icon('fire') + '<span style="flex:1">热门搜索</span></div>'
-      +       '<div class="tsHot" id="tsHot"></div>'
+      +       '<div id="tsHotSec" hidden>'
+      +         '<div class="tsSec" style="margin-top:6px">' + icon('fire') + '<span style="flex:1">热门搜索</span></div>'
+      +         '<div class="tsHot" id="tsHot"></div>'
+      +       '</div>'
       +     '</div>'
       +   '</div>'
       +   '<div id="tuserSlot">' + tuserHtml(me) + '</div>'
@@ -411,8 +418,7 @@
   /**
    * 挂载顶栏：注入到 body 最前。用户区先按缓存渲染（未登录态），
    * /api/me 回来后原地替换，不阻塞页面其余部分的渲染。
-   * @param {{active?:string, collapse?:boolean}} [opt]
-   *   collapse=true 时在顶栏左下角加「收起/展开」箭头，并在收起后于屏幕顶部留一条触发带
+   * @param {{active?:string}} [opt]
    */
   MP.topbar = function (opt) {
     const o = opt || {};
@@ -421,13 +427,13 @@
     header.className = 'topbar';
     header.innerHTML = topbarHtml(active, ME);
     document.body.insertBefore(header, document.body.firstChild);
-    if (o.collapse) mountCollapse();
 
     // 搜索下拉：聚焦展开、失焦收起、历史回填
     const ts = header.querySelector('#ts');
     const input = header.querySelector('#tsInput');
     const histBox = header.querySelector('#tsHist');
     const hotBox = header.querySelector('#tsHot');
+    const hotSec = header.querySelector('#tsHotSec');
 
     const params = new URLSearchParams(location.search);
     if (params.get('q')) input.value = params.get('q');
@@ -445,15 +451,38 @@
       });
     }
 
-    hotBox.textContent = '';
-    HOT_WORDS.forEach((word, i) => {
-      const row = document.createElement('div');
-      row.className = 'hRow';
-      row.innerHTML = '<span class="hNo' + (i < 3 ? ' top' + (i + 1) : '') + '">' + (i + 1) + '</span>'
-        + '<span class="hWord">' + esc(word) + '</span>';
-      row.addEventListener('mousedown', (e) => { e.preventDefault(); MP.goSearch(word); });
-      hotBox.appendChild(row);
-    });
+    /** 渲染热搜榜。空数组时整段（标题 + 列表）都隐藏，不留一个空标题。 */
+    function renderHot(list) {
+      hotSec.hidden = !list.length;
+      hotBox.textContent = '';
+      list.forEach((item, i) => {
+        const row = document.createElement('div');
+        row.className = 'hRow';
+        row.innerHTML = '<span class="hNo' + (i < 3 ? ' top' + (i + 1) : '') + '">' + (i + 1) + '</span>'
+          + '<span class="hWord">' + esc(item.word) + '</span>'
+          + '<span class="hVal">' + fmtNum(item.people) + '人</span>';
+        row.addEventListener('mousedown', (e) => { e.preventDefault(); MP.goSearch(item.word); });
+        hotBox.appendChild(row);
+      });
+    }
+
+    // 热搜只在面板真正展开时才拉，不占每次页面加载的请求。
+    let hotLoaded = false;
+    let hotLoading = false;
+    async function loadHot() {
+      if (hotLoaded || hotLoading) return;
+      hotLoading = true;
+      try {
+        const data = await MP.api('/api/hot');
+        hotLoaded = true;
+        renderHot(data.words || []);
+      } catch {
+        // 拉不到就保持隐藏：没有数据不等于「没有热门」，但也不该编造一份出来。
+        hotSec.hidden = true;
+      } finally {
+        hotLoading = false;
+      }
+    }
 
     // 边打边搜用户：输入非空时把「用户」分区插在历史下面，回车仍然按页面搜索
     const usersBox = header.querySelector('#tsUsers');
@@ -500,7 +529,7 @@
       renderHist();
     });
 
-    input.addEventListener('focus', () => { renderHist(); ts.classList.add('open'); });
+    input.addEventListener('focus', () => { renderHist(); loadHot(); ts.classList.add('open'); });
     input.addEventListener('blur', () => setTimeout(() => ts.classList.remove('open'), 120));
     // 点击搜索区域任意空白处也能展开面板
     ts.addEventListener('click', (e) => {
@@ -549,10 +578,8 @@
   };
 
   /* ----------------------------------------------------------
-     5.1 顶栏收起 / 展开（观看他人网页时减少干扰）
+     5.1 本地布尔开关（观看页的底栏收起状态等）
      ---------------------------------------------------------- */
-
-  const NAV_KEY = 'mp_nav_collapsed';
 
   /** 读取本地布尔开关（隐私模式下静默降级）。 */
   function readFlag(key) {
@@ -566,33 +593,6 @@
 
   MP.readFlag = readFlag;
   MP.writeFlag = writeFlag;
-
-  /**
-   * 给顶栏装上收起小三角形：收起后顶栏上滑隐藏，只在屏幕左上角留一个小三角形。
-   * 该三角形是固定定位，不受顶栏位移影响，收起状态下依然可点。
-   */
-  function mountCollapse() {
-    let collapsed = readFlag(NAV_KEY);
-
-    const handle = document.createElement('button');
-    handle.type = 'button';
-    handle.className = 'navHandle';
-    handle.innerHTML = icon('triUp', null, 14);
-    document.body.appendChild(handle);
-
-    function sync() {
-      document.body.classList.toggle('nav-collapsed', collapsed);
-      handle.title = collapsed ? '展开导航栏' : '收起导航栏';
-    }
-
-    handle.addEventListener('click', () => {
-      collapsed = !collapsed;
-      writeFlag(NAV_KEY, collapsed);
-      sync();
-    });
-
-    sync();
-  }
 
   /* ----------------------------------------------------------
      6. 站点卡片（首页 / 搜索结果 / 创作者主页共用）
@@ -625,6 +625,8 @@
       const img = document.createElement('img');
       img.className = 'vimg';
       img.alt = '';
+      img.loading = 'lazy';
+      img.decoding = 'async';
       img.referrerPolicy = 'no-referrer';
       img.addEventListener('error', () => img.remove());
       img.src = siteApi(site, '/cover');

@@ -1,6 +1,7 @@
 import http from 'node:http';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { createHash, randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -14,6 +15,9 @@ import {
   MAX_FILES_PER_SITE,
   MAX_SITE_TOTAL_BYTES,
   MAX_ZIP_BYTES,
+  MAX_COVER_BYTES,
+  MAX_USER_TOTAL_BYTES,
+  DRAFT_TTL_HOURS,
   SESSION_COOKIE,
   SESSION_TTL_DAYS,
   COOKIE_SECURE,
@@ -24,15 +28,15 @@ import {
   SITE_MESSAGES_KEEP,
   BIO_MAX,
   COMMENT_MAX,
+  MAX_COINS_PER_SITE,
   MYSQL_HOST,
   MYSQL_PORT,
   MYSQL_DATABASE,
   USER_SPACE_PREFIX,
-  MAX_SITES_PER_USER,
 } from './lib/config.js';
 import { checkName, checkUsername } from './lib/names.js';
 import { absoluteUrlForSite, urlForSite, urlForView } from './lib/addressing.js';
-import { closeDb } from './lib/db.js';
+import { closeDb, get } from './lib/db.js';
 import { buildCookie, parseCookies, looksLikeEmail, verifyPassword } from './lib/auth.js';
 import {
   authenticate,
@@ -59,11 +63,19 @@ import { issueCode, consumeCode } from './lib/verification.js';
 import { handleMcp } from './lib/mcp/server.js';
 import { createMcpToken, listMcpTokens, revokeMcpToken } from './lib/mcp/tokens.js';
 import {
+  blockWord,
+  hotWords,
+  listBlockedWords,
+  pruneQueries,
+  recordQuery,
+  unblockWord,
+} from './lib/hot.js';
+import {
   addSiteMessage,
+  assertStorageBudget,
   countDraftsByOwner,
   countSiteFiles,
   countSites,
-  countSitesByOwner,
   createSite,
   deleteSite,
   findSiteByUsername,
@@ -76,18 +88,22 @@ import {
   listSiteFiles,
   listSiteMessages,
   listSitesByOwner,
+  openSiteDraft,
   publishDraft,
+  publishDraftSite,
+  pruneDraftSites,
   publishSiteZip,
   removeSiteFile,
   setSiteStatus,
   siteTagLabel,
-  totalSiteFileSize,
   updateSiteHtml,
   updateSiteMeta,
   upsertSiteFile,
+  userContentBytes,
   SITE_TAGS,
 } from './lib/sites.js';
 import { parseZip } from './lib/zip.js';
+import { getSiteCover, removeSiteCover, setSiteCover, siteHasCover } from './lib/covers.js';
 import {
   createBanner,
   deleteBanner,
@@ -126,6 +142,7 @@ import {
   listFavorites,
   listFavoriteFolders,
   listFollows,
+  FOLLOW_LIST_LIMIT,
   listHistory,
   listMessagesWith,
   listNotifications,
@@ -145,6 +162,15 @@ import {
   unlikeSite,
   withViewerFlags,
 } from './lib/social.js';
+import {
+  chargeCoins,
+  claimDailyCoin,
+  coinBalance,
+  coinsReceived,
+  listLedger,
+  redeemQuotaSlot,
+  siteQuota,
+} from './lib/coins.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -218,6 +244,11 @@ function sendJson(res, status, payload) {
     'Cache-Control': 'no-store',
   });
   res.end(body);
+}
+
+/** 单页 HTML 超限的提示：上限从 MAX_HTML_BYTES 现算，不写死数字（曾经两个入口各写一个数）。 */
+function htmlTooBigMessage() {
+  return `文件太大了，单个 HTML 上限 ${Math.round(MAX_HTML_BYTES / 1024 / 1024)} MB`;
 }
 
 function sendHtml(res, status, html, extraHeaders = {}) {
@@ -305,6 +336,27 @@ function setSessionCookie(res, token, maxAge) {
 
 function sessionToken(req) {
   return parseCookies(req.headers.cookie)[SESSION_COOKIE] ?? null;
+}
+
+// 匿名访客标识：热搜榜要按「不同的人」去重，未登录的人也得有个稳定的身份。
+// 用本机 IP 不行 —— 校园网 / 公司网 / 运营商 NAT 后面一堆人共用一个出口，
+// 十几个人会被算成一个人，榜就永远上不去。改成发一个随机 Cookie：
+// 无痕模式会丢、清 Cookie 能重置，这是刻意的取舍 —— 宁可被刷，也不把真人算成同一个。
+const VISITOR_COOKIE = 'mp_vid';
+const VISITOR_ID = /^[a-f0-9]{16,64}$/;
+
+/** 取匿名访客 id；没有就给新的，并在响应上种下 Cookie（HttpOnly，一年）。 */
+function visitorId(req, res) {
+  const existing = parseCookies(req.headers.cookie)[VISITOR_COOKIE] ?? '';
+  if (VISITOR_ID.test(existing)) return existing;
+
+  const id = randomBytes(16).toString('hex');
+  // 用 appendHeader 而不是 setHeader：登录接口等地方可能已经种过 Set-Cookie，别互相覆盖。
+  res.appendHeader(
+    'Set-Cookie',
+    buildCookie(VISITOR_COOKIE, id, { maxAge: 365 * 24 * 3600, secure: COOKIE_SECURE }),
+  );
+  return id;
 }
 
 /** 取当前登录用户。封禁中的账号按未登录处理。 */
@@ -548,10 +600,12 @@ async function handleAsset(req, res, [file]) {
 
 async function handleMe(req, res) {
   const user = await currentUser(req);
-  // 登录用户附带未读通知数 / 未读私信数，导航条不用额外请求
+  // 登录用户附带未读通知数 / 未读私信数，导航条不用额外请求。
+  // 每日首次访问的赠币也在这里发：热路径上当天已领过就只有一次只读查询。
+  const daily = user ? await claimDailyCoin(user.id) : null;
   sendJson(res, 200, {
     ok: true,
-    user,
+    user: user ? { ...user, coins: daily.balance } : null,
     unread: user ? await countUnread(user.id) : 0,
     unreadMessages: user ? await countUnreadMessages(user.id) : 0,
   });
@@ -900,7 +954,11 @@ async function handleMySites(req, res) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const sites = (await listSitesByOwner(user.id)).map((s) => ({
+  const [sites, usedBytes] = await Promise.all([
+    listSitesByOwner(user.id),
+    userContentBytes(user.id),
+  ]);
+  const mapped = sites.map((s) => ({
     id: s.id,
     name: s.name,
     url: urlForSite(user.username, s.name),
@@ -912,7 +970,11 @@ async function handleMySites(req, res) {
     status: s.status,
     kind: s.file_count > 0 ? 'multi' : 'single',
     fileCount: s.file_count,
-    totalSize: s.size + s.files_size,
+    // sites.size 只对单页站有意义（存 HTML 字节），多页站的内容全在 site_files。
+    // 两者相加会把「import-templates 曾把文件总和也写进 sites.size」的老站算成两倍，
+    // 所以有文件就只认文件（和 lib/sites.js 的 siteContentBytes 同一口径）。
+    totalSize: s.file_count > 0 ? s.files_size : s.size,
+    hasCover: Boolean(s.has_cover),
     createdAt: s.created_at,
     updatedAt: s.updated_at,
   }));
@@ -921,10 +983,17 @@ async function handleMySites(req, res) {
     ok: true,
     username: user.username,
     prefix: USER_SPACE_PREFIX,
-    quota: MAX_SITES_PER_USER,
-    published: sites.filter((s) => s.status !== 'draft').length,
+    // 配额不是常量：硬币兑换会加名额，页面上的「已用 x / y」要跟着变
+    quota: await siteQuota(user.id),
+    coins: await coinBalance(user.id),
+    sites: mapped,
+    // 草稿不占正式站配额，工作区/创作页要单独显示草稿余量
+    published: mapped.filter((s) => s.status !== 'draft').length,
     maxDrafts: MAX_DRAFTS_PER_USER,
-    sites,
+    // 上传上限随接口下发：前端不再各写一份数字，文案和真正生效的闸永远对得上
+    limits: { ...uploadLimits(), storageUsedBytes: usedBytes },
+    // 投稿页（站点还不存在）也要能选内容标签，所以词表跟着「我的站点」一起给
+    tags: SITE_TAGS,
   });
 }
 
@@ -947,7 +1016,7 @@ async function handleUpload(req, res) {
     return;
   }
   if (Buffer.byteLength(html, 'utf8') > MAX_HTML_BYTES) {
-    sendJson(res, 413, { ok: false, message: '文件太大了，单个文件上限 2 MB' });
+    sendJson(res, 413, { ok: false, message: htmlTooBigMessage() });
     return;
   }
 
@@ -960,8 +1029,9 @@ async function handleUpload(req, res) {
       url: absoluteUrlForSite(originOf(req), user.username, site.name),
     });
   } catch (err) {
-    if (err.code === 'NAME_TAKEN' || err.code === 'QUOTA_EXCEEDED') {
-      sendJson(res, err.code === 'NAME_TAKEN' ? 409 : 429, { ok: false, message: err.message });
+    if (err.code === 'NAME_TAKEN' || err.code === 'QUOTA_EXCEEDED' || err.code === 'STORAGE_EXCEEDED') {
+      const status = { NAME_TAKEN: 409, QUOTA_EXCEEDED: 429, STORAGE_EXCEEDED: 413 }[err.code];
+      sendJson(res, status, { ok: false, message: err.message });
       return;
     }
     console.error('[upload]', err);
@@ -1004,8 +1074,9 @@ async function handleSiteFileUpload(req, res, [username, name]) {
       await createSite({ name: checked.name, html: '', ownerId: user.id });
       site = await findSiteHeaderByUsername(username, checked.name);
     } catch (err) {
-      if (err.code === 'NAME_TAKEN' || err.code === 'QUOTA_EXCEEDED') {
-        sendJson(res, err.code === 'NAME_TAKEN' ? 409 : 429, { ok: false, message: err.message });
+      if (err.code === 'NAME_TAKEN' || err.code === 'QUOTA_EXCEEDED' || err.code === 'STORAGE_EXCEEDED') {
+        const status = { NAME_TAKEN: 409, QUOTA_EXCEEDED: 429, STORAGE_EXCEEDED: 413 }[err.code];
+        sendJson(res, status, { ok: false, message: err.message });
         return;
       }
       console.error('[site-file-upload]', err);
@@ -1030,18 +1101,104 @@ async function handleSiteFileUpload(req, res, [username, name]) {
     sendJson(res, 409, { ok: false, message: `站点文件太多啦，上限 ${MAX_FILES_PER_SITE} 个` });
     return;
   }
-  // 单站总容量：把被覆盖文件的旧体积扣掉只算增量，超上限拒收
-  const usedBytes = await totalSiteFileSize(site.id, filePath);
-  if (usedBytes + content.length > MAX_SITE_TOTAL_BYTES) {
-    sendJson(res, 413, {
-      ok: false,
-      message: `站点总容量超限，单站上限 ${Math.round(MAX_SITE_TOTAL_BYTES / 1024 / 1024)} MB`,
+  // 单站 / 每人总容量：覆盖同名文件时把旧体积扣掉只算增量
+  try {
+    await assertStorageBudget({ get }, {
+      ownerId: user.id, siteId: site.id, replacePath: filePath, incomingBytes: content.length,
     });
-    return;
+  } catch (err) {
+    if (err.code === 'STORAGE_EXCEEDED') {
+      sendJson(res, 413, { ok: false, message: err.message });
+      return;
+    }
+    throw err;
   }
 
   const saved = await upsertSiteFile(site.id, filePath, content);
   sendJson(res, isNew ? 201 : 200, { ok: true, path: saved.path, size: saved.size });
+}
+
+/**
+ * POST /api/sites/:用户名/:站名/draft：开一个上传草稿（多文件上传的第一阶段）。
+ * 草稿对外不可见，文件逐个写进去，全部成功后再调 /publish 一次性上线。
+ * 同名草稿重复调用是幂等的（续传/重试）。
+ */
+async function handleSiteDraft(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const checked = checkName(name);
+  if (!checked.ok) {
+    sendJson(res, 400, { ok: false, message: checked.reason });
+    return;
+  }
+  if (username !== user.username) {
+    sendJson(res, 403, { ok: false, message: '只能往自己的用户名下建站点' });
+    return;
+  }
+
+  try {
+    const draft = await openSiteDraft({ name: checked.name, ownerId: user.id });
+    sendJson(res, draft.resumed ? 200 : 201, { ok: true, resumed: draft.resumed });
+  } catch (err) {
+    if (err.code === 'NAME_TAKEN') {
+      sendJson(res, 409, { ok: false, message: err.message });
+      return;
+    }
+    if (err.code === 'QUOTA_EXCEEDED') {
+      sendJson(res, 429, { ok: false, message: err.message });
+      return;
+    }
+    console.error('[site-draft]', err);
+    sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+  }
+}
+
+/**
+ * POST /api/sites/:用户名/:站名/publish：把草稿一次性切成上线状态。
+ * 校验入口 HTML 存在、文件数非零后在一个事务里翻转 status，失败则草稿保持原样（可续传）。
+ */
+async function handleSitePublish(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const checked = checkName(name);
+  if (!checked.ok) {
+    sendJson(res, 400, { ok: false, message: checked.reason });
+    return;
+  }
+  if (username !== user.username) {
+    sendJson(res, 403, { ok: false, message: '只能操作自己的站点' });
+    return;
+  }
+
+  try {
+    const result = await publishDraftSite({ name: checked.name, ownerId: user.id });
+    sendJson(res, 200, { ok: true, files: result.files ?? 0, already: Boolean(result.already) });
+  } catch (err) {
+    const status = { NOT_FOUND: 404, NO_FILES: 400, NO_ENTRY: 400, BAD_STATUS: 409 }[err.code];
+    if (status) {
+      sendJson(res, status, { ok: false, message: err.message });
+      return;
+    }
+    console.error('[site-publish]', err);
+    sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+  }
+}
+
+/**
+ * POST /api/sites/:用户名/:站名/publish 的分流口。两条路都叫 publish：
+ *  - 投稿页：多文件逐个传完后打一次空 body 的 publish，把上传草稿切成 active
+ *    （见 handleSitePublish / publishDraftSite，幂等，重复调用不报错）；
+ *  - 工作区：带 JSON body（name/title/description/tag），把草稿发布成一张全新的
+ *    正式站，草稿本身保留，可以反复发布（见 handleSitePublishDraft / publishDraft）。
+ * 请求体只读一次，所以这里先按 Content-Type 判，再原样转交给对应的处理函数。
+ */
+async function handleSitePublishDispatch(req, res, params) {
+  const type = String(req.headers['content-type'] ?? '');
+  const hasJsonBody = type.includes('application/json');
+  if (hasJsonBody) return handleSitePublishDraft(req, res, params);
+  return handleSitePublish(req, res, params);
 }
 
 /**
@@ -1102,10 +1259,12 @@ async function handleSiteZipUpload(req, res, [username, name]) {
       totalBytes,
     });
   } catch (err) {
-    if (err.code === 'NO_FILES') {
+    if (err.code === 'NO_FILES' || err.code === 'STORAGE_EXCEEDED') {
       sendJson(res, 400, {
         ok: false,
-        message: 'zip 里没有可发布的文件' + (err.skipped.length ? `（${err.skipped.length} 个条目被跳过）` : ''),
+        message: err.code === 'STORAGE_EXCEEDED'
+          ? err.message
+          : 'zip 里没有可发布的文件' + (err.skipped.length ? `（${err.skipped.length} 个条目被跳过）` : ''),
         skipped: err.skipped.slice(0, 20),
       });
       return;
@@ -1158,7 +1317,19 @@ async function ownSiteOrRespond(req, res, user, username, name) {
   return site;
 }
 
-/** 站点详情：单页站带 html，多页站带文件数。 */
+/** 当前生效的上传上限，接口统一下发（投稿页 / 编辑页 / 校验文案共用）。 */
+function uploadLimits() {
+  return {
+    htmlBytes: MAX_HTML_BYTES,
+    fileBytes: MAX_FILE_BYTES,
+    filesPerSite: MAX_FILES_PER_SITE,
+    siteTotalBytes: MAX_SITE_TOTAL_BYTES,
+    userTotalBytes: MAX_USER_TOTAL_BYTES,
+    zipBytes: MAX_ZIP_BYTES,
+  };
+}
+
+/** 站点详情：单页站带 html，多页站带文件数，外加当前生效的上传上限。 */
 async function handleSiteDetail(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
@@ -1183,10 +1354,13 @@ async function handleSiteDetail(req, res, [username, name]) {
       description: site.description,
       tag: site.tag,
       tagLabel: siteTagLabel(site.tag),
+      hasCover: await siteHasCover(site.id),
       createdAt: site.created_at,
       updatedAt: site.updated_at,
     },
     tags: SITE_TAGS,
+    // 编辑页的「单文件 ≤ x MB」和上传前预检都从这里读，别在前端再写一份数字
+    limits: uploadLimits(),
   });
 }
 
@@ -1247,12 +1421,20 @@ async function handleSiteSaveHtml(req, res, [username, name]) {
     return;
   }
   if (Buffer.byteLength(html, 'utf8') > MAX_HTML_BYTES) {
-    sendJson(res, 413, { ok: false, message: '文件太大了，单个文件上限 2 MB' });
+    sendJson(res, 413, { ok: false, message: htmlTooBigMessage() });
     return;
   }
 
-  const size = await updateSiteHtml(site.id, html);
-  sendJson(res, 200, { ok: true, size });
+  try {
+    const size = await updateSiteHtml(site.id, html, site.owner_id);
+    sendJson(res, 200, { ok: true, size });
+  } catch (err) {
+    if (err.code === 'STORAGE_EXCEEDED') {
+      sendJson(res, 413, { ok: false, message: err.message });
+      return;
+    }
+    throw err;
+  }
 }
 
 /** 删除整个站点（site_files 由外键级联清掉）。 */
@@ -1541,6 +1723,104 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
   sendJson(res, 201, { ok: true, user: mine, agent: reply });
 }
 
+// ---------------------------------------------------------------- 卡片自定义封面
+
+/** 封面 ETag：换图后 updated_at 一定变，配合 size 足够区分；走 sha1 收敛成短串。 */
+function coverEtag(cover) {
+  return `"${createHash('sha1').update(`${cover.updatedAt}#${cover.size}`).digest('hex')}"`;
+}
+
+/** If-None-Match 是否命中（支持逗号分隔的多值与 *）。 */
+function ifNoneMatchHit(req, etag) {
+  const raw = String(req.headers['if-none-match'] ?? '').trim();
+  if (!raw) return false;
+  return raw.split(',').map((s) => s.trim()).some((s) => s === '*' || s === etag);
+}
+
+/** 上传/覆盖卡片自定义封面：作者本人或管理员，≤ MAX_COVER_BYTES，按文件头嗅探类型。 */
+async function handleSiteCoverUpload(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownSiteOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  // 超限由 readFileBody 自己回 413（它会把多余的字节读干）
+  const bytes = await readFileBody(req, res, MAX_COVER_BYTES);
+  if (!bytes) return;
+  if (bytes.length === 0) {
+    sendJson(res, 400, { ok: false, message: '没有拿到图片内容' });
+    return;
+  }
+
+  try {
+    const { mime, size } = await setSiteCover(site.id, bytes);
+    sendJson(res, 200, { ok: true, size, mime });
+  } catch (err) {
+    if (err.code === 'INVALID_IMAGE') {
+      sendJson(res, 400, { ok: false, message: '只支持 png / jpg / webp / gif 图片' });
+      return;
+    }
+    if (err.code === 'TOO_LARGE') {
+      sendJson(res, 413, { ok: false, message: '封面太大了，上限 2 MB' });
+      return;
+    }
+    console.error('[site-cover-upload]', err);
+    sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+  }
+}
+
+/** 移除卡片自定义封面。没有封面也回 ok（幂等）。 */
+async function handleSiteCoverDelete(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownSiteOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  await removeSiteCover(site.id);
+  sendJson(res, 200, { ok: true });
+}
+
+/**
+ * 取卡片自定义封面：公开接口，不要求登录（广场 / 创作者主页的卡片匿名可见）。
+ * 平台自己的图片资源，是普通响应，**不套沙箱 CSP**（那是给用户页面的）。
+ * no-cache + ETag：换图后卡片必须立刻更新，没换图的重复请求只花 304。
+ */
+async function handleSiteCoverImage(req, res, [username, name]) {
+  const site = await findSiteHeaderByUsername(username, name);
+  if (!site || site.status !== 'active') {
+    sendJson(res, 404, { ok: false, message: '没有这个站点' });
+    return;
+  }
+
+  const cover = await getSiteCover(site.id);
+  if (!cover) {
+    sendJson(res, 404, { ok: false, message: '这个站点还没有设置封面' });
+    return;
+  }
+
+  const etag = coverEtag(cover);
+  const baseHeaders = {
+    'Cache-Control': 'no-cache',
+    ETag: etag,
+    'X-Content-Type-Options': 'nosniff',
+  };
+
+  if (ifNoneMatchHit(req, etag)) {
+    res.writeHead(304, baseHeaders);
+    res.end();
+    return;
+  }
+
+  res.writeHead(200, {
+    ...baseHeaders,
+    'Content-Type': cover.mime,
+    'Content-Length': cover.bytes.length,
+  });
+  res.end(cover.bytes);
+}
+
 // ---------------------------------------------------------------- 社区互动接口（阶段 1 数据层）
 
 /** 按「作者用户名 + 站名」取站点头部，不存在时已回 404 并返回 null。 */
@@ -1612,6 +1892,79 @@ async function handleSiteUnlike(req, res, [username, name]) {
 
   await unlikeSite(site.id, user.id);
   sendJson(res, 200, { ok: true, liked: false, likes: await countLikes(site.id) });
+}
+
+/** 投币：和点赞不同，这是不可撤回的一次性事件（没有对应的 DELETE 接口）。
+ *  body `{count: 1|2}`，不传按 1 枚。 */
+async function handleSiteCoin(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await siteHeaderOrRespond(res, username, name);
+  if (!site || !activeSiteOrRespond(res, site)) return;
+
+  if (site.owner_id === user.id) {
+    sendJson(res, 400, { ok: false, message: '不能给自己的页面投币' });
+    return;
+  }
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  // 只接受 1 或 2：数量来自前端的两个按钮，不让人传 0 或负数
+  const count = body.count === undefined ? 1 : Number(body.count);
+  if (!Number.isInteger(count) || count < 1 || count > MAX_COINS_PER_SITE) {
+    sendJson(res, 400, { ok: false, message: `一次投 1 到 ${MAX_COINS_PER_SITE} 枚` });
+    return;
+  }
+
+  try {
+    const result = await chargeCoins({ siteId: site.id, siteOwnerId: site.owner_id, giverId: user.id, count });
+    sendJson(res, 200, { ok: true, ...result });
+  } catch (err) {
+    if (err.code === 'COIN_LIMIT' || err.code === 'COIN_SHORT') {
+      sendJson(res, err.code === 'COIN_SHORT' ? 402 : 409, { ok: false, message: err.message });
+      return;
+    }
+    console.error('[site-coin]', err);
+    sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+  }
+}
+
+/** 我的硬币页数据：余额、配额、流水。 */
+async function handleCoinsSummary(req, res) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  sendJson(res, 200, {
+    ok: true,
+    balance: await coinBalance(user.id),
+    quota: await siteQuota(user.id),
+    received: await coinsReceived(user.id),
+    ledger: (await listLedger(user.id)).map((row) => ({
+      delta: Number(row.delta),
+      reason: row.reason,
+      at: row.created_at,
+    })),
+  });
+}
+
+/** 花硬币换一份额外站点配额。 */
+async function handleCoinQuotaRedeem(req, res) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  try {
+    const result = await redeemQuotaSlot(user.id);
+    sendJson(res, 200, { ok: true, ...result });
+  } catch (err) {
+    if (err.code === 'COIN_SHORT') {
+      sendJson(res, 402, { ok: false, message: err.message });
+      return;
+    }
+    console.error('[coin-quota]', err);
+    sendJson(res, 500, { ok: false, message: '服务器出错了，稍后再试' });
+  }
 }
 
 async function handleSiteCommentsList(req, res, [username, name]) {
@@ -1794,7 +2147,7 @@ async function handleFollowList(req, res, [id]) {
   const type = url.searchParams.get('type') === 'following' ? 'following' : 'followers';
   const viewer = await currentUser(req);
   const users = await listFollows(target.id, type, viewer?.id ?? null);
-  sendJson(res, 200, { ok: true, type, users });
+  sendJson(res, 200, { ok: true, type, users, limit: FOLLOW_LIST_LIMIT });
 }
 
 /** tag key -> 中文标签。 */
@@ -1814,6 +2167,18 @@ async function handleDiscover(req, res) {
 
   const { total, sites } = await discoverSites({ q, tag, sort, limit: size, offset: (page - 1) * size });
 
+  // 记录搜索词，热搜榜的数据源。只记「有人真的在搜」的那一下：
+  // 翻页（page > 1）和空 q 都不重复计数，否则翻一页就等于又搜了一遍。
+  if (q && page === 1) {
+    const who = viewer ? `user:${viewer.id}` : `anon:${visitorId(req, res)}`;
+    try {
+      await recordQuery(q, who);
+    } catch (err) {
+      // 记录失败不该把搜索本身拖垮：结果照常返回，问题留在日志里。
+      console.error('[hot] 记录搜索词失败：', err?.message ?? err);
+    }
+  }
+
   sendJson(res, 200, {
     ok: true,
     total,
@@ -1822,6 +2187,11 @@ async function handleDiscover(req, res) {
     pages: Math.max(1, Math.ceil(total / size)),
     sites: (await withViewerFlags(sites, viewer?.id)).map((s) => ({ ...s, tagLabel: tagLabelOf(s.tag) })),
   });
+}
+
+/** 热门搜索榜：公开接口。榜单达不到「至少两个人搜过」的门槛就是空数组，前端整段隐藏。 */
+async function handleHotSearch(req, res) {
+  sendJson(res, 200, { ok: true, words: await hotWords() });
 }
 
 // ---------------------------------------------------------------- 创作者主页（阶段 3）
@@ -1900,7 +2270,8 @@ async function handleMessagesPage(req, res) {
   await sendPage(res, 'messages.html');
 }
 
-/** 通知列表：谁赞 / 评 / 藏 / 关注了我。 */
+/** 通知列表：谁赞 / 评 / 藏 / 关注了我。
+ *  这个接口同时把已读游标推到本批最新一条，所以「打开通知页」就等于读过这批。 */
 async function handleNotificationsList(req, res) {
   const user = await requireLogin(req, res);
   if (!user) return;
@@ -2459,6 +2830,44 @@ async function handleAdminBannerDelete(req, res, [id]) {
   sendJson(res, 200, { ok: true, id: Number(id) });
 }
 
+// ---------------------------------------------------------------- 后台：热搜屏蔽词
+
+/** 后台：当前屏蔽词。 */
+async function handleAdminBlockedWords(req, res) {
+  if (!(await requireAdmin(req, res))) return;
+  sendJson(res, 200, { ok: true, words: await listBlockedWords() });
+}
+
+/** 后台：加一个屏蔽词（顺带清掉它已有的搜索记录）。 */
+async function handleAdminBlockWord(req, res) {
+  if (!(await requireAdmin(req, res))) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  try {
+    sendJson(res, 201, { ok: true, ...(await blockWord(body.word, body.note)) });
+  } catch (err) {
+    if (err.code === 'EMPTY_WORD') {
+      sendJson(res, 400, { ok: false, message: err.message });
+      return;
+    }
+    throw err;
+  }
+}
+
+/** 后台：解封一个词。 */
+async function handleAdminUnblockWord(req, res, [word]) {
+  if (!(await requireAdmin(req, res))) return;
+
+  if (await unblockWord(decodeURIComponent(word)) === 0) {
+    sendJson(res, 404, { ok: false, message: '这个词不在屏蔽名单里' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true });
+}
+
 function serveSiteFile(req, res, filePath, content) {
   const ext = path.extname(filePath).toLowerCase();
   // html / svg / xml 都是可以带脚本的文档类型，必须一起关进沙箱
@@ -2547,6 +2956,7 @@ async function handleSite(req, res, [username, name, rest = '']) {
   const isDraft = site.status === 'draft';
 
   if (site.status !== 'active') {
+    // 451 只留给被管理员下线的站；草稿对外「根本不存在」
     if (!isDraft) {
       sendHtml(res, 451, messagePage('已下线', '这个页面已被管理员下线。'));
       return;
@@ -2646,6 +3056,7 @@ const ROUTES = [
 
   ['GET', /^\/api\/me$/, handleMe],
   ['GET', /^\/api\/discover$/, handleDiscover],
+  ['GET', /^\/api\/hot$/, handleHotSearch],
   ['GET', /^\/api\/banners$/, handleBannersPublic],
   ['GET', new RegExp(`^\\/api\\/u\\/([a-z0-9-]+)\\/profile$`), handleCreatorProfile],
   ['GET', /^\/api\/notifications$/, handleNotificationsList],
@@ -2674,11 +3085,21 @@ const ROUTES = [
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files$`), handleSiteFilesList],
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files$`), handleSiteFileUpload],
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/zip$`), handleSiteZipUpload],
+  // 多文件上传：先开草稿 → 逐个文件写 → 最后 publish 一次性上线（跨请求没有事务，
+  // 只能靠 status 把「未传完的站」挡在对外访问之外）
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/draft$`), handleSiteDraft],
+  // 同一个 /publish 承担两件事，靠 Content-Type 分流：
+  //  - 无 body（投稿页把上传草稿切成上线）：handleSitePublish
+  //  - JSON body（工作区把草稿发布成一张新的正式站，草稿保留）：handleSitePublishDraft
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/publish$`), handleSitePublishDispatch],
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files\\/content$`), handleSiteFileContent],
   ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files$`), handleSiteFileDelete],
-  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/publish$`), handleSitePublishDraft],
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/messages$`), handleSiteMessagesList],
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/messages$`), handleSiteMessageAdd],
+  // 卡片自定义封面：GET 公开（卡片匿名可见），PUT/DELETE 走「作者或管理员」
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverImage],
+  ['PUT', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverUpload],
+  ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverDelete],
 
   // 社区互动：站名只在作者名下唯一，所以公开接口一律带用户名
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/stats$`), handleSiteStats],
@@ -2689,6 +3110,9 @@ const ROUTES = [
   ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/comments\\/(\\d+)$`), handleSiteCommentDelete],
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/favorite$`), handleSiteFavorite],
   ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/favorite$`), handleSiteUnfavorite],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/coin$`), handleSiteCoin],
+  ['GET', /^\/api\/coins$/, handleCoinsSummary],
+  ['POST', /^\/api\/coins\/quota$/, handleCoinQuotaRedeem],
   ['POST', /^\/api\/users\/(\d+)\/follow$/, handleUserFollow],
   ['DELETE', /^\/api\/users\/(\d+)\/follow$/, handleUserUnfollow],
   ['GET', /^\/api\/users\/(\d+)\/social$/, handleUserSocial],
@@ -2719,6 +3143,9 @@ const ROUTES = [
   ['POST', /^\/api\/admin\/banners$/, handleAdminBannerCreate],
   ['PUT', /^\/api\/admin\/banners\/(\d+)$/, handleAdminBannerUpdate],
   ['DELETE', /^\/api\/admin\/banners\/(\d+)$/, handleAdminBannerDelete],
+  ['GET', /^\/api\/admin\/blocked-words$/, handleAdminBlockedWords],
+  ['POST', /^\/api\/admin\/blocked-words$/, handleAdminBlockWord],
+  ['DELETE', /^\/api\/admin\/blocked-words\/(.+)$/, handleAdminUnblockWord],
 
   // MCP：运行时用密钥，管理用登录态，两条路互不相交
   ['POST', /^\/mcp$/, handleMcpPost],
@@ -2835,6 +3262,23 @@ server.listen(PORT, HOST, async () => {
   try {
     const removed = await deleteExpiredSessions();
     if (removed > 0) console.log(`清理了 ${removed} 条过期会话`);
+
+    // 搜索记录只保留 HOT_WINDOW_DAYS 天：开机清一次，之后每天清一次，
+    // 表里永远只有窗口内的量，不用等它自己长大。
+    const pruned = await pruneQueries();
+    if (pruned > 0) console.log(`清理了 ${pruned} 条过期搜索记录`);
+    setInterval(() => {
+      pruneQueries().catch((err) => console.error('[hot] 清理搜索记录失败：', err?.message ?? err));
+    }, 24 * 3600_000).unref();
+
+    // 没传完就放弃的上传草稿：开机清一次，之后每天一次，
+    // 免得它们一直占着站点配额和账号存储额度
+    const prunedDrafts = await pruneDraftSites(DRAFT_TTL_HOURS);
+    if (prunedDrafts > 0) console.log(`清理了 ${prunedDrafts} 个过期上传草稿`);
+    setInterval(() => {
+      pruneDraftSites(DRAFT_TTL_HOURS)
+        .catch((err) => console.error('[draft] 清理上传草稿失败：', err?.message ?? err));
+    }, 24 * 3600_000).unref();
 
     const created = await ensureAdminAccount();
 

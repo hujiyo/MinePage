@@ -89,11 +89,12 @@ async function mountBanner() {
   const CACHE_MAX = 3;
   const mounted = []; // 已挂进 el 的 bpreview，按载入先后排序（先进先出淘汰）
 
-  function mountPreview(b) {
+  function mountPreview(b, coverUrl) {
     // 换图前先把所有预览藏起来，避免上一张的残影盖在新渐变上；
     // 同时撤掉 hasPreview，新画面出来前先用渐变 + 大字占位。
     mounted.forEach((f) => { f.hidden = true; });
     el.classList.remove('hasPreview');
+    syncCover(coverUrl);
     // 没有作者名就拼不出站点地址（老数据 / 站点已删），保持渐变占位即可
     if (!b.site.owner) return;
     const w = el.clientWidth;
@@ -148,7 +149,8 @@ async function mountBanner() {
   // 骨架只搭一次：每次 paint 都重写 innerHTML 会把预览 iframe 一起冲掉，
   // 换一张就得重新载入整站，轮播会一直闪白。所以这里只更新文字、配色和圆点。
   el.innerHTML =
-    '<div class="bcover"><span class="bchar"></span></div>'
+    '<div class="bcover"><span class="bchar"></span>'
+    + '<img class="bimg" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" hidden></div>'
     + '<div class="binfo"><b></b><span></span></div>'
     + (list.length > 1
       ? '<button type="button" class="bnav prev" title="上一张">' + MP.icon('left') + '</button>'
@@ -156,6 +158,35 @@ async function mountBanner() {
         + '<div class="bdots">' + list.map((_, i) =>
           '<i' + (i === idx ? ' class="on"' : '') + ' data-i="' + i + '"></i>').join('') + '</div>'
       : '');
+
+  /** 轮播封面的取图地址：/api/sites/<用户名>/<站名>/cover。
+   *  返回的 site 里只有 owner（用户名），没有 author；拼不出来就返回空串，调用方退回渐变。 */
+  function bannerCoverUrl(site) {
+    const owner = (site.author && site.author.username) || site.owner || '';
+    if (!owner || !site.name) return '';
+    return '/api/sites/' + encodeURIComponent(owner) + '/' + encodeURIComponent(site.name) + '/cover';
+  }
+
+  /**
+   * 自定义封面（管理后台给站点设的图）。站点有实时首屏 iframe 时不必要，
+   * 只在 iframe 还没出来 / 站点没有作者名时兜一层，图挂了就退回大字。
+   */
+  function syncCover(url) {
+    const img = el.querySelector('.bimg');
+    if (!img) return;
+    if (!url) {
+      img.hidden = true;
+      img.removeAttribute('src');
+      return;
+    }
+    if (img.getAttribute('src') !== url) {
+      img.onerror = () => { img.hidden = true; };
+      img.onload = () => { img.hidden = false; };
+      img.src = url;
+    } else {
+      img.hidden = false;
+    }
+  }
 
   el.querySelector('.prev')?.addEventListener('click', (e) => { e.stopPropagation(); go(idx - 1); });
   el.querySelector('.next')?.addEventListener('click', (e) => { e.stopPropagation(); go(idx + 1); });
@@ -167,12 +198,14 @@ async function mountBanner() {
     const b = list[idx];
     const title = b.title || b.site.title || b.site.name;
     const sub = b.subtitle || b.site.description || '';
+    const coverUrl = b.site.hasCover ? bannerCoverUrl(b.site) : '';
     el.style.background = MP.grad(b.site);
+    // 大字占位：没有自定义封面时当背景字用，有封面/有实时预览时由 CSS 淡出
     el.querySelector('.bchar').textContent = MP.initial(b.site);
     el.querySelector('.binfo b').textContent = title;
     el.querySelector('.binfo span').textContent = sub;
     el.querySelectorAll('.bdots i').forEach((d, i) => d.classList.toggle('on', i === idx));
-    mountPreview(b);
+    mountPreview(b, coverUrl);
   }
 
   function go(i) {
@@ -197,7 +230,10 @@ async function mountBanner() {
   // 否则画面会按旧比例拉伸（拖拽过程中每帧重建代价太高）。
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => mountPreview(list[idx]), 200);
+    resizeTimer = setTimeout(() => {
+      const b = list[idx];
+      mountPreview(b, b.site.hasCover ? bannerCoverUrl(b.site) : '');
+    }, 200);
   });
 
   // 先挂进文档再 paint：mountPreview 要读 clientWidth/Height，挂载前量到的是 0

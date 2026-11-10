@@ -39,7 +39,11 @@ lib/db.js                     MySQL 连接池、建表（幂等）、老库补�
 lib/auth.js                   scrypt 密码哈希、会话 token、Cookie 读写
 lib/users.js                  用户与会话的数据操作、管理员种子
 lib/sites.js                  站点的数据操作
+lib/covers.js                 卡片自定义封面：类型嗅探 + 读写 site_covers
 lib/social.js                 社区互动数据操作（点赞 / 评论 / 收藏 / 关注 / 通知 / 浏览量 / 创作者主页）
+lib/coins.js                  硬币数据操作（余额 / 流水 / 投币 / 每日签到 / 配额兑换）
+lib/hot.js                    热门搜索：记录搜索词 + 按人数聚合出榜 + 屏蔽词
+lib/clock.js                  「哪一天」的唯一来源（UTC+8 自然日，签到与热搜窗口共用）
 lib/names.js                  站名 / 用户名校验
 lib/addressing.js             「用户名+站名 ⇄ 访问地址」的唯一映射点，换地址形态只改这里
 lib/email.js                  发信（SMTP），未配置时退化为控制台打印
@@ -48,12 +52,14 @@ lib/mcp/tokens.js             MCP 密钥：铸造 / 列表 / 吊销 / 鉴权（�
 lib/mcp/tools.js              MCP 工具注册表（唯一真源）+ 10 个 backend
 lib/mcp/server.js             MCP 的 JSON-RPC 分发，零依赖手写
 scripts/mcp-smoke.mjs         MCP 冒烟测试（69 项，见下）
-scripts/api-smoke.mjs         全站接口冒烟测试（148 项，自己拉起临时服务，见下）
+scripts/api-smoke.mjs         全站接口冒烟测试（263 项，自己拉起临时服务，见下）
+scripts/upload-page-smoke.mjs 投稿页交互冒烟测试（42 项，无头 Edge，见下）
+scripts/coin-page-smoke.mjs   投币交互冒烟测试（17 项，无头 Edge，见下）
 scripts/migrate-user-space.mjs  把「全局站名」的老库迁到用户空间模型（幂等，见下）
 public/index.html             上传页的跳转兜底
 public/discover.html          社区首页（/）
 public/user.html              创作者主页（/qwq/:用户名）
-public/view.html              观看页（/view/:用户名/:站名，全屏 iframe + 底部吸附栏 + 评论面板）
+public/view.html              观看页（/view/:用户名/:站名，B 站式播放页；全屏后才是 iframe 铺满 + 底部吸附栏 + 评论面板）
 public/notifications.html     通知列表页（/notifications）
 public/favorites.html         我的收藏（/favorites）
 public/history.html           观看历史（/history）
@@ -66,22 +72,29 @@ public/app.js                 公共前端脚本（顶栏 / 图标 / 站点卡�
 public/style.css              共享样式
 ```
 
-## 十二张表
+## 十九张表
 
 | 表 | 存什么 |
 |---|---|
 | `users` | 账号、用户名（必填，也是用户空间路径段）、scrypt 密码哈希、是否管理员、封禁状态 |
 | `sites` | 站名（只在作者名下唯一）、归属用户（注销级联删除）、HTML 内容、大小、上线状态、标题简介标签 |
 | `site_files` | 多页站的文件（路径 + BLOB 内容） |
+| `site_covers` | 卡片自定义封面（一站一张，图片字节 + mime + 大小，站点删除级联清掉） |
 | `sessions` | 登录会话，带过期时间 |
 | `email_codes` | 邮箱验证码的哈希、用途、有效期与尝试次数 |
-| `mcp_tokens` | MCP 密钥的 sha256、名称、最后使用时间（明文不落库） |
 | `likes` | 点赞（一人一站一条） |
 | `comments` | 评论，`reply_to` 只做一级回复 |
-| `favorites` | 收藏，带收藏夹名字 |
+| `favorites` | 收藏，带收藏夹名字（`folder` 只存名字） |
+| `favorite_folders` | 收藏夹（每人一套，空夹子也能存在、能改名；和 `favorites.folder` 靠名字对齐，重命名 / 删除时两边一起改） |
 | `follows` | 关注关系 |
 | `view_history` | 浏览历史（一人一站一条，重复浏览只刷新时间） |
 | `messages` | 私信，`read_at` 为空表示未读 |
+| `mcp_tokens` | MCP 密钥的 sha256、名称、最后使用时间（明文不落库） |
+| `banners` | 首页轮播位（管理员指定第几个位置放哪个站，`title` / `subtitle` 空串表示跟随站点；站点删除级联清掉） |
+| `coin_ledger` | 硬币流水（余额的**唯一事实源**，`users.coin_balance` 只是缓存）。`reason`：`register` / `signin` / `charge` / `received` / `quota`；`UNIQUE(user_id, reason, ref)` 兼做签到幂等 |
+| `coin_charges` | 投给某站点的硬币（一人一站一条，`count ≤ 2`）。**只增不改**，没有删除路径——页面「收到多少枚」是永久记录，作者花掉自己的币不会让它变小 |
+| `search_queries` | 搜索词记录（热搜榜的唯一数据源）。`who` 是去重标识（登录 `user:<id>`，匿名访客的随机 Cookie id），不是外键；`UNIQUE(word, who, day)` 兼做防刷；超出 7 天窗口的每晚自动清掉 |
+| `search_blocklist` | 热搜屏蔽词（运营兜底）。和 `search_queries` 之间没有外键（方向会反）；屏蔽一个词时在事务里把它已有的记录一起删掉，不会出现「进了黑名单但榜首还挂着」 |
 
 ## 接口
 
@@ -90,7 +103,7 @@ public/style.css              共享样式
 | GET | `/` | 社区首页（发现流、搜索、标签筛选） |
 | GET | `/upload` | 跳到创作页的投稿标签 |
 | GET | `/qwq/:用户名` | 创作者公开主页（用户空间入口；`/qwq/:用户名/:站名` 是站点） |
-| GET | `/view/:用户名/:站名` | 观看页（全屏沙箱 iframe + 底部吸附栏 + 评论面板） |
+| GET | `/view/:用户名/:站名` | 观看页（B 站式播放页；全屏态是沙箱 iframe 铺满 + 底部吸附栏 + 评论面板） |
 | GET | `/qwq/:用户名/:站名` | 用户页面（带沙箱头）；`/qwq/:用户名/:站名/*` 是站内文件 |
 | GET | `/notifications` | 通知列表页（收到的互动） |
 | GET | `/login` | 登录 / 注册 |
@@ -100,21 +113,29 @@ public/style.css              共享样式
 | POST | `/api/auth/login` | 登录（邮箱或用户名） |
 | POST | `/api/auth/logout` | 登出 |
 | GET | `/api/discover` | 社区发现流（?q= 模糊搜索，?tag= 标签筛选） |
+| GET | `/api/hot` | 热门搜索榜（窗口内至少两个人搜过的词，按人数排；没数据时返回空数组） |
 | GET | `/api/u/:username/profile` | 创作者主页数据（资料 / 粉丝关注数 / 总浏览量 / TA 的站点） |
-| GET | `/api/sites` | 我的站点（带 `username`、`quota`） |
+| GET | `/api/sites` | 我的站点（带 `username`、`quota`、内容标签词表 `tags`，以及当前上传上限 `limits`——投稿页文案与提交前预检都读它） |
 | POST | `/api/upload` | 上传 HTML（需登录，占配额） |
-| GET | `/api/sites/:用户名/:站名/stats` | 站点互动数字（浏览 / 赞 / 评 / 藏） |
+| GET | `/api/sites/:用户名/:站名/stats` | 站点互动数字（浏览 / 赞 / 评 / 藏 / 投币） |
 | POST / DELETE | `/api/sites/:用户名/:站名/like` | 点赞 / 取消（需登录） |
+| POST | `/api/sites/:用户名/:站名/coin` | 投币 `{count:1\|2}`（需登录、不能投自己、每人每站最多 2 枚、**不可撤回**） |
+| GET | `/api/coins` | 我的硬币：余额 / 站点配额 / 累计获赠 / 最近流水 |
+| POST | `/api/coins/quota` | 花硬币换 +1 份站点配额 |
 | GET / POST | `/api/sites/:用户名/:站名/comments` | 评论列表 / 发评论（回复带 replyTo） |
 | DELETE | `/api/sites/:用户名/:站名/comments/:id` | 删评论（作者或管理员） |
 | POST / DELETE | `/api/sites/:用户名/:站名/favorite` | 收藏 / 取消（可选 folder 名字） |
 | GET / PUT / DELETE | `/api/sites/:用户名/:站名` | 站点详情 / 保存单页 HTML / 删除 |
 | GET / POST / DELETE | `/api/sites/:用户名/:站名/files` | 多页站文件列表 / 上传 / 删除 |
+| POST | `/api/sites/:用户名/:站名/draft` | 开上传草稿（多文件上传第一步，对外不可见，同名重复调用幂等） |
+| POST | `/api/sites/:用户名/:站名/publish` | 把草稿一次性发布上线（校验入口 HTML，事务内翻 status） |
+| POST | `/api/sites/:用户名/:站名/zip` | zip 整包发布（解压后逐条校验，建站与文件在一个事务里） |
+| GET / PUT / DELETE | `/api/sites/:用户名/:站名/cover` | 自定义卡片封面（≤2MB，png/jpg/webp/gif；不设置时卡片显示站点实时画面） |
 | PUT | `/api/sites/:用户名/:站名/meta` | 站点标题 / 简介 / 标签 |
 | POST / DELETE | `/api/users/:id/follow` | 关注 / 取关（不能关注自己） |
 | GET | `/api/users/:id/social` | 粉丝数 / 关注数 / 是否已关注 |
-| GET | `/api/notifications` | 通知列表（最近的互动事件，新到旧，最多 50 条） |
-| POST | `/api/notifications/seen` | 推进已读时间戳（进通知页自动调用） |
+| GET | `/api/notifications` | 通知列表（最近的互动事件，新到旧，最多 50 条；返回时把已读游标推到本批最新一条） |
+| POST | `/api/notifications/seen` | 一键全部标为已读（把已读时间戳推到当前时刻） |
 | POST | `/api/account/username` | 改用户名（旧名立即释放，旧地址跟着失效） |
 | POST | `/api/account/delete` | 注销账号（密码确认，级联删掉名下所有站点） |
 | GET | `/api/admin/users` | 用户列表 |
@@ -122,6 +143,8 @@ public/style.css              共享样式
 | GET | `/api/admin/sites` | 全部页面 |
 | POST | `/api/admin/sites/:id/status` | 下线 / 恢复 |
 | DELETE | `/api/admin/sites/:id` | 删除页面 |
+| GET / POST | `/api/admin/blocked-words` | 热搜屏蔽词列表 / 加一个（顺带删掉它已有的搜索记录） |
+| DELETE | `/api/admin/blocked-words/:词` | 解封一个词 |
 | GET | `/api/mcp/tokens` | 我的 MCP 密钥列表 |
 | POST | `/api/mcp/tokens` | 创建 MCP 密钥（明文只回一次） |
 | POST | `/api/mcp/tokens/:id/revoke` | 吊销密钥 |
@@ -170,9 +193,42 @@ node scripts/mcp-smoke.mjs --ban-check b@smoke.local  # 封禁联动 5 项（需
 冒烟库的表，跑完自己收拾：
 
 ```
-node scripts/api-smoke.mjs          # 148 项：注册/登录/站点/文件/社交/权限/后台/改密/配额/改名/注销
+node scripts/api-smoke.mjs          # 263 项：注册/登录/站点/文件/社交/硬币/权限/后台/改密/配额/存储上限/改名/注销
 node scripts/api-smoke.mjs --json   # 末尾多打印一段 JSON，换库前后可以拿来对比
 ```
+
+投稿页（`/sites?tab=upload`）的交互另有浏览器冒烟测试，得先起一个冒烟服务再指着它跑
+（文件列表的「移除」按钮、模式徽章的自动切换是 DOM 事件，接口测不到）：
+
+```
+$env:PORT=3105; $env:MYSQL_DATABASE='minepage_smoke'; node server.js
+$env:BASE_URL='http://127.0.0.1:3105'; node scripts/upload-page-smoke.mjs   # 42 项
+```
+
+它用无头 Edge + CDP，账号读 `SMOKE_LOGIN` / `SMOKE_PASSWORD`（默认 smokeadmin /
+smoke-admin-pass）；本机没有 Edge 时直接跳过，不算失败。
+
+投币的弹层、按钮禁用、余额回填也是 DOM 事件，同样单独一支（`npm run smoke:coin`）：
+
+```
+$env:PORT=3211; $env:MYSQL_DATABASE='minepage_smoke'; node server.js
+$env:BASE_URL='http://127.0.0.1:3211'; $env:SMOKE_LOGIN='uitester'; $env:SMOKE_PASSWORD='pw123456';
+node scripts/coin-page-smoke.mjs   # 17 项
+```
+
+它测的是 `/view/uitester/ui-site`，需要**该页面存在、且 uitester 不是它的作者**
+（自己投自己会被服务端拒掉）。换页面用 `SMOKE_VIEW`。
+
+顶栏「热门搜索」也是 DOM 行为（面板展开才拉数据、空榜要整段隐藏），单独一支（`npm run smoke:hot`）：
+
+```
+$env:PORT=3222; $env:MYSQL_DATABASE='minepage_smoke'; $env:HOT_CACHE_MS='0'; node server.js
+$env:BASE_URL='http://127.0.0.1:3222'; node scripts/hot-page-smoke.mjs   # 12 项
+```
+
+`HOT_CACHE_MS=0` 关掉热搜榜的 5 分钟缓存，否则写完记录看不到变化。脚本自己用匿名访客
+造一个热词，不需要登录。headless Edge 默认让页面拿不到窗口焦点，脚本用
+`Emulation.setFocusEmulationEnabled` + 真实鼠标输入点搜索框，才走得到 focus 回调。
 
 ### 老库迁移到用户空间
 
@@ -211,16 +267,50 @@ node scripts/migrate-user-space.mjs             # 真跑（先备份！）
 | `MYSQL_PASSWORD` | 空 | 数据库密码 |
 | `MYSQL_DATABASE` | `minepage` | 库名；跑回归脚本时指向 `minepage_smoke` |
 | `USER_SPACE_PREFIX` | `qwq` | 用户空间前缀：站点地址是 `/<前缀>/<用户名>/<站名>` |
-| `MAX_SITES_PER_USER` | `10` | 每人站点配额 |
+| `MAX_SITES_PER_USER` | `10` | 每人基础站点配额（硬币兑换可再加） |
+| `MAX_SITE_TOTAL_BYTES` | `52428800` | 单个站点的内容总量上限（50 MB） |
+| `MAX_USER_TOTAL_BYTES` | `104857600` | 每人所有站点的内容总量上限（100 MB） |
+| `COIN_REGISTER_BONUS` | `3` | 注册赠送硬币 |
+| `COIN_DAILY` | `1` | 每日首次访问发放的硬币 |
+| `MAX_COINS_PER_SITE` | `2` | 每人每站最多能投几枚 |
+| `QUOTA_COINS_PER_SLOT` | `5` | 换一份额外站点配额要几枚 |
 | `ADMIN_USERNAME` | `admin` | 管理员用户名 |
 | `ADMIN_PASSWORD` | `123` | 管理员密码，首次创建时生效 |
 | `ADMIN_EMAIL` | `admin@minepage.local` | 管理员邮箱 |
 | `COOKIE_SECURE` | 关 | 设为 `1` 时 Cookie 带上 Secure |
 | `SMTP_HOST` 等 | 空 | 发信配置，见「跑起来」；不配置则验证码打印到控制台 |
 
+## 上传上限
+
+按「极简个人 page」定位定的一组数，每个都从某一层硬限制推导出来：
+
+| 项 | 值 | 来源 |
+|---|---|---|
+| 单页 HTML | 5 MB | JSON 请求体，`MAX_HTML_BYTES` |
+| 多页单文件 | 10 MB | `site_files.content` 是 MEDIUMBLOB（16 MB 硬顶） |
+| 每站文件数 | 200 | `MAX_FILES_PER_SITE` |
+| 单站总量 | 50 MB | `MAX_SITE_TOTAL_BYTES`，可用环境变量覆盖 |
+| 每人总量 | 100 MB | `MAX_USER_TOTAL_BYTES`，可用环境变量覆盖 |
+| ZIP 包体 | 55 MB | `MAX_ZIP_BYTES`；**nginx 的 `client_max_body_size` 必须 ≥ 64m** |
+| 卡片封面 | 2 MB | `MAX_COVER_BYTES` |
+
+这些上限由 `GET /api/sites` 和站点详情接口的 `limits` 字段下发，页面文案和提交前预检都读它，
+不在前端另写数字。限制只在写入时校验：已经超限的存量站点（模板导入的站最大 171 MB）
+仍可把文件换成同样大或更小的版本，但任何增量都会被拒。
+
+## 多文件上传的原子性
+
+单页 HTML 和 zip 整包本来就是一次事务；多文件（拖文件夹 / 多选）是 N 个请求，
+所以分成三步：`POST .../draft` 先建一个 `status='draft'` 的草稿 → 文件逐个写进去 →
+全部成功再 `POST .../publish` 在事务里切成 `active`。草稿对外一律 404、不进「我的站点」、
+不进广场和搜索，中途断网只会留下一个不可见的草稿，不会出现「半个站已经上线」。
+
+放弃的草稿按 `updated_at` 定时清理（开机一次 + 每天一次），保留时长由
+`DRAFT_TTL_HOURS`（默认 24 小时）控制；草稿在清理前仍占一个站点配额和它的存储额度。
+
 ## 还没做
 
 - 自动化测试只盖到接口层（`npm run smoke`），页面上的 JS 交互还没覆盖
 - lint / 格式化配置
 - 除了站点配额，其他接口还没有限流
-- B 站式硬币换配额（先有真实用户量再说）
+- 硬币没有后台管理入口（不能手动补发、没有流水审计页）

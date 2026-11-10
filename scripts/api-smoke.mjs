@@ -90,6 +90,35 @@ function cookiesOf(res) {
   return jar.map((c) => c.split(';')[0]).join('; ');
 }
 
+/** 取二进制响应（封面这类图片接口）。api() 会把 body 读成文本，不能走它。 */
+async function apiBytes(pathname, { cookie, headers = {} } = {}) {
+  const res = await fetch(BASE + pathname, {
+    headers: {
+      ...(cookie ? { Cookie: cookie } : {}),
+      ...headers,
+    },
+    redirect: 'follow',
+  });
+  return { bytes: Buffer.from(await res.arrayBuffer()), res };
+}
+
+/** 直连冒烟库查一眼接口断言看不到的库内状态（比如外键级联是否真的清干净）。 */
+async function dbQuery(sql, params = []) {
+  const conn = await mysql.createConnection({
+    database: smokeDb,
+    host: process.env.MYSQL_HOST ?? '127.0.0.1',
+    password: process.env.MYSQL_PASSWORD ?? '',
+    port: Number(process.env.MYSQL_PORT ?? 3306),
+    user: process.env.MYSQL_USER ?? 'minepage',
+  });
+  try {
+    const [rows] = await conn.query(sql, params);
+    return rows;
+  } finally {
+    await conn.end();
+  }
+}
+
 async function login(loginValue, passwordValue) {
   const { body, res } = await api('/api/auth/login', {
     body: { login: loginValue, password: passwordValue },
@@ -139,6 +168,8 @@ async function boot() {
     HOST: '127.0.0.1',
     // 配额调小，冒烟里几次请求就能撞到上限
     MAX_SITES_PER_USER: String(QUOTA),
+    // 热搜榜的生产默认缓存 5 分钟；冒烟要立刻看到写入结果，关掉缓存（0 = 每次重新算）
+    HOT_CACHE_MS: '0',
     PORT: String(PORT),
     SMTP_HOST: '',
   };
@@ -370,6 +401,62 @@ async function run() {
   check('ZIP 首页可访问', goodZipPage.res.status === 200 && goodZipPage.text.includes('zip-ok'));
   await api(apiSite('', 'smoke-zip-good'), { cookie: a.cookie, method: 'DELETE' });
 
+  // 多文件上传的原子性：先草稿 → 逐个写文件 → publish 才上线。
+  // 中途任何时候草稿都不该被访问到，也不该出现在「我的站点」里。
+  const draftName = 'smoke-draft';
+  const draftOpen = await api(apiSite('/draft', draftName), { cookie: a.cookie, method: 'POST' });
+  check('开上传草稿 201', draftOpen.res.status === 201 && draftOpen.body?.ok === true,
+    `status=${draftOpen.res.status} ${JSON.stringify(draftOpen.body)}`);
+  check('草稿站点访问 404（不是 451）', (await api(pageUrl(draftName))).res.status === 404);
+  check('草稿不在我的站点列表里',
+    !(await api('/api/sites', { cookie: a.cookie })).body?.sites?.some((s) => s.name === draftName));
+
+  const draftFile = await api(apiSite(`/files?path=index.html`, draftName), {
+    cookie: a.cookie, method: 'POST', raw: '<h1>draft-ok</h1>', type: 'application/octet-stream',
+  });
+  check('草稿里可以写文件', draftFile.res.status === 201, `status=${draftFile.res.status}`);
+  check('写了文件但没发布，访问仍是 404', (await api(pageUrl(draftName))).res.status === 404);
+
+  const draftPublish = await api(apiSite('/publish', draftName), { cookie: a.cookie, method: 'POST' });
+  check('发布草稿 200', draftPublish.res.status === 200 && draftPublish.body?.ok === true,
+    `status=${draftPublish.res.status} ${JSON.stringify(draftPublish.body)}`);
+  const draftPage = await api(pageUrl(draftName));
+  check('发布后页面可访问', draftPage.res.status === 200 && draftPage.text.includes('draft-ok'));
+  const draftRepublish = await api(apiSite('/publish', draftName), { cookie: a.cookie, method: 'POST' });
+  check('重复发布是幂等的', draftRepublish.res.status === 200 && draftRepublish.body?.already === true,
+    `status=${draftRepublish.res.status} ${JSON.stringify(draftRepublish.body)}`);
+  const draftReopen = await api(apiSite('/draft', draftName), { cookie: a.cookie, method: 'POST' });
+  check('已上线的站不能再开同名草稿 → 409', draftReopen.res.status === 409, `status=${draftReopen.res.status}`);
+
+  const emptyDraftName = 'smoke-draft-empty';
+  await api(apiSite('/draft', emptyDraftName), { cookie: a.cookie, method: 'POST' });
+  const emptyPublish = await api(apiSite('/publish', emptyDraftName), { cookie: a.cookie, method: 'POST' });
+  check('空草稿发布 → 400', emptyPublish.res.status === 400, `status=${emptyPublish.res.status}`);
+  check('发布失败后草稿仍不可访问', (await api(pageUrl(emptyDraftName))).res.status === 404);
+  await api(apiSite(`/files?path=style.css`, emptyDraftName), {
+    cookie: a.cookie, method: 'POST', raw: 'body{}', type: 'application/octet-stream',
+  });
+  const noEntryPublish = await api(apiSite('/publish', emptyDraftName), { cookie: a.cookie, method: 'POST' });
+  check('没有 HTML 入口的草稿发布 → 400', noEntryPublish.res.status === 400, `status=${noEntryPublish.res.status}`);
+
+  const otherDraft = await api(apiSite('/draft', 'smoke-draft-mine', B_NAME), { cookie: a.cookie, method: 'POST' });
+  check('不能给别人开草稿 → 403', otherDraft.res.status === 403, `status=${otherDraft.res.status}`);
+
+  await api(apiSite('', draftName), { cookie: a.cookie, method: 'DELETE' });
+  await api(apiSite('', emptyDraftName), { cookie: a.cookie, method: 'DELETE' });
+  check('清理后的草稿地址 404', (await api(pageUrl(draftName))).res.status === 404);
+
+  // 同一个站名先开了草稿、又直接拖 zip：zip 是一次完整发布，应该顺带把草稿切成上线
+  const zipDraftName = 'smoke-draft-zip';
+  await api(apiSite('/draft', zipDraftName), { cookie: a.cookie, method: 'POST' });
+  const zipIntoDraft = await api(apiSite(`/zip`, zipDraftName), {
+    cookie: a.cookie, method: 'POST', raw: goodZip, type: 'application/zip',
+  });
+  check('zip 发到同名草稿 → 文件写入并直接上线',
+    zipIntoDraft.res.status === 201 && (await api(pageUrl(zipDraftName))).res.status === 200,
+    `zip=${zipIntoDraft.res.status}`);
+  await api(apiSite('', zipDraftName), { cookie: a.cookie, method: 'DELETE' });
+
   // 子目录入口：根地址要跳到真实入口文件，相对资源与封面代理都跟着走
   const nestedName = 'smoke-nested-entry';
   const nestedHtml = '<!doctype html><head><link rel="stylesheet" href="assets/a.css"></head><h1>nested-ok</h1>';
@@ -433,6 +520,39 @@ async function run() {
 
   const mySites = await api('/api/sites', { cookie: a.cookie });
   check('我的站点列表里有它', mySites.body?.sites?.some((s) => s.name === SITE), JSON.stringify(mySites.body?.sites?.map((s) => s.name)));
+
+  // 投稿页在站点还不存在的时候就要能选内容标签，所以词表跟着「我的站点」一起下发：
+  // 只给登录用户，未登录的 401 响应里不能漏出来。
+  const SITE_TAG_KEYS = ['resume', 'portfolio', 'social', 'blog', 'event', 'opensource', 'docs', 'other'];
+  const myTags = mySites.body?.tags;
+  check(
+    '我的站点列表带 tags 且是 8 项',
+    Array.isArray(myTags) && myTags.length === SITE_TAG_KEYS.length,
+    `type=${Array.isArray(myTags) ? 'array' : typeof myTags} len=${myTags?.length}`,
+  );
+  check(
+    'tags 每项都有非空字符串 key 与 label',
+    Array.isArray(myTags)
+    && myTags.every((t) => typeof t?.key === 'string' && t.key !== '' && typeof t?.label === 'string' && t.label !== ''),
+    JSON.stringify(myTags),
+  );
+  check(
+    'tags 里没有前端伪标签 hot',
+    Array.isArray(myTags) && !myTags.some((t) => t.key === 'hot'),
+    JSON.stringify(myTags?.map((t) => t.key)),
+  );
+  check(
+    'tags 的 key 集合与 SITE_TAGS 完全一致',
+    Array.isArray(myTags) && new Set(myTags.map((t) => t.key)).size === SITE_TAG_KEYS.length
+    && SITE_TAG_KEYS.every((k) => myTags.some((t) => t.key === k)),
+    JSON.stringify(myTags?.map((t) => t.key)),
+  );
+  const anonMySites = await api('/api/sites');
+  check(
+    '未登录 GET /api/sites 仍是 401 且不带 tags',
+    anonMySites.res.status === 401 && !Object.hasOwn(anonMySites.body ?? {}, 'tags'),
+    `status=${anonMySites.res.status} keys=${JSON.stringify(Object.keys(anonMySites.body ?? {}))}`,
+  );
 
   const detail = await api(apiSite(), { cookie: a.cookie });
   check('站点详情 200', detail.res.status === 200, `status=${detail.res.status}`);
@@ -518,21 +638,66 @@ async function run() {
   });
   check('路径穿越被拒', traversal.res.status >= 400, `status=${traversal.res.status}`);
 
-  const bigHtml = `<p>${'x'.repeat(2 * 1024 * 1024)}</p>`;
+  // 单页 HTML 上限 5 MB（对应用户看到的「单页 ≤ 5 MB」）
+  const bigHtml = `<p>${'x'.repeat(5 * 1024 * 1024)}</p>`;
   const tooBig = await api('/api/upload', { body: { html: bigHtml, name: 'smoke-too-big' }, cookie: a.cookie, method: 'POST' });
-  check('单页上传超过 2MB → 413', tooBig.res.status === 413, `status=${tooBig.res.status}`);
+  check('单页上传超过 5MB → 413', tooBig.res.status === 413, `status=${tooBig.res.status}`);
 
-  // 单文件上限已从 10MB 提到 90MB（模板库里有 85MB 的 mp4），10MB 现在是合法体积
-  const hugeFile = `<p>${'y'.repeat(10 * 1024 * 1024)}</p>`;
+  // 多页单文件上限 10 MB：9 MB 合法，11 MB 必须被拒（MEDIUMBLOB 的 16 MB 硬顶之内）
+  const hugeFile = `<p>${'y'.repeat(9 * 1024 * 1024)}</p>`;
   const huge = await api(apiSite(`/files?path=huge.html`), {
     cookie: a.cookie,
     method: 'POST',
     raw: hugeFile,
     type: 'text/html',
   });
-  check('多文件站点 10MB 文件可上传（上限 90MB）', huge.res.status === 201, `status=${huge.res.status}`);
+  check('多文件站点 9MB 文件可上传（上限 10MB）', huge.res.status === 201, `status=${huge.res.status}`);
   const removeHuge = await api(apiSite(`/files?path=huge.html`), { cookie: a.cookie, method: 'DELETE' });
   check('大文件可删除以恢复文件列表', removeHuge.body?.ok === true, JSON.stringify(removeHuge.body));
+
+  const overFile = `<p>${'z'.repeat(11 * 1024 * 1024)}</p>`;
+  const overFileRes = await api(apiSite(`/files?path=over.html`), {
+    cookie: a.cookie,
+    method: 'POST',
+    raw: overFile,
+    type: 'text/html',
+  });
+  check('多文件站点 11MB 文件被拒 → 413', overFileRes.res.status === 413, `status=${overFileRes.res.status}`);
+
+  // 单站总量 50 MB：拿 10 MB 的文件刷到超限，第 5 个必被拒（4×10 + 已有内容 ≈ 40 MB 起）
+  const chunk = 'w'.repeat(10 * 1024 * 1024 - 16);
+  let siteFilled = 0;
+  for (let i = 1; i <= 4; i += 1) {
+    const fill = await api(apiSite(`/files?path=fill-${i}.html`), {
+      cookie: a.cookie, method: 'POST', raw: chunk, type: 'text/html',
+    });
+    if (fill.res.status === 201) siteFilled += 1;
+  }
+  check('单站容量填充 4 个 10MB 文件成功', siteFilled === 4, `filled=${siteFilled}`);
+  const overSite = await api(apiSite(`/files?path=fill-5.html`), {
+    cookie: a.cookie, method: 'POST', raw: chunk, type: 'text/html',
+  });
+  check(
+    '单站总量超过 50MB → 413 且提示站点上限',
+    overSite.res.status === 413 && String(overSite.body?.message).includes('站点总容量'),
+    `status=${overSite.res.status} ${JSON.stringify(overSite.body)}`,
+  );
+  for (let i = 1; i <= 4; i += 1) {
+    await api(apiSite(`/files?path=fill-${i}.html`), { cookie: a.cookie, method: 'DELETE' });
+  }
+
+  // 上限随接口下发，前端文案和预检都靠它（别再让页面各写一份数字）
+  const limitsPayload = (await api('/api/sites', { cookie: a.cookie })).body?.limits;
+  check(
+    'GET /api/sites 下发 limits',
+    limitsPayload?.htmlBytes === 5 * 1024 * 1024
+    && limitsPayload?.fileBytes === 10 * 1024 * 1024
+    && limitsPayload?.filesPerSite === 200
+    && limitsPayload?.siteTotalBytes === 50 * 1024 * 1024
+    && limitsPayload?.userTotalBytes === 100 * 1024 * 1024
+    && typeof limitsPayload?.storageUsedBytes === 'number',
+    JSON.stringify(limitsPayload),
+  );
 
   // 浏览计数：连续访问两次
   await api(pageUrl());
@@ -540,6 +705,255 @@ async function run() {
   const stats = await api(apiSite(`/stats`), { cookie: a.cookie });
   check('浏览计数是数字', typeof stats.body?.stats?.views === 'number', JSON.stringify(stats.body?.stats));
   check('浏览计数累计到 2 以上', (stats.body?.stats?.views ?? 0) >= 2, JSON.stringify(stats.body?.stats));
+
+  // 卡片自定义封面：一站一张图，读公开 / 写要作者，换图后 ETag 跟着变。
+  // 图片字节必须是常量，别去读 public/ 里的资产（那些以后可能被换掉）。
+  const PNG_1X1 = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const coverApi = (name = SITE, owner = A_NAME) => apiSite('/cover', name, owner);
+
+  const coverDetailBefore = await api(apiSite(), { cookie: a.cookie });
+  const coverSiteId = coverDetailBefore.body?.site?.id;
+  check(
+    '站点详情初始 hasCover=false',
+    coverDetailBefore.body?.site?.hasCover === false,
+    `id=${coverSiteId} hasCover=${JSON.stringify(coverDetailBefore.body?.site?.hasCover)}`,
+  );
+
+  const coverAnonPut = await api(coverApi(), { method: 'PUT', raw: PNG_1X1, type: 'image/png' });
+  check('未登录上传封面 → 401', coverAnonPut.res.status === 401, `status=${coverAnonPut.res.status}`);
+
+  const coverOtherPut = await api(coverApi(), { cookie: b.cookie, method: 'PUT', raw: PNG_1X1, type: 'image/png' });
+  check('别人上传封面 → 403', coverOtherPut.res.status === 403, `status=${coverOtherPut.res.status}`);
+
+  // 内容类型由文件头决定：声明 image/png 但内容不是图片，照样要拒
+  const coverTextPut = await api(coverApi(), {
+    cookie: a.cookie, method: 'PUT', raw: Buffer.from('这不是图片'), type: 'image/png',
+  });
+  check(
+    '纯文本冒充 PNG 上传 → 400',
+    coverTextPut.res.status === 400,
+    `status=${coverTextPut.res.status} ${JSON.stringify(coverTextPut.body)}`,
+  );
+
+  const coverPut = await api(coverApi(), { cookie: a.cookie, method: 'PUT', raw: PNG_1X1, type: 'image/png' });
+  check(
+    '上传 1×1 PNG 封面成功且 size 正确',
+    coverPut.res.status === 200 && coverPut.body?.ok === true && coverPut.body?.size === PNG_1X1.length,
+    `status=${coverPut.res.status} ${JSON.stringify(coverPut.body)} 期望 size=${PNG_1X1.length}`,
+  );
+
+  const coverGet = await apiBytes(coverApi());
+  check(
+    'GET 封面 200 且类型是 image/png',
+    coverGet.res.status === 200 && coverGet.res.headers.get('content-type') === 'image/png',
+    `status=${coverGet.res.status} ct=${coverGet.res.headers.get('content-type')}`,
+  );
+  check(
+    'GET 封面字节与原图一致（比 Buffer）',
+    coverGet.bytes.length === PNG_1X1.length && coverGet.bytes.equals(PNG_1X1),
+    `len=${coverGet.bytes.length}/${PNG_1X1.length} 前 8 字节=${coverGet.bytes.subarray(0, 8).toString('hex')}`,
+  );
+
+  const coverEtag = coverGet.res.headers.get('etag') ?? '';
+  check(
+    '封面带 ETag + no-cache + nosniff + Content-Length',
+    Boolean(coverEtag)
+    && coverGet.res.headers.get('cache-control') === 'no-cache'
+    && coverGet.res.headers.get('x-content-type-options') === 'nosniff'
+    && coverGet.res.headers.get('content-length') === String(PNG_1X1.length),
+    `etag=${coverEtag} cc=${coverGet.res.headers.get('cache-control')}`
+    + ` nosniff=${coverGet.res.headers.get('x-content-type-options')}`
+    + ` len=${coverGet.res.headers.get('content-length')}`,
+  );
+
+  const coverNotModified = await apiBytes(coverApi(), { headers: { 'If-None-Match': coverEtag } });
+  check('If-None-Match 命中回 304', coverNotModified.res.status === 304, `status=${coverNotModified.res.status} etag=${coverEtag}`);
+
+  const coverDetailAfter = await api(apiSite(), { cookie: a.cookie });
+  check(
+    '上传后站点详情 hasCover=true',
+    coverDetailAfter.body?.site?.hasCover === true,
+    `hasCover=${JSON.stringify(coverDetailAfter.body?.site?.hasCover)}`,
+  );
+
+  const coverDiscover = await api('/api/discover');
+  // 站名可以被不同作者复用，所以要按 author.username 一起挑，别只按 name 撞运气
+  const coverDiscoverCard = coverDiscover.body?.sites?.find(
+    (s) => s.name === SITE && s.author?.username === A_NAME,
+  );
+  check(
+    '发现流卡片 hasCover=true',
+    coverDiscoverCard?.hasCover === true,
+    `card=${JSON.stringify(coverDiscoverCard && { author: coverDiscoverCard.author?.username, hasCover: coverDiscoverCard.hasCover })}`,
+  );
+
+  const coverProfile = await api(`/api/u/${A_NAME}/profile`);
+  check(
+    '创作者主页卡片 hasCover=true',
+    coverProfile.body?.sites?.find((s) => s.name === SITE)?.hasCover === true,
+    JSON.stringify(coverProfile.body?.sites?.find((s) => s.name === SITE)?.hasCover),
+  );
+
+  // 每人总量 100 MB：单站上限是 50 MB，所以要用两个站才撞得到账号这道闸。
+  const quotaAccount = await registerUser('smoke-storage@test.local', 'smoke-storage');
+  const storageChunk = 'q'.repeat(10 * 1024 * 1024 - 16);
+
+  const fillSite = async (siteName) => {
+    let saved = 0;
+    for (let i = 1; i <= 5; i += 1) {
+      const put = await api(apiSite(`/files?path=bulk-${i}.html`, siteName, 'smoke-storage'), {
+        cookie: quotaAccount.cookie, method: 'POST', raw: storageChunk, type: 'text/html',
+      });
+      if (put.res.status === 201 || put.res.status === 200) saved += 1;
+    }
+    return saved;
+  };
+
+  check('第一个站灌满 5 × 10MB', await fillSite('storage-a') === 5);
+  check('第二个站灌满 5 × 10MB（账号共约 100MB）', await fillSite('storage-b') === 5);
+
+  const overUser = await api(apiSite(`/files?path=bulk-1.html`, 'storage-c', 'smoke-storage'), {
+    cookie: quotaAccount.cookie, method: 'POST', raw: storageChunk, type: 'text/html',
+  });
+  check(
+    '账号总量超过 100MB → 413 且提示账号上限',
+    overUser.res.status === 413 && String(overUser.body?.message).includes('账号总容量'),
+    `status=${overUser.res.status} ${JSON.stringify(overUser.body)}`,
+  );
+
+  // 把文件换成更小的版本永远允许（日常维护不能被打断）
+  const shrink = await api(apiSite(`/files?path=bulk-1.html`, 'storage-a', 'smoke-storage'), {
+    cookie: quotaAccount.cookie, method: 'POST', raw: '<h1>shrink</h1>', type: 'text/html',
+  });
+  check('把文件换成更小版本仍然成功', shrink.res.status === 200, `status=${shrink.res.status}`);
+
+  // 存量超限的例外：API 进不来（本来就挡），所以直接往库里造一条「已经 110MB」的旧状态
+  // （模拟模板导入的站），验证它仍能把文件换成更小的版本。
+  // 必须超过 100MB 的账号上限才落在那条分支上；60MB 还在单站 50MB 之内，撞不到。
+  await dbQuery(
+    `INSERT INTO sites (name, owner_id, html, size, status, created_at, updated_at)
+     SELECT 'legacy-big', id, '', 0, 'active', ?, ? FROM users WHERE username = 'smoke-storage'`,
+    [new Date().toISOString(), new Date().toISOString()],
+  );
+  await dbQuery(
+    `INSERT INTO site_files (site_id, path, content, size, updated_at)
+     SELECT s.id, 'big.bin', '', 110 * 1024 * 1024, ? FROM sites s WHERE s.name = 'legacy-big'`,
+    [new Date().toISOString()],
+  );
+  // 先测「再增内容被拒」：换小文件会让这个站不再超限，顺序反过来就测不到存量超限的状态了。
+  const legacyGrow = await api(apiSite(`/files?path=more.html`, 'legacy-big', 'smoke-storage'), {
+    cookie: quotaAccount.cookie, method: 'POST', raw: storageChunk, type: 'text/html',
+  });
+  check('存量已超限的站点再增内容 → 413', legacyGrow.res.status === 413, `status=${legacyGrow.res.status} ${JSON.stringify(legacyGrow.body)}`);
+  const legacyShrink = await api(apiSite(`/files?path=big.bin`, 'legacy-big', 'smoke-storage'), {
+    cookie: quotaAccount.cookie, method: 'POST', raw: '<h1>small</h1>', type: 'text/html',
+  });
+  check('存量已超限的站点仍可把文件换成更小的版本', legacyShrink.res.status === 200, `status=${legacyShrink.res.status}`);
+
+  // 回归：账号已用量必须逐站聚合 —— 单页站的 sites.size 和多页站的文件不能「取大」了事。
+  // 造一个同时有单页站和多页站的账号，确认 storageUsedBytes 把两者都算进去。
+  const mixedAccount = await registerUser('smoke-mixed@test.local', 'smoke-mixed');
+  const singleHtml = `<p>${'s'.repeat(3 * 1024 * 1024)}</p>`;
+  await api('/api/upload', { body: { html: singleHtml, name: 'mixed-single' }, cookie: mixedAccount.cookie, method: 'POST' });
+  await api(apiSite(`/files?path=index.html`, 'mixed-multi', 'smoke-mixed'), {
+    cookie: mixedAccount.cookie, method: 'POST', raw: storageChunk, type: 'text/html',
+  });
+  const mixedUsed = (await api('/api/sites', { cookie: mixedAccount.cookie })).body?.limits?.storageUsedBytes ?? 0;
+  check(
+    '账号已用量逐站聚合（单页 3MB + 多页 10MB ≈ 13MB，不能被取大吞掉）',
+    mixedUsed > 12 * 1024 * 1024 && mixedUsed < 14 * 1024 * 1024,
+    `used=${mixedUsed} (${(mixedUsed / 1024 / 1024).toFixed(1)}MB)`,
+  );
+
+  const coverMySites = await api('/api/sites', { cookie: a.cookie });
+  check(
+    '我的站点列表 hasCover=true',
+    coverMySites.body?.sites?.find((s) => s.name === SITE)?.hasCover === true,
+    JSON.stringify(coverMySites.body?.sites?.find((s) => s.name === SITE)?.hasCover),
+  );
+
+  // 2MB 上限：多一个字节就该被 readFileBody 挡在 413（不会走到类型嗅探）
+  const coverTooBigBytes = Buffer.concat([PNG_1X1, Buffer.alloc(2 * 1024 * 1024)]);
+  const coverTooBig = await api(coverApi(), {
+    cookie: a.cookie, method: 'PUT', raw: coverTooBigBytes, type: 'image/png',
+  });
+  check(
+    '封面超过 2MB → 413',
+    coverTooBig.res.status === 413,
+    `status=${coverTooBig.res.status} len=${coverTooBigBytes.length}`,
+  );
+
+  // 下线站点要用管理员接口：这里自己拿一次管理员 cookie，别依赖后面第 7 节
+  const coverAdmin = await login(ADMIN_LOGIN, ADMIN_PASSWORD);
+  const coverOffline = await api(`/api/admin/sites/${coverSiteId}/status`, {
+    body: { status: 'offline' }, cookie: coverAdmin.cookie, method: 'POST',
+  });
+  check('下线站点成功（封面用）', coverOffline.body?.ok === true, `status=${coverOffline.res.status} ${JSON.stringify(coverOffline.body)}`);
+
+  const coverGetOffline = await apiBytes(coverApi());
+  check(
+    '站点下线后封面 404',
+    coverGetOffline.res.status === 404,
+    `status=${coverGetOffline.res.status} siteId=${coverSiteId}`,
+  );
+
+  const coverOnline = await api(`/api/admin/sites/${coverSiteId}/status`, {
+    body: { status: 'active' }, cookie: coverAdmin.cookie, method: 'POST',
+  });
+  const coverGetOnline = await apiBytes(coverApi());
+  check(
+    '恢复上线后封面又能取到且字节一致',
+    coverOnline.body?.ok === true
+    && coverGetOnline.res.status === 200
+    && coverGetOnline.bytes.equals(PNG_1X1),
+    `online=${JSON.stringify(coverOnline.body)} status=${coverGetOnline.res.status} len=${coverGetOnline.bytes.length}`,
+  );
+
+  // 删图后就该彻底没有：详情 hasCover 回落，GET 直接 404
+  const coverDel = await api(coverApi(), { cookie: a.cookie, method: 'DELETE' });
+  check('删除封面成功', coverDel.body?.ok === true, JSON.stringify(coverDel.body));
+
+  const coverGone = await apiBytes(coverApi());
+  check('删除后 GET 封面 404', coverGone.res.status === 404, `status=${coverGone.res.status}`);
+
+  const coverDetailSans = await api(apiSite(), { cookie: a.cookie });
+  check(
+    '删除后详情 hasCover=false',
+    coverDetailSans.body?.site?.hasCover === false,
+    `hasCover=${JSON.stringify(coverDetailSans.body?.site?.hasCover)}`,
+  );
+
+  // 外键级联：拿一个临时站先存图，删站后 site_covers 里的行必须跟着消失
+  const cascadeName = 'smoke-cover-cascade';
+  const cascadeUpload = await api('/api/upload', {
+    body: { html: '<p>cascade</p>', name: cascadeName }, cookie: a.cookie, method: 'POST',
+  });
+  const cascadeDetail = await api(apiSite('', cascadeName), { cookie: a.cookie });
+  const cascadeId = cascadeDetail.body?.site?.id;
+  check(
+    '创建临时站点（级联用）',
+    cascadeUpload.res.status === 201 && Number.isInteger(cascadeId),
+    `status=${cascadeUpload.res.status} id=${cascadeId} ${JSON.stringify(cascadeUpload.body)}`,
+  );
+
+  await api(apiSite('/cover', cascadeName), { cookie: a.cookie, method: 'PUT', raw: PNG_1X1, type: 'image/png' });
+  const cascadeRowsBefore = await dbQuery('SELECT COUNT(*) AS c FROM site_covers WHERE site_id = ?', [cascadeId]);
+  check(
+    '临时站点封面已写进 site_covers',
+    Number(cascadeRowsBefore[0]?.c) === 1,
+    `id=${cascadeId} rows=${JSON.stringify(cascadeRowsBefore)}`,
+  );
+
+  const cascadeDel = await api(apiSite('', cascadeName), { cookie: a.cookie, method: 'DELETE' });
+  const cascadeRowsAfter = await dbQuery('SELECT COUNT(*) AS c FROM site_covers WHERE site_id = ?', [cascadeId]);
+  check(
+    '删除站点后封面行被级联清掉',
+    cascadeDel.body?.ok === true && Number(cascadeRowsAfter[0]?.c) === 0,
+    `ok=${JSON.stringify(cascadeDel.body)} id=${cascadeId} rows=${JSON.stringify(cascadeRowsAfter)}`,
+  );
 
   // ---------------------------------------------------------- 5. 社交
   console.log('\n社交互动');
@@ -665,6 +1079,9 @@ async function run() {
     `status=${notifications.res.status} ${JSON.stringify(notifications.body)?.slice(0, 200)}`,
   );
   check('新通知带未读状态', notifications.body?.items?.some((item) => item.unread === true));
+  // 读取即已读：列表接口自己推进游标，不需要等前端再打 /seen
+  const notificationsAgain = await api('/api/notifications', { cookie: a.cookie });
+  check('再拉一次列表已变成已读', notificationsAgain.body?.items?.every((item) => item.unread === false));
   const seen = await api('/api/notifications/seen', { cookie: a.cookie, method: 'POST' });
   check('标记通知已读成功', seen.body?.ok === true, JSON.stringify(seen.body));
   const seenAgain = await api('/api/notifications', { cookie: a.cookie });
@@ -686,6 +1103,83 @@ async function run() {
     `status=${creator.res.status} ${JSON.stringify(creatorStats)}`,
   );
   check('创作者主页带自己的站点', creator.body?.sites?.some((s) => s.name === SITE), JSON.stringify(creator.body?.sites?.map((s) => s.name)));
+
+  // ---------------------------------------------------------- 5b. 硬币投币
+  console.log('\n硬币投币');
+
+  // 注册赠币：b 是新注册账号，应该已经拿到注册币
+  const bCoins = await api('/api/coins', { cookie: b.cookie });
+  check('注册赠币已入账', bCoins.body?.balance >= 3, JSON.stringify(bCoins.body));
+  check(
+    '赠币有流水记录',
+    (bCoins.body?.ledger ?? []).some((row) => row.reason === 'register'),
+    JSON.stringify(bCoins.body?.ledger),
+  );
+
+  // 每日签到：/api/me 会发一次，同一天重复调不再发
+  const meFirst = await api('/api/me', { cookie: b.cookie });
+  const balanceAfterFirst = meFirst.body?.user?.coins ?? 0;
+  const meSecond = await api('/api/me', { cookie: b.cookie });
+  check(
+    '同一天重复访问不再发币',
+    meSecond.body?.user?.coins === balanceAfterFirst,
+    `${balanceAfterFirst} → ${meSecond.body?.user?.coins}`,
+  );
+
+  // 投币：b 给 a 的站点投 1 枚，币 1:1 进作者余额
+  const coin1 = await api(apiSite(`/coin`), { cookie: b.cookie, method: 'POST', body: { count: 1 } });
+  check('投币成功', coin1.body?.ok === true, JSON.stringify(coin1.body));
+  check(
+    '投币后投币者余额 -1',
+    coin1.body?.balance === balanceAfterFirst - 1,
+    `balance=${coin1.body?.balance} 期望=${balanceAfterFirst - 1}`,
+  );
+  const aMeAfterCoin = await api('/api/me', { cookie: a.cookie });
+  check('作者余额等额增加', (aMeAfterCoin.body?.user?.coins ?? 0) >= 1, JSON.stringify(aMeAfterCoin.body?.user?.coins));
+
+  const statAfterCoin = await api(apiSite('/stats'), { cookie: b.cookie });
+  check('站点收到硬币数 = 1', statAfterCoin.body?.stats?.coins === 1, JSON.stringify(statAfterCoin.body?.stats));
+  check('我投了几枚回显正确', statAfterCoin.body?.stats?.coined === 1, JSON.stringify(statAfterCoin.body?.stats));
+
+  // 每人每站上限 2 枚
+  const coin2 = await api(apiSite(`/coin`), { cookie: b.cookie, method: 'POST', body: { count: 1 } });
+  check('第二次投币成功', coin2.body?.ok === true, JSON.stringify(coin2.body));
+  const coin3 = await api(apiSite(`/coin`), { cookie: b.cookie, method: 'POST', body: { count: 1 } });
+  check('超过每人每站 2 枚 → 409', coin3.res.status === 409, `status=${coin3.res.status} ${JSON.stringify(coin3.body)}`);
+
+  // 数量校验：只接受 1..MAX_COINS_PER_SITE
+  const badCount = await api(apiSite(`/coin`), { cookie: b.cookie, method: 'POST', body: { count: 3 } });
+  check('一次投超过上限 → 400', badCount.res.status === 400, `status=${badCount.res.status}`);
+  const zeroCount = await api(apiSite(`/coin`), { cookie: b.cookie, method: 'POST', body: { count: 0 } });
+  check('投 0 枚 → 400', zeroCount.res.status === 400, `status=${zeroCount.res.status}`);
+
+  // 不能给自己投币
+  const selfCoin = await api(apiSite(`/coin`), { cookie: a.cookie, method: 'POST', body: { count: 1 } });
+  check('给自己投币 → 400', selfCoin.res.status === 400, `status=${selfCoin.res.status} ${JSON.stringify(selfCoin.body)}`);
+
+  // 未登录不能投
+  const anonCoin = await api(apiSite(`/coin`), { method: 'POST', body: { count: 1 } });
+  check('未登录投币 → 401', anonCoin.res.status === 401, `status=${anonCoin.res.status}`);
+
+  // 投币不可撤回：和点赞不同，没有 DELETE 接口
+  const undoCoin = await api(apiSite(`/coin`), { cookie: b.cookie, method: 'DELETE' });
+  check('投币不能撤回（DELETE 不存在）→ 404', undoCoin.res.status === 404, `status=${undoCoin.res.status}`);
+
+  // 通知：a 收到投币事件
+  const coinNotifs = await api('/api/notifications', { cookie: a.cookie });
+  check(
+    '投币事件进通知流',
+    (coinNotifs.body?.items ?? []).some((it) => it.type === 'coin'),
+    JSON.stringify((coinNotifs.body?.items ?? []).map((it) => it.type)),
+  );
+
+  // 创作者主页带「收到的硬币」
+  const creatorCoins = await api('/api/u/smoke-a/profile');
+  check(
+    '创作者主页带收到的硬币数',
+    typeof creatorCoins.body?.stats?.coinsReceived === 'number' && creatorCoins.body.stats.coinsReceived >= 2,
+    JSON.stringify(creatorCoins.body?.stats),
+  );
 
   // ---------------------------------------------------------- 6. 权限边界
   console.log('\n权限边界');
@@ -718,7 +1212,8 @@ async function run() {
   check('GET /admin 200', adminPage.res.status === 200, `status=${adminPage.res.status}`);
 
   const users = await api('/api/admin/users', { cookie: admin.cookie });
-  check('用户列表含 3 个账号', (users.body?.users?.length ?? 0) === 3, JSON.stringify(users.body?.users?.map((u) => u.email)));
+  // A/B/管理员 + 存储上限用例新开的 smoke-storage / smoke-mixed
+  check('用户列表含 5 个账号', (users.body?.users?.length ?? 0) === 5, JSON.stringify(users.body?.users?.map((u) => u.email)));
   check('用户列表不含 password_hash', !JSON.stringify(users.body).includes('password_hash'));
 
   const adminSites = await api('/api/admin/sites', { cookie: admin.cookie });
@@ -728,6 +1223,14 @@ async function run() {
     JSON.stringify(adminSites.body?.sites?.map((s) => `${s.owner_username}/${s.name}`)),
   );
   const siteId = adminSites.body?.sites?.find((s) => s.name === SITE && s.owner_username === A_NAME)?.id;
+
+  // 上传草稿是「还没传完的站」，后台不该把它当成「已下线」的站列出来（否则点「恢复」等于替用户发布）
+  const hiddenDraft = await api(apiSite('/draft', 'smoke-draft-hidden'), { cookie: a.cookie, method: 'POST' });
+  const adminSitesWithDraft = await api('/api/admin/sites', { cookie: admin.cookie });
+  check('上传草稿不出现在后台站点列表',
+    hiddenDraft.res.status === 201 && !adminSitesWithDraft.body?.sites?.some((s) => s.name === 'smoke-draft-hidden'),
+    `draft=${hiddenDraft.res.status}`);
+  await api(apiSite('', 'smoke-draft-hidden'), { cookie: a.cookie, method: 'DELETE' });
 
   const ban = await api(`/api/admin/users/${b.user.id}/status`, { body: { status: 'banned' }, cookie: admin.cookie, method: 'POST' });
   check('封禁用户成功', ban.body?.ok === true, JSON.stringify(ban.body));
@@ -744,6 +1247,135 @@ async function run() {
   check('恢复站点成功', backOnline.body?.ok === true, `status=${backOnline.res.status} ${JSON.stringify(backOnline.body)}`);
   const onlineView = await api(pageUrl());
   check('恢复后可访问', onlineView.res.status === 200, `status=${onlineView.res.status}`);
+
+  // ---------------------------------------------------------- 7b. 热门搜索
+  console.log('\n热门搜索');
+
+  const hotWord = '冒烟热词';
+
+  // 还没人搜过：榜是空的，而不是拿标签冒充
+  const hotEmpty = await api('/api/hot');
+  check('没人搜过时热搜为空', (hotEmpty.body?.words?.length ?? 0) === 0, JSON.stringify(hotEmpty.body));
+
+  // 一个人搜了不算热门（阈值是「不同的人」，不是次数）
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: a.cookie });
+  const hotOne = await api('/api/hot');
+  check(
+    '一个人搜不算热门',
+    !(hotOne.body?.words ?? []).some((w) => w.word === hotWord),
+    JSON.stringify(hotOne.body?.words),
+  );
+
+  // 同一个人再搜一遍，还不算第二个人
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: a.cookie });
+  const hotOneAgain = await api('/api/hot');
+  check(
+    '同一个人重复搜不涨人数',
+    !(hotOneAgain.body?.words ?? []).some((w) => w.word === hotWord),
+    JSON.stringify(hotOneAgain.body?.words),
+  );
+
+  // 第二个人也搜了 → 上榜
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: b.cookie });
+  const hotTwo = await api('/api/hot');
+  const hotEntry = (hotTwo.body?.words ?? []).find((w) => w.word === hotWord);
+  check('两个人搜过就上榜', Boolean(hotEntry), JSON.stringify(hotTwo.body?.words));
+  check('榜上人数是 2', hotEntry?.people === 2, JSON.stringify(hotEntry));
+
+  // 翻页不重复计数：带上 page=2 再搜一次，人数不该变
+  await api('/api/discover?q=' + encodeURIComponent(hotWord) + '&page=2', { cookie: a.cookie });
+  const hotPaged = await api('/api/hot');
+  check(
+    '翻页不重复记录',
+    (hotPaged.body?.words ?? []).find((w) => w.word === hotWord)?.people === 2,
+    JSON.stringify(hotPaged.body?.words),
+  );
+
+  // 纯数字 / URL 这类不是搜索词的，不入库
+  await api('/api/discover?q=12345', { cookie: a.cookie });
+  await api('/api/discover?q=' + encodeURIComponent('https://example.com'), { cookie: b.cookie });
+  const hotJunk = await api('/api/hot');
+  check(
+    '垃圾词不进榜',
+    !(hotJunk.body?.words ?? []).some((w) => w.word === '12345' || w.word.includes('example.com')),
+    JSON.stringify(hotJunk.body?.words),
+  );
+
+  // 匿名访客也能凑人数（靠随机 Cookie 区分），但同一次浏览器会话里不会重复计
+  const anonA = await api('/api/discover?q=' + encodeURIComponent(hotWord));
+  const anonB = await api('/api/discover?q=' + encodeURIComponent(hotWord));
+  const hotAnon = await api('/api/hot');
+  check(
+    '匿名访客的搜索也被记录',
+    (hotAnon.body?.words ?? []).find((w) => w.word === hotWord)?.people >= 3,
+    JSON.stringify(hotAnon.body?.words?.find((w) => w.word === hotWord)),
+  );
+
+  // 后台屏蔽：词从榜上消失，已有记录一起删掉，再搜也不记录
+  const block = await api('/api/admin/blocked-words', {
+    body: { note: '冒烟测试', word: hotWord }, cookie: admin.cookie, method: 'POST',
+  });
+  check('后台屏蔽热搜词成功', block.body?.ok === true, JSON.stringify(block.body));
+
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: a.cookie });
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: b.cookie });
+  const hotBlocked = await api('/api/hot');
+  check(
+    '屏蔽后榜上搜不到这个词',
+    !(hotBlocked.body?.words ?? []).some((w) => w.word === hotWord),
+    JSON.stringify(hotBlocked.body?.words),
+  );
+
+  // 屏蔽词在写入侧生效：重新积累了几轮也不会回来
+  const hotBlockedAgain = await api('/api/hot');
+  check(
+    '屏蔽后不再积累记录',
+    !(hotBlockedAgain.body?.words ?? []).some((w) => w.word === hotWord),
+    JSON.stringify(hotBlockedAgain.body?.words),
+  );
+
+  const blockedList = await api('/api/admin/blocked-words', { cookie: admin.cookie });
+  check(
+    '后台能看到屏蔽词',
+    (blockedList.body?.words ?? []).some((w) => w.word === hotWord),
+    JSON.stringify(blockedList.body?.words),
+  );
+
+  // 解封后重新开始积累（历史数据不会回来）
+  const unblock = await api('/api/admin/blocked-words/' + encodeURIComponent(hotWord), {
+    cookie: admin.cookie, method: 'DELETE',
+  });
+  check('解封成功', unblock.body?.ok === true, JSON.stringify(unblock.body));
+
+  const unblockAgain = await api('/api/admin/blocked-words/' + encodeURIComponent(hotWord), {
+    cookie: admin.cookie, method: 'DELETE',
+  });
+  check('解封不存在的词 → 404', unblockAgain.res.status === 404, `status=${unblockAgain.res.status}`);
+
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: a.cookie });
+  await api('/api/discover?q=' + encodeURIComponent(hotWord), { cookie: b.cookie });
+  const hotUnblocked = await api('/api/hot');
+  check(
+    '解封后重新上榜',
+    (hotUnblocked.body?.words ?? []).find((w) => w.word === hotWord)?.people === 2,
+    JSON.stringify(hotUnblocked.body?.words?.find((w) => w.word === hotWord)),
+  );
+
+  // 权限：非管理员碰不到屏蔽词接口
+  const notAdminBlock = await api('/api/admin/blocked-words', { cookie: b.cookie });
+  check('非管理员看屏蔽词 → 403', notAdminBlock.res.status === 403, `status=${notAdminBlock.res.status}`);
+  const anonBlock = await api('/api/admin/blocked-words');
+  check('未登录看屏蔽词 → 401', anonBlock.res.status === 401, `status=${anonBlock.res.status}`);
+  const notAdminBlockPost = await api('/api/admin/blocked-words', {
+    body: { word: '别人不能加' }, cookie: b.cookie, method: 'POST',
+  });
+  check('非管理员加屏蔽词 → 403', notAdminBlockPost.res.status === 403, `status=${notAdminBlockPost.res.status}`);
+
+  // 空词拒绝
+  const emptyBlock = await api('/api/admin/blocked-words', {
+    body: { word: '   ' }, cookie: admin.cookie, method: 'POST',
+  });
+  check('空词屏蔽 → 400', emptyBlock.res.status === 400, `status=${emptyBlock.res.status}`);
 
   // ---------------------------------------------------------- 8. 改密码与找回
   console.log('\n改密码与找回');
@@ -840,6 +1472,44 @@ async function run() {
   const backRenamed = await api('/api/account/username', { body: { username: A_NAME }, cookie: aCookie, method: 'POST' });
   check('改回原用户名', backRenamed.body?.username === A_NAME, JSON.stringify(backRenamed.body));
 
+  // ---------------------------------------------------------- 10b. 硬币换配额
+  console.log('\n硬币换配额');
+
+  // a 现在有从 b 那里收到的币，够兑换一份
+  const beforeQuota = (await api('/api/sites', { cookie: aCookie })).body?.quota ?? 0;
+  const redeem = await api('/api/coins/quota', { cookie: aCookie, method: 'POST' });
+  check('兑换配额成功', redeem.body?.ok === true, JSON.stringify(redeem.body));
+  check('配额 +1', (redeem.body?.quota ?? 0) === beforeQuota + 1, `before=${beforeQuota} after=${redeem.body?.quota}`);
+  const quotaAfterRedeem = (await api('/api/sites', { cookie: aCookie })).body?.quota;
+  check('我的站点列表配额同步', quotaAfterRedeem === beforeQuota + 1, JSON.stringify(quotaAfterRedeem));
+
+  // 余额不够兑换就拒绝
+  const bRedeem = await api('/api/coins/quota', { cookie: b.cookie, method: 'POST' });
+  check('余额不足兑换 → 402', bRedeem.res.status === 402, `status=${bRedeem.res.status} ${JSON.stringify(bRedeem.body)}`);
+
+  // ---------------------------------------------------------- 10c. ZIP 建站也要过配额
+  console.log('\nZIP 建站配额');
+
+  // 把 a 的配额占满再试 ZIP 建新站。这条之前是漏洞：ZIP 绕过 createSite 的配额检查。
+  const quotaNow = (await api('/api/sites', { cookie: aCookie })).body?.quota ?? QUOTA;
+  const existing = (await api('/api/sites', { cookie: aCookie })).body?.sites?.length ?? 0;
+  for (let i = existing; i < quotaNow; i += 1) {
+    await api('/api/upload', { body: { html: '<p>占位</p>', name: `zip-quota-fill-${i}` }, cookie: aCookie, method: 'POST' });
+  }
+  const zipOverQuota = await api(apiSite(`/zip`, 'zip-over-quota'), {
+    cookie: aCookie, method: 'POST', raw: goodZip, type: 'application/zip',
+  });
+  check(
+    'ZIP 建站超过配额 → 429',
+    zipOverQuota.res.status === 429,
+    `status=${zipOverQuota.res.status} ${JSON.stringify(zipOverQuota.body)}`,
+  );
+  const zipOverMissing = await api(apiSite('', 'zip-over-quota'), { cookie: aCookie });
+  check('超配额的 ZIP 不留半个站点', zipOverMissing.res.status === 404, `status=${zipOverMissing.res.status}`);
+  for (const s of (await api('/api/sites', { cookie: aCookie })).body?.sites ?? []) {
+    if (s.name.startsWith('zip-quota-fill-')) await api(apiSite('', s.name), { cookie: aCookie, method: 'DELETE' });
+  }
+
   // ---------------------------------------------------------- 11. 删除与级联
   console.log('\n删除与级联');
 
@@ -848,8 +1518,16 @@ async function run() {
   const files3 = await api(apiSite(`/files`), { cookie: aCookie });
   check('删除后文件列表剩 2 个', files3.body?.files?.length === 2, JSON.stringify(files3.body?.files?.map((f) => f.path)));
 
+  // 删站点：coin_charges 跟着级联清掉，但作者余额不回退——币在投出时就已经转手了
+  const aBalanceBeforeDel = (await api('/api/coins', { cookie: aCookie })).body?.balance ?? 0;
   const delSite = await api(apiSite(), { cookie: aCookie, method: 'DELETE' });
   check('删除站点成功', delSite.body?.ok === true, JSON.stringify(delSite.body));
+  const aBalanceAfterDel = (await api('/api/coins', { cookie: aCookie })).body?.balance ?? 0;
+  check(
+    '删站点不回退已收到的币',
+    aBalanceAfterDel === aBalanceBeforeDel,
+    `${aBalanceBeforeDel} → ${aBalanceAfterDel}`,
+  );
   const afterDel = await api(pageUrl());
   check('删除后访问 404', afterDel.res.status === 404, `status=${afterDel.res.status}`);
   const filesAfter = await api(apiSite(`/files`), { cookie: aCookie });

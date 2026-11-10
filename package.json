@@ -10,7 +10,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "smoke": "node scripts/api-smoke.mjs"
+    "smoke": "node scripts/api-smoke.mjs",
+    "smoke:coin": "node scripts/coin-page-smoke.mjs",
+    "smoke:hot": "node scripts/hot-page-smoke.mjs"
   },
   "dependencies": {
     "mysql2": "^3.24.5",

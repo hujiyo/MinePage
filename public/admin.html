@@ -40,6 +40,30 @@
   </section>
 
   <section class="panel">
+    <h2>热搜屏蔽词</h2>
+    <p class="muted" style="font-size:13px;margin:0 0 14px">
+      上榜的词来自用户真实的搜索。屏蔽一个词会连它已经积累的搜索记录一起删掉，下次有人搜也不会再记。
+      榜上出现人身攻击、垃圾词，或者某个词明显是被刷上去的时候，在这里处理。
+    </p>
+
+    <div id="blockedBox"></div>
+
+    <form id="blockForm" novalidate style="margin-top:14px">
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <label class="field" style="flex:1;min-width:200px;margin:0">
+          <span class="label">要屏蔽的词</span>
+          <input id="blockWord" type="text" maxlength="50" placeholder="完整的搜索词">
+        </label>
+        <label class="field" style="flex:1;min-width:200px;margin:0">
+          <span class="label">备注（可空）</span>
+          <input id="blockNote" type="text" maxlength="200" placeholder="为什么屏蔽">
+        </label>
+        <button type="submit" id="blockAdd">加入屏蔽</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
     <h2>用户</h2>
     <table>
       <thead>
@@ -491,6 +515,83 @@ bannerForm.addEventListener('submit', async (e) => {
   }
 });
 
+// ---------------------------------------------------------------- 热搜屏蔽词
+
+const blockedBox = document.getElementById('blockedBox');
+const blockForm = document.getElementById('blockForm');
+const blockWordInput = document.getElementById('blockWord');
+const blockNoteInput = document.getElementById('blockNote');
+const blockAdd = document.getElementById('blockAdd');
+
+/** 一行一个屏蔽词：词、备注、解封按钮。 */
+function renderBlocked(words) {
+  blockedBox.textContent = '';
+  if (!words.length) {
+    blockedBox.innerHTML = '<div class="empty" style="padding:12px 0">还没有屏蔽词。</div>';
+    return;
+  }
+
+  words.forEach((w) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.cssText = 'gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)';
+
+    const main = document.createElement('div');
+    main.style.cssText = 'flex:1;min-width:0';
+    const word = document.createElement('b');
+    word.textContent = w.word;
+    main.appendChild(word);
+    if (w.note) {
+      const note = document.createElement('div');
+      note.className = 'muted';
+      note.style.fontSize = '12px';
+      note.textContent = w.note;
+      main.appendChild(note);
+    }
+    row.appendChild(main);
+
+    row.appendChild(tinyButton('解封', 'ghost', async () => {
+      try {
+        await api('/api/admin/blocked-words/' + encodeURIComponent(w.word), { method: 'DELETE' });
+        showMsg(true, '已解封「' + w.word + '」');
+        await loadBlocked();
+      } catch (err) {
+        showMsg(false, err.message);
+      }
+    }));
+
+    blockedBox.appendChild(row);
+  });
+}
+
+async function loadBlocked() {
+  const data = await api('/api/admin/blocked-words');
+  renderBlocked(data.words);
+}
+
+blockForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const word = blockWordInput.value.trim();
+  if (!word) { showMsg(false, '先填一个词'); return; }
+
+  blockAdd.disabled = true;
+  try {
+    await api('/api/admin/blocked-words', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ word, note: blockNoteInput.value }),
+    });
+    blockWordInput.value = '';
+    blockNoteInput.value = '';
+    showMsg(true, '已屏蔽「' + word + '」');
+    await loadBlocked();
+  } catch (err) {
+    showMsg(false, err.message);
+  } finally {
+    blockAdd.disabled = false;
+  }
+});
+
 /**
  * 拉取后台概览并整体刷新：GET /api/me、/api/admin/users、/api/admin/sites 三个并发，
  * 写顶部统计条和两张表。启动时调一次，之后每次改动成功都会再调一次。
@@ -514,6 +615,7 @@ async function loadAll() {
     renderUsers(users.users);
     renderSites(sites.sites);
     await loadBanners();
+    await loadBlocked();
   } catch (err) {
     showMsg(false, err.message);
   }

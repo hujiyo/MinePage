@@ -1,0 +1,48 @@
+/* ---------------------------------------------------------------- 账号页硬币面板 */
+
+.coinBox {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  padding: 16px 18px;
+  margin: 14px 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.coinBig b { font-size: 30px; color: var(--pink); line-height: 1.1; }
+.coinBig span { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
+.coinMeta { display: grid; gap: 6px; color: var(--muted2); font-size: 13px; }
+.coinMeta b { color: var(--text, #333); }
+
+.coinActs {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.coinActs .hint { font-size: 12px; }
+
+.coinLedgerTitle { margin: 20px 0 8px; font-size: 14px; color: var(--muted2); font-weight: 600; }
+.coinLedger { list-style: none; margin: 0; padding: 0; }
+.coinLedger li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.coinLedger li:last-child { border-bottom: 0; }
+.coinLedger .why { flex: 1; color: var(--muted2); }
+.coinLedger .amt { font-weight: 600; font-variant-numeric: tabular-nums; }
+.coinLedger .amt.plus { color: var(--pink); }
+.coinLedger .amt.minus { color: var(--muted); }
+.coinLedger .when { color: var(--muted); font-size: 12px; }
+.coinLedger .empty { color: var(--muted); border-bottom: 0; }
+
+@media (max-width: 640px) {
+  .coinBox { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .coinActs { flex-direction: column; align-items: stretch; }
+  .coinActs button { width: 100%; }
+}

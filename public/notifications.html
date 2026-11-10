@@ -26,7 +26,7 @@ MP.topbar({ active: 'dynamic' });
 const TABS = [
   { key: 'all', label: '全部' },
   { key: 'comment', label: '回复我的' },
-  { key: 'interact', label: '赞与收藏' },
+  { key: 'interact', label: '赞与收藏投币' },
   { key: 'follow', label: '新增关注' },
 ];
 
@@ -34,6 +34,7 @@ const TYPE_TEXT = {
   like: '赞了你的页面',
   comment: '评论了你的页面',
   favorite: '收藏了你的页面',
+  coin: '给你的页面投了币',
   follow: '关注了你',
 };
 
@@ -48,7 +49,7 @@ const emptyBox = document.getElementById('empty');
 
 function match(it) {
   if (tab === 'all') return true;
-  if (tab === 'interact') return it.type === 'like' || it.type === 'favorite';
+  if (tab === 'interact') return it.type === 'like' || it.type === 'favorite' || it.type === 'coin';
   return it.type === tab;
 }
 
@@ -90,6 +91,10 @@ function renderItem(it) {
       t.appendChild(document.createTextNode(it.actor));
     }
     t.appendChild(document.createTextNode(' ' + (TYPE_TEXT[it.type] || '和你互动了')));
+    // 投币的 snippet 存的是枚数，读起来要带单位
+    if (it.type === 'coin' && it.snippet) {
+      t.appendChild(document.createTextNode(' ' + it.snippet + ' 枚'));
+    }
     if (it.type !== 'follow' && it.siteName) {
       const s = document.createElement('a');
       s.href = MP.viewUrl({ name: it.siteName, author: { username: it.siteOwner } });
@@ -101,7 +106,8 @@ function renderItem(it) {
   }
   grow.appendChild(t);
 
-  if (it.snippet) {
+  // coin 的 snippet 是枚数，上面已经拼进标题行了，不再单独占一行
+  if (it.snippet && it.type !== 'coin') {
     const d = document.createElement('div');
     d.className = 'd';
     d.textContent = it.snippet;
@@ -148,6 +154,8 @@ document.getElementById('seen').addEventListener('click', async () => {
   try {
     const data = await MP.api('/api/notifications');
     items = data.items;
+    // 列表接口已经把已读游标推到本批最新一条，顶栏那个红点当场就过期了。
+    document.querySelector('.tact[href="/notifications"] .dot')?.remove();
     render();
   } catch (err) {
     emptyBox.hidden = false;
