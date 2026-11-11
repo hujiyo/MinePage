@@ -16,18 +16,28 @@
     </div>
     <div class="wsHeadR">
       <button type="button" class="ghost tiny" id="openDraft">打开草稿</button>
+      <button type="button" class="ghost tiny" id="exportBtn">导出</button>
+      <button type="button" class="ghost tiny" id="historyBtn">历史</button>
       <button type="button" class="wsPub" id="publish">发布</button>
     </div>
   </header>
 
   <div class="wsMain">
+    <aside class="wsSide">
+      <div class="wsSideHead">
+        <span>会话</span>
+        <button type="button" class="tiny ghost" id="newThread" title="开一个新对话">＋ 新对话</button>
+      </div>
+      <div class="wsThreadList" id="threadList"></div>
+    </aside>
+
     <aside class="wsChat">
       <div class="wsMsgs" id="msgs"></div>
       <div class="wsComposer">
         <textarea id="input" rows="1" placeholder="说说要改什么…"></textarea>
         <div class="wsBar">
           <button type="button" class="iconBtn" id="plus" title="附加内容">＋</button>
-          <span class="wsModel">GLM-5.3-Flash · 适中</span>
+          <span class="wsModel" id="threadModel">未接模型</span>
           <button type="button" class="miniChip" id="skill">技能</button>
           <span class="spacer"></span>
           <button type="button" class="sendBtn" id="send" title="发送（Enter）">↑</button>
@@ -73,7 +83,7 @@
         </div>
       </div>
     </section>
-  </aside>
+  </div>
 </main>
 
 <script src="/_assets/app.js"></script>
@@ -88,6 +98,10 @@ let savedText = '';
 let dirty = false;
 let sending = false;
 
+// 会话
+let THREADS = [];
+let threadId = 0;          // 当前会话；0 表示还没选（首次进来自动落到最近一个）
+
 const msgs = document.getElementById('msgs');
 const input = document.getElementById('input');
 const send = document.getElementById('send');
@@ -100,6 +114,8 @@ const editState = document.getElementById('editState');
 const saveFile = document.getElementById('saveFile');
 const codeWrap = document.getElementById('codeWrap');
 const editEmpty = document.getElementById('editEmpty');
+const threadList = document.getElementById('threadList');
+const threadModel = document.getElementById('threadModel');
 
 if (!/^[a-z0-9-]+$/.test(NAME)) location.href = '/sites';
 
@@ -140,8 +156,8 @@ async function boot() {
   }
 
   reload();
-  loadMessages();
   loadFiles();
+  await loadThreads();
 
   // 从 /new 带过来的第一条消息：草稿已经建好，这里补发一次
   const first = sessionStorage.getItem('mp:firstMessage:' + NAME);
@@ -151,25 +167,205 @@ async function boot() {
   }
 }
 
-function loadMessages() {
-  MP.loadSiteMessages(USERNAME, NAME)
-    .then((list) => MP.renderMessages(msgs, list, '有什么想改的，直接说。'))
-    .catch(() => MP.renderMessages(msgs, [], '对话记录加载失败，可以继续发消息。'));
+/* ---------------------------------------------------------------- 会话列表 */
+
+const api = (tail) => MP.siteApiOf(USERNAME, NAME, tail);
+
+async function loadThreads() {
+  try {
+    const data = await MP.api(api('/threads'));
+    THREADS = data.threads || [];
+  } catch {
+    THREADS = [];
+  }
+
+  // 没有任何会话时自动建一个，避免用户面对一个空下拉无从下手
+  if (!THREADS.length) {
+    try {
+      const created = await MP.api(api('/threads'), { method: 'POST', body: {} });
+      THREADS = [created.thread];
+    } catch { /* 建不出来就保持空列表，下面会显示提示 */ }
+  }
+
+  // 首次进入：落到最近更新的那个会话
+  if (!threadId && THREADS.length) threadId = THREADS[0].id;
+
+  renderThreads();
+  await loadMessages();
 }
 
-/* ---------------------------------------------------------------- 发送 */
+function renderThreads() {
+  threadList.textContent = '';
+
+  if (!THREADS.length) {
+    const tip = document.createElement('div');
+    tip.className = 'wsThreadEmpty';
+    tip.textContent = '还没有会话';
+    threadList.appendChild(tip);
+    return;
+  }
+
+  THREADS.forEach((t) => {
+    const row = document.createElement('div');
+    row.className = 'wsThread' + (t.id === threadId ? ' on' : '');
+    row.dataset.id = String(t.id);
+
+    const name = document.createElement('button');
+    name.type = 'button';
+    name.className = 'wsThreadName';
+    name.textContent = t.title || '未命名会话';
+    name.title = (t.title || '未命名会话') + '（' + (t.msg_count || 0) + ' 条消息）';
+    name.addEventListener('click', () => selectThread(t.id));
+    row.appendChild(name);
+
+    const ops = document.createElement('div');
+    ops.className = 'wsThreadOps';
+
+    const rename = document.createElement('button');
+    rename.type = 'button';
+    rename.className = 'wsThreadOp';
+    rename.textContent = '改';
+    rename.title = '改会话名字';
+    rename.addEventListener('click', () => renameThread(t));
+    ops.appendChild(rename);
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'wsThreadOp danger';
+    del.textContent = '删';
+    del.title = '删掉这个会话';
+    del.addEventListener('click', () => removeThread(t));
+    ops.appendChild(del);
+
+    row.appendChild(ops);
+    threadList.appendChild(row);
+  });
+}
+
+async function selectThread(id) {
+  if (id === threadId) return;
+  if (sending) {
+    MP.toast('等这条回复出来再切会话');
+    return;
+  }
+  threadId = id;
+  renderThreads();
+  await loadMessages();
+}
+
+async function renameThread(t) {
+  const next = await MP.prompt({
+    text: '给这个会话起个名字',
+    value: t.title || '',
+    placeholder: '比如：改配色、加导航',
+  });
+  if (next === null) return;
+  const title = String(next).trim();
+  if (!title) return;
+  try {
+    await MP.api(api('/threads/' + t.id), { method: 'PUT', body: { title } });
+    t.title = title;
+    renderThreads();
+  } catch (e) {
+    MP.toast(e.message || '改名失败');
+  }
+}
+
+async function removeThread(t) {
+  const ok = await MP.ask({
+    text: '删掉会话「' + (t.title || '未命名会话') + '」？里面的对话记录会一起删掉，删了不能恢复。',
+    buttons: [
+      { key: 'cancel', label: '取消' },
+      { key: 'delete', label: '删除', primary: true },
+    ],
+  });
+  if (ok !== 'delete') return;
+
+  try {
+    await MP.api(api('/threads/' + t.id), { method: 'DELETE' });
+    THREADS = THREADS.filter((x) => x.id !== t.id);
+    if (threadId === t.id) threadId = THREADS.length ? THREADS[0].id : 0;
+    if (!THREADS.length) {
+      await loadThreads();   // 删光了就再建一个默认的
+      return;
+    }
+    renderThreads();
+    await loadMessages();
+  } catch (e) {
+    MP.toast(e.message || '删除失败');
+  }
+}
+
+document.getElementById('newThread').addEventListener('click', async () => {
+  if (sending) {
+    MP.toast('等这条回复出来再开新对话');
+    return;
+  }
+  try {
+    const created = await MP.api(api('/threads'), { method: 'POST', body: {} });
+    THREADS.unshift(created.thread);
+    threadId = created.thread.id;
+    renderThreads();
+    await loadMessages();
+    input.focus();
+  } catch (e) {
+    MP.toast(e.message || '建会话失败');
+  }
+});
+
+/* ---------------------------------------------------------------- 消息 */
+
+async function loadMessages() {
+  if (!threadId) {
+    MP.renderMessages(msgs, [], '还没有会话，点左上角「新对话」开始。');
+    return;
+  }
+  try {
+    const data = await MP.api(api('/threads/' + threadId + '/messages'));
+    MP.renderMessages(msgs, data.messages || [], '有什么想改的，直接说。');
+  } catch {
+    MP.renderMessages(msgs, [], '对话记录加载失败，可以继续发消息。');
+  }
+}
 
 async function sendMessage(text) {
   if (sending) return;
   const content = String(text == null ? input.value : text).trim();
   if (!content) return;
+  if (!threadId) {
+    MP.toast('先建一个会话');
+    return;
+  }
   sending = true;
   send.disabled = true;
   if (text == null) input.value = '';
   MP.autoGrow(input)();
 
   try {
-    await MP.pushMessage({ list: msgs, username: USERNAME, name: NAME, content });
+    await MP.pushMessage({
+      list: msgs,
+      username: USERNAME,
+      name: NAME,
+      content,
+      threadId,
+      onReply: () => {
+        // 第一条消息自动给会话起名，列表里不再全是「新对话」。
+        // 注意字段来源有两处：接口列表是 msg_count（下划线），新建返回的是 msgCount，
+        // 两个都要认，否则自动改名永远不触发。
+        const t = THREADS.find((x) => x.id === threadId);
+        const count = t ? Number(t.msg_count ?? t.msgCount ?? 0) : 0;
+        if (t && (!t.title || t.title === '新对话') && count === 0) {
+          const title = content.slice(0, 20);
+          MP.api(api('/threads/' + threadId), { method: 'PUT', body: { title } })
+            .then(() => {
+              t.title = title;
+              t.msg_count = 2;
+              renderThreads();
+            })
+            .catch(() => {});
+        }
+      },
+    });
   } catch (e) {
     MP.toast(e.message || '发送失败');
   } finally {
@@ -214,7 +410,7 @@ document.getElementById('reload').addEventListener('click', () => {
 
 async function loadFiles() {
   try {
-    const data = await MP.api(MP.siteApiOf(USERNAME, NAME, '/files'));
+    const data = await MP.api(api('/files'));
     FILES = data.files || [];
     fileList.textContent = '';
     if (!FILES.length) {
@@ -298,7 +494,7 @@ async function loadFile(path) {
   editPath.textContent = path;
 
   try {
-    const data = await MP.api(MP.siteApiOf(USERNAME, NAME, '/files/content?path=' + encodeURIComponent(path)));
+    const data = await MP.api(api('/files/content?path=' + encodeURIComponent(path)));
     if (data.binary) {
       codeWrap.hidden = true;
       editEmpty.hidden = false;
@@ -348,7 +544,7 @@ async function saveCurrent() {
   saveFile.textContent = '保存中…';
   try {
     // 文件接口按原始字节存，这里直接传文本
-    await fetch(MP.siteApiOf(USERNAME, NAME, '/files?path=' + encodeURIComponent(currentPath)), {
+    await fetch(api('/files?path=' + encodeURIComponent(currentPath)), {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
       body: code.value,
@@ -377,6 +573,126 @@ window.addEventListener('beforeunload', (e) => {
   if (!dirty) return;
   e.preventDefault();
   e.returnValue = '';
+});
+
+/* ---------------------------------------------------------------- 历史与回滚 */
+
+let snapshots = [];
+
+async function openHistory() {
+  try {
+    const data = await MP.api(api('/snapshots'));
+    snapshots = data.snapshots || [];
+  } catch (e) {
+    MP.alert(e.message || '读不到历史');
+    return;
+  }
+
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  const card = document.createElement('div');
+  card.className = 'modal historyModal';
+  card.innerHTML = ''
+    + '<button type="button" class="modal-x" aria-label="关闭">×</button>'
+    + '<h2 class="modal-title">改动历史</h2>'
+    + '<p class="hint" style="margin:0 0 12px">'
+    +   '每次改动前会自动存一份快照，点「还原」就能退回去。只记录被改动的那几个文件。'
+    + '</p>'
+    + '<div class="historyList"></div>';
+
+  const list = card.querySelector('.historyList');
+  if (!snapshots.length) {
+    const empty = document.createElement('div');
+    empty.className = 'historyEmpty';
+    empty.textContent = '还没有改动记录。';
+    list.appendChild(empty);
+  } else {
+    snapshots.forEach((s) => list.appendChild(historyRow(s, card)));
+  }
+
+  const close = () => mask.remove();
+  card.querySelector('.modal-x').addEventListener('click', close);
+  mask.addEventListener('click', (e) => { if (e.target === mask) close(); });
+  document.addEventListener('keydown', function onEsc(e) {
+    if (e.key !== 'Escape') return;
+    document.removeEventListener('keydown', onEsc);
+    close();
+  });
+
+  mask.appendChild(card);
+  document.body.appendChild(mask);
+}
+
+function historyRow(s, card) {
+  const row = document.createElement('div');
+  row.className = 'historyRow';
+
+  const info = document.createElement('div');
+  info.className = 'historyInfo';
+  const title = document.createElement('b');
+  title.textContent = s.label || '改动';
+  const meta = document.createElement('span');
+  meta.className = 'muted';
+  meta.textContent = fmtTime(s.created_at) + ' · ' + fmtSize(s.size);
+  info.appendChild(title);
+  info.appendChild(meta);
+  row.appendChild(info);
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'tiny ghost';
+  btn.textContent = '还原';
+  btn.addEventListener('click', () => restore(s, btn, card));
+  row.appendChild(btn);
+
+  return row;
+}
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso || '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function restore(snap, btn, card) {
+  const ok = await MP.ask({
+    text: '还原到「' + (snap.label || '这次改动') + '」之前的状态？\n'
+      + '当前状态会先自动存一份，点错了还能退回来。',
+    buttons: [
+      { key: 'cancel', label: '取消' },
+      { key: 'restore', label: '还原', primary: true },
+    ],
+  });
+  if (ok !== 'restore') return;
+
+  btn.disabled = true;
+  btn.textContent = '还原中…';
+  try {
+    const data = await MP.api(api('/snapshots/' + snap.id + '/restore'), { method: 'POST' });
+    card.remove();
+    document.querySelector('.modal-mask')?.remove();
+    MP.toast('已还原，刷新预览看看');
+    reload();
+    loadFiles();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '还原';
+    MP.alert(e.message || '还原失败');
+  }
+}
+
+document.getElementById('historyBtn').addEventListener('click', openHistory);
+
+/* ---------------------------------------------------------------- 导出 */
+
+document.getElementById('exportBtn').addEventListener('click', () => {
+  if (dirty) {
+    MP.alert('先把代码保存了再导出');
+    return;
+  }
+  // 走浏览器原生下载：后端已经设了 Content-Disposition: attachment
+  location.href = api('/export');
 });
 
 /* ---------------------------------------------------------------- 发布 */

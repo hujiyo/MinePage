@@ -42,11 +42,12 @@
     return data.messages || [];
   };
 
-  /** 发一条消息；服务端同时落库用户消息与 agent 占位回复，一起返回。 */
-  MP.sendSiteMessage = function (username, name, content) {
+  /** 发一条消息；服务端同时落库用户消息与 agent 占位回复，一起返回。
+   *  threadId 给了就挂到那个会话上，不给就落到最近一个会话。 */
+  MP.sendSiteMessage = function (username, name, content, threadId) {
     return MP.api(MP.siteApiOf(username, name, '/messages'), {
       method: 'POST',
-      body: { content },
+      body: threadId ? { content, threadId } : { content },
     });
   };
 
@@ -228,6 +229,59 @@
 
   MP.alert = function (text) {
     return MP.ask({ text });
+  };
+
+  /**
+   * 单行输入小弹窗（改名字这类场景）。
+   * @param {{text:string, value?:string, placeholder?:string, okLabel?:string}} opt
+   * @returns {Promise<string|null>} 输入的值；取消 / Esc / 点遮罩返回 null
+   */
+  MP.prompt = function (opt) {
+    const o = opt || {};
+    return new Promise((resolve) => {
+      const mask = document.createElement('div');
+      mask.className = 'askMask';
+      const card = document.createElement('div');
+      card.className = 'askCard';
+      card.innerHTML = '<div class="askText"></div>'
+        + '<input class="askInput" type="text" autocomplete="off" spellcheck="false">'
+        + '<div class="askBtns"></div>';
+      card.querySelector('.askText').textContent = o.text || '';
+
+      const field = card.querySelector('.askInput');
+      field.value = o.value ?? '';
+      if (o.placeholder) field.placeholder = o.placeholder;
+
+      let settled = false;
+      const done = (value) => {
+        if (settled) return;
+        settled = true;
+        mask.remove();
+        document.removeEventListener('keydown', onKey);
+        resolve(value);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') done(null);
+        if (e.key === 'Enter') { e.preventDefault(); done(field.value); }
+      };
+
+      [{ key: 'cancel', label: '取消', primary: false },
+        { key: 'ok', label: o.okLabel || '确定', primary: true }].forEach((b) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = b.primary ? 'askBtn primary' : 'askBtn ghost';
+        btn.textContent = b.label;
+        btn.addEventListener('click', () => done(b.primary ? field.value : null));
+        card.querySelector('.askBtns').appendChild(btn);
+      });
+
+      mask.appendChild(card);
+      mask.addEventListener('click', (e) => { if (e.target === mask) done(null); });
+      document.addEventListener('keydown', onKey);
+      document.body.appendChild(mask);
+      field.focus();
+      field.select();
+    });
   };
 
   /* ----------------------------------------------------------
@@ -522,7 +576,7 @@
    * 失败时把乐观气泡标红并给出原因（保留输入内容，用户不用重打）。
    */
   MP.pushMessage = async function (opt) {
-    const { list, username, name, content } = opt;
+    const { list, username, name, content, threadId } = opt;
     const pending = MP.bubble('user', content, true);
     if (list) {
       const empty = list.querySelector('.chatEmpty');
@@ -531,7 +585,7 @@
       list.scrollTop = list.scrollHeight;
     }
     try {
-      const data = await MP.sendSiteMessage(username, name, content);
+      const data = await MP.sendSiteMessage(username, name, content, threadId);
       pending.classList.remove('pending');
       if (list && data.agent) {
         list.appendChild(MP.bubble('agent', data.agent.content));

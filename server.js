@@ -16,6 +16,7 @@ import {
   MAX_SITE_TOTAL_BYTES,
   MAX_ZIP_BYTES,
   MAX_COVER_BYTES,
+  MAX_EXPORT_BYTES,
   MAX_USER_TOTAL_BYTES,
   DRAFT_TTL_HOURS,
   SESSION_COOKIE,
@@ -70,10 +71,14 @@ import {
   countSiteFiles,
   countSites,
   createSite,
+  createThread,
   deleteSite,
+  deleteThread,
+  ensureDefaultThread,
   findSiteByUsername,
   findSiteHeaderById,
   findSiteHeaderByUsername,
+  findThread,
   getSiteFile,
   isValidSitePath,
   isValidSiteTag,
@@ -82,6 +87,8 @@ import {
   listSiteFiles,
   listSiteMessages,
   listSitesByOwner,
+  listThreadMessages,
+  listThreads,
   openSiteDraft,
   publishDraft,
   publishDraftSite,
@@ -92,11 +99,27 @@ import {
   siteTagLabel,
   updateSiteHtml,
   updateSiteMeta,
+  updateThread,
   upsertSiteFile,
   userContentBytes,
   SITE_TAGS,
 } from './lib/sites.js';
 import { parseZip } from './lib/zip.js';
+import { buildZip, withDirs } from './lib/zip-writer.js';
+import {
+  createSnapshotCollector,
+  getSnapshot,
+  listSnapshots,
+  restoreSnapshot,
+  snapshotBeforeRestore,
+} from './lib/agent/snapshot.js';
+import {
+  AGENT_TOOL_NAMES,
+  AgentToolError,
+  runAgentTool,
+  toolCatalog,
+  toolSchemas,
+} from './lib/agent/tools.js';
 import { getSiteCover, removeSiteCover, setSiteCover, siteHasCover } from './lib/covers.js';
 import {
   createBanner,
@@ -1654,13 +1677,29 @@ async function ownDraftOrRespond(req, res, user, username, name) {
   return site;
 }
 
-/** GET /api/sites/:用户名/:站名/messages：工作区对话记录。 */
+/** GET /api/sites/:用户名/:站名/messages：工作区对话记录。
+ *  不带 ?thread= 时取最近一个会话（兼容老前端），带上就取指定会话。 */
 async function handleSiteMessagesList(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
   const site = await ownDraftOrRespond(req, res, user, username, name);
   if (!site) return;
+
+  const threadId = Number(new URL(req.url, 'http://internal').searchParams.get('thread') ?? 0);
+  if (threadId) {
+    const thread = await findThread(site.id, threadId);
+    if (!thread) {
+      sendJson(res, 404, { ok: false, message: '这个会话不存在' });
+      return;
+    }
+    sendJson(res, 200, {
+      ok: true,
+      thread,
+      messages: await listThreadMessages(threadId, SITE_MESSAGES_KEEP),
+    });
+    return;
+  }
 
   sendJson(res, 200, {
     ok: true,
@@ -1671,6 +1710,7 @@ async function handleSiteMessagesList(req, res, [username, name]) {
 /**
  * POST /api/sites/:用户名/:站名/messages：追加一条用户消息。
  * 本轮 agent 只回一句占位话（不接模型），一起入库，刷新后对话还在。
+ * 带 threadId 时消息挂到那个会话上；不带就落到最近一个会话（没有就建一个）。
  */
 async function handleSiteMessageAdd(req, res, [username, name]) {
   const user = await requireLogin(req, res);
@@ -1692,14 +1732,298 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
     return;
   }
 
-  const mine = await addSiteMessage(site.id, 'user', content);
+  let thread;
+  if (body.threadId) {
+    thread = await findThread(site.id, Number(body.threadId));
+    if (!thread) {
+      sendJson(res, 404, { ok: false, message: '这个会话不存在' });
+      return;
+    }
+  } else {
+    thread = await ensureDefaultThread(site.id);
+  }
+
+  const mine = await addSiteMessage(site.id, 'user', content, thread.id);
   const reply = await addSiteMessage(
     site.id,
     'agent',
     '（占位回复）已开始生成…',
+    thread.id,
   );
 
-  sendJson(res, 201, { ok: true, user: mine, agent: reply });
+  sendJson(res, 201, { ok: true, threadId: thread.id, user: mine, agent: reply });
+}
+
+// ---------------------------------------------------------------- 会话（thread）
+
+/** 把「会话不存在 / 不属于这个站」统一成一次 404。 */
+async function threadOrRespond(res, site, threadId) {
+  const thread = await findThread(site.id, Number(threadId));
+  if (!thread) {
+    sendJson(res, 404, { ok: false, message: '这个会话不存在' });
+    return null;
+  }
+  return thread;
+}
+
+/** GET /api/sites/:u/:n/threads：列出一个草稿的全部会话。 */
+async function handleThreadsList(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const threads = await listThreads(site.id);
+  sendJson(res, 200, { ok: true, threads });
+}
+
+/** POST /api/sites/:u/:n/threads：新建会话（title / model 都可选）。 */
+async function handleThreadCreate(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const title = String(body.title ?? '').trim().slice(0, 120);
+  const model = String(body.model ?? '').trim().slice(0, 40);
+  const thread = await createThread(site.id, { title, model });
+
+  sendJson(res, 201, { ok: true, thread });
+}
+
+/** PUT /api/sites/:u/:n/threads/:id：改标题 / 换模型。 */
+async function handleThreadUpdate(req, res, [username, name, id]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const thread = await threadOrRespond(res, site, id);
+  if (!thread) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const patch = {};
+  if (body.title !== undefined) {
+    const title = String(body.title).trim().slice(0, 120);
+    if (!title) {
+      sendJson(res, 400, { ok: false, message: '标题不能是空的' });
+      return;
+    }
+    patch.title = title;
+  }
+  if (body.model !== undefined) patch.model = String(body.model).trim().slice(0, 40);
+
+  await updateThread(thread.id, patch);
+  sendJson(res, 200, { ok: true, thread: await findThread(site.id, thread.id) });
+}
+
+/** DELETE /api/sites/:u/:n/threads/:id：删会话，消息跟着级联删。 */
+async function handleThreadDelete(req, res, [username, name, id]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const thread = await threadOrRespond(res, site, id);
+  if (!thread) return;
+
+  await deleteThread(thread.id);
+  sendJson(res, 200, { ok: true });
+}
+
+/** GET /api/sites/:u/:n/threads/:id/messages：指定会话的消息。 */
+async function handleThreadMessages(req, res, [username, name, id]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const thread = await threadOrRespond(res, site, id);
+  if (!thread) return;
+
+  sendJson(res, 200, {
+    ok: true,
+    thread,
+    messages: await listThreadMessages(thread.id, SITE_MESSAGES_KEEP),
+  });
+}
+
+// ---------------------------------------------------------------- 快照与回滚
+
+/** GET /api/sites/:u/:n/snapshots：改动历史（新的在前，不含文件内容）。 */
+async function handleSnapshotsList(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  sendJson(res, 200, { ok: true, snapshots: await listSnapshots(site.id) });
+}
+
+/** POST /api/sites/:u/:n/snapshots/:id/restore：回滚到某个快照。 */
+async function handleSnapshotRestore(req, res, [username, name, id]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const snap = await getSnapshot(site.id, Number(id));
+  if (!snap) {
+    sendJson(res, 404, { ok: false, message: '没有这个快照' });
+    return;
+  }
+
+  try {
+    // 回滚前先把「即将被覆盖的当前状态」也存一份，点错了还能再退回来
+    const safety = await snapshotBeforeRestore(site.id, snap.threadId, snap);
+    const result = await restoreSnapshot(site.id, snap.id);
+    sendJson(res, 200, {
+      ok: true,
+      ...result,
+      safetySnapshotId: safety && safety.id ? safety.id : null,
+    });
+  } catch (err) {
+    console.error('[snapshot-restore]', err);
+    sendJson(res, 500, { ok: false, message: err.message || '回滚失败' });
+  }
+}
+
+// ---------------------------------------------------------------- 导出
+
+/** GET /api/sites/:u/:n/export：把整站打成 zip 下载（草稿和正式站都能导）。 */
+async function handleSiteExport(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownSiteOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const list = await listSiteFiles(site.id);
+  if (list.length === 0) {
+    // 老的「单 HTML 站」内容存在 sites.html 里，没有 site_files
+    const legacy = await findSiteByUsername(username, name);
+    if (legacy && legacy.html && legacy.html.trim() !== '') {
+      const buf = buildZip([{ path: 'index.html', content: Buffer.from(legacy.html, 'utf8') }]);
+      sendZip(res, `${name}.zip`, buf);
+      return;
+    }
+    sendJson(res, 404, { ok: false, message: '这个站点还没有文件可以导出' });
+    return;
+  }
+
+  const entries = [];
+  let total = 0;
+  for (const f of list) {
+    const content = await getSiteFile(site.id, f.path);
+    if (content === null) continue;
+    total += content.length;
+    // 单次导出上限：再大就是几十分钟的下载，用户也不会用浏览器下这么大的站
+    if (total > MAX_EXPORT_BYTES) {
+      sendJson(res, 413, {
+        ok: false,
+        message: `站点太大了（超过 ${Math.round(MAX_EXPORT_BYTES / 1024 / 1024)} MB），暂时不支持在线导出`,
+      });
+      return;
+    }
+    entries.push({ path: f.path, content });
+  }
+
+  const buf = buildZip(withDirs(entries));
+  sendZip(res, `${name}.zip`, buf);
+}
+
+/** 下发一个 zip 响应（附件下载）。 */
+function sendZip(res, filename, buf) {
+  // 文件名可能含中文，按 RFC 6266 走 filename*= 形式，老浏览器退回 ASCII 版
+  const ascii = String(filename).replace(/[^\x20-\x7e]/g, '_');
+  res.writeHead(200, {
+    'Content-Type': 'application/zip',
+    'Content-Length': buf.length,
+    'Content-Disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.end(buf);
+}
+
+// ---------------------------------------------------------------- 工具集（给前端/调试用）
+
+/** GET /api/agent/tools：agent 能用哪些工具。不接模型也能先看到清单。 */
+async function handleAgentTools(req, res) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  sendJson(res, 200, {
+    ok: true,
+    tools: toolCatalog(),
+    // 接入模型时直接把这个塞进请求体的 tools 字段
+    schemas: toolSchemas(),
+    names: AGENT_TOOL_NAMES,
+  });
+}
+
+/**
+ * POST /api/sites/:u/:n/agent/tool：手动执行一个工具（不经过模型）。
+ *
+ * 这条接口的用途有两个，都很实际：
+ *   1. 接模型之前，用它验证工具本身对不对（改文件、看快照、回滚）；
+ *   2. 前端以后要做「手动操作」按钮时，直接复用同一套工具实现。
+ * 它和 agent 循环走的是**完全相同的代码路径**，所以验证过就等于 agent 的工具有效。
+ */
+async function handleAgentToolRun(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const toolName = String(body.tool ?? '').trim();
+  const args = body.args && typeof body.args === 'object' ? body.args : {};
+  if (!AGENT_TOOL_NAMES.includes(toolName)) {
+    sendJson(res, 400, {
+      ok: false,
+      message: `没有这个工具：${toolName}。可用：${AGENT_TOOL_NAMES.join(', ')}`,
+    });
+    return;
+  }
+
+  const threadId = body.threadId ? Number(body.threadId) : null;
+  const thread = threadId ? await findThread(site.id, threadId) : null;
+  const snapshot = createSnapshotCollector({ siteId: site.id, threadId: thread ? thread.id : null });
+
+  try {
+    const result = await runAgentTool(toolName, args, {
+      siteId: site.id,
+      userId: user.id,
+      snapshot,
+    });
+    const saved = await snapshot.commit(`手动执行 ${toolName}`);
+    sendJson(res, 200, { ok: true, tool: toolName, result, snapshot: saved });
+  } catch (err) {
+    // 失败也要落快照：前面可能已经成功写了别的文件
+    await snapshot.commit(`手动执行 ${toolName}（失败）`).catch(() => {});
+    if (err instanceof AgentToolError) {
+      sendJson(res, 400, { ok: false, message: err.message });
+      return;
+    }
+    console.error('[agent-tool]', err);
+    sendJson(res, 500, { ok: false, message: err.message || '工具执行失败' });
+  }
 }
 
 // ---------------------------------------------------------------- 卡片自定义封面
@@ -3027,6 +3351,20 @@ const ROUTES = [
   ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/files$`), handleSiteFileDelete],
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/messages$`), handleSiteMessagesList],
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/messages$`), handleSiteMessageAdd],
+  // 工作区会话：一个草稿下可以有多条对话
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads$`), handleThreadsList],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads$`), handleThreadCreate],
+  ['PUT', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)$`), handleThreadUpdate],
+  ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)$`), handleThreadDelete],
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)\\/messages$`), handleThreadMessages],
+  // 改动快照与回滚
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/snapshots$`), handleSnapshotsList],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/snapshots\\/(\\d+)\\/restore$`), handleSnapshotRestore],
+  // 整站导出
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/export$`), handleSiteExport],
+  // agent 工具集：接模型之前也能手动验证工具是否好用
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/agent\\/tool$`), handleAgentToolRun],
+  ['GET', /^\/api\/agent\/tools$/, handleAgentTools],
   // 卡片自定义封面：GET 公开（卡片匿名可见），PUT/DELETE 走「作者或管理员」
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverImage],
   ['PUT', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverUpload],

@@ -2235,6 +2235,18 @@ code.token {
   animation: modalIn .16s ease-out;
 }
 .askText { font-size: 14px; color: var(--text); line-height: 1.7; margin-bottom: 18px; white-space: pre-wrap; }
+.askInput {
+  width: 100%;
+  margin: -6px 0 16px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel2);
+  font-family: inherit;
+  font-size: 13px;
+  outline: 0;
+}
+.askInput:focus { border-color: var(--pink); background: var(--panel); }
 .askBtns { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
 .askBtn {
   padding: 7px 16px;
@@ -2491,6 +2503,84 @@ code.token {
 
 .wsMain { flex: 1; display: flex; min-height: 0; }
 
+/* 会话栏：一个草稿可以有多条对话，这里列出来 */
+.wsSide {
+  flex: none;
+  width: 200px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel2);
+  border-right: 1px solid var(--border);
+}
+.wsSideHead {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 10px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted2);
+}
+.wsSideHead button { padding: 3px 8px; font-size: 11px; }
+.wsThreadList {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.wsThread {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 8px;
+  padding: 0 2px;
+}
+.wsThread:hover { background: var(--panel); }
+.wsThread.on { background: var(--panel); box-shadow: inset 2px 0 0 var(--pink); }
+.wsThreadName {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 6px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.wsThread.on .wsThreadName { font-weight: 600; }
+.wsThreadOps { display: flex; flex: none; gap: 1px; opacity: 0; transition: opacity .15s; }
+.wsThread:hover .wsThreadOps,
+.wsThread.on .wsThreadOps { opacity: 1; }
+.wsThreadOp {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.wsThreadOp:hover { background: var(--panel2); color: var(--pink); }
+.wsThreadOp.danger:hover { color: var(--danger); }
+.wsThreadEmpty {
+  padding: 20px 8px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* 左：对话栏 */
 .wsChat {
   flex: none;
@@ -2722,9 +2812,51 @@ code.token {
 }
 .wsCodeWrap textarea#code:focus { border: 0; }
 
+/* 历史面板：列出每次改动前的快照，可逐条还原 */
+.historyModal { width: 560px; padding: 22px 24px 18px; }
+.historyList {
+  max-height: 52vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.historyRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel2);
+}
+.historyInfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.historyInfo b {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.historyInfo span { font-size: 11px; }
+.historyEmpty {
+  padding: 30px 10px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* 窄屏：对话栏收到上面，预览占满 */
 @media (max-width: 880px) {
   .wsMain { flex-direction: column; }
+  .wsSide {
+    width: 100%;
+    max-height: 132px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .wsThreadList { flex-direction: row; flex-wrap: wrap; }
+  .wsThread { flex: none; max-width: 46%; }
   .wsChat {
     width: 100%;
     height: 46vh;
@@ -2735,6 +2867,7 @@ code.token {
   .wsFiles { width: 150px; }
   .studioHead { flex-wrap: wrap; }
   .pubModal { width: 100%; }
+  .historyModal { width: 100%; }
   .homeGrid { grid-template-columns: 1fr; }
   .homeSide { position: static; }
 }

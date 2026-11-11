@@ -173,6 +173,15 @@ function renderDrafts() {
     del.addEventListener('click', () => removeDraft(d, del));
     body.appendChild(del);
 
+    // 导出：把整站打成 zip 下载，和正式站导出的格式一致
+    const exp = document.createElement('button');
+    exp.type = 'button';
+    exp.className = 'tiny ghost draftDel';
+    exp.textContent = '导出';
+    exp.title = '把整站打包成 zip 下载';
+    exp.addEventListener('click', () => exportDraft(d));
+    body.appendChild(exp);
+
     card.appendChild(body);
     draftGrid.appendChild(card);
 
@@ -214,6 +223,11 @@ async function removeDraft(draft, btn) {
  */
 function previewDraft(draft) {
   window.open(MP.draftUrl(MY.username, draft.name), '_blank', 'noopener');
+}
+
+/** 导出草稿：直接走浏览器下载，后端已经设了 Content-Disposition: attachment。 */
+function exportDraft(draft) {
+  location.href = MP.siteApiOf(MY.username, draft.name, '/export');
 }
 
 /** 打开发布弹窗；草稿只在服务端保留，发布成功/关窗都回来刷一遍卡片。 */
