@@ -2501,7 +2501,86 @@ code.token {
 }
 .wsPub { padding: 6px 18px; font-size: 13px; }
 
+/* 折叠按钮：图标是一个「左栏 + 右栏」的方框，收起后左边那条变空心。
+   位置在返回键右边，和常见编辑器（VS Code / Cursor）一致。 */
+.wsToggle {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted2);
+  cursor: pointer;
+}
+.wsToggle:hover { background: var(--panel2); color: var(--text); }
+.wsToggleIcon {
+  width: 15px;
+  height: 13px;
+  border: 1.6px solid currentColor;
+  border-radius: 3px;
+  position: relative;
+  display: block;
+}
+/* 左栏那条竖条：展开时是实心的（表示「会话栏在这儿」），收起后消失只剩外框。
+   这样图标本身就说清了当前状态，不用靠记忆去猜。 */
+.wsToggleIcon::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: currentColor;
+  transition: opacity .16s ease;
+}
+.wsToggle.collapsed .wsToggleIcon::before { opacity: 0; }
+
 .wsMain { flex: 1; display: flex; min-height: 0; }
+
+/* 两栏之间的拖条：平时透明，hover 才显形；拖的时候整页锁光标 */
+.wsGrip {
+  flex: none;
+  width: 6px;
+  margin: 0 -3px;
+  position: relative;
+  z-index: 5;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+.wsGrip::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: transparent;
+  transition: background .15s;
+}
+.wsGrip:hover::after,
+.wsGrip.on::after { background: var(--pink); }
+.wsGrip[hidden] { display: none; }
+
+/* 拖动中：整页不让选中文字，鼠标一直是 col-resize */
+body.dragging { cursor: col-resize; user-select: none; }
+body.dragging * { cursor: col-resize !important; }
+/* 拖动时预览里的 iframe 会吃掉鼠标事件，pointer-events:none 让它别捣乱 */
+body.dragging .wsFrame { pointer-events: none; }
+.wsFrame.resizing { pointer-events: none; }
+
+/* 收起会话栏：宽度归零、内容一起藏掉 */
+.wsMain.sideHidden .wsSide {
+  width: 0 !important;
+  overflow: hidden;
+  visibility: hidden;
+  border-right: 0;
+}
 
 /* 会话栏：一个草稿可以有多条对话，这里列出来 */
 .wsSide {
@@ -2846,11 +2925,12 @@ code.token {
   font-size: 12px;
 }
 
-/* 窄屏：对话栏收到上面，预览占满 */
+/* 窄屏：三栏改成上下堆叠，拖条这时候没有意义，藏掉 */
 @media (max-width: 880px) {
   .wsMain { flex-direction: column; }
+  .wsGrip { display: none; }
   .wsSide {
-    width: 100%;
+    width: auto !important;
     max-height: 132px;
     border-right: 0;
     border-bottom: 1px solid var(--border);
@@ -2858,7 +2938,7 @@ code.token {
   .wsThreadList { flex-direction: row; flex-wrap: wrap; }
   .wsThread { flex: none; max-width: 46%; }
   .wsChat {
-    width: 100%;
+    width: auto !important;
     height: 46vh;
     border-right: 0;
     border-bottom: 1px solid var(--border);

@@ -11,6 +11,9 @@
   <header class="wsHead">
     <div class="wsHeadL">
       <a class="wsBack" href="/sites" title="回创作页">←</a>
+      <button type="button" class="wsToggle" id="sideToggle" title="收起会话栏 Ctrl+B" aria-label="收起会话栏">
+        <span class="wsToggleIcon" aria-hidden="true"></span>
+      </button>
       <span class="wsTitle" id="wsTitle">草稿</span>
       <span class="badge" id="wsBadge">草稿</span>
     </div>
@@ -23,7 +26,7 @@
   </header>
 
   <div class="wsMain">
-    <aside class="wsSide">
+    <aside class="wsSide" id="wsSide">
       <div class="wsSideHead">
         <span>会话</span>
         <button type="button" class="tiny ghost" id="newThread" title="开一个新对话">＋ 新对话</button>
@@ -31,7 +34,10 @@
       <div class="wsThreadList" id="threadList"></div>
     </aside>
 
-    <aside class="wsChat">
+    <div class="wsGrip" id="gripSide" role="separator" aria-orientation="vertical"
+         title="拖动调整会话栏宽度，双击恢复默认"></div>
+
+    <aside class="wsChat" id="wsChat">
       <div class="wsMsgs" id="msgs"></div>
       <div class="wsComposer">
         <textarea id="input" rows="1" placeholder="说说要改什么…"></textarea>
@@ -44,6 +50,9 @@
         </div>
       </div>
     </aside>
+
+    <div class="wsGrip" id="gripChat" role="separator" aria-orientation="vertical"
+         title="拖动调整对话栏宽度，双击恢复默认"></div>
 
     <section class="wsPane">
       <div class="wsTabs">
@@ -116,11 +125,163 @@ const codeWrap = document.getElementById('codeWrap');
 const editEmpty = document.getElementById('editEmpty');
 const threadList = document.getElementById('threadList');
 const threadModel = document.getElementById('threadModel');
+const wsSide = document.getElementById('wsSide');
+const wsChat = document.getElementById('wsChat');
+const gripSide = document.getElementById('gripSide');
+const gripChat = document.getElementById('gripChat');
+const sideToggle = document.getElementById('sideToggle');
 
 if (!/^[a-z0-9-]+$/.test(NAME)) location.href = '/sites';
 
 MP.topbar({ active: 'create' });
 MP.autoGrow(input);
+
+/* ---------------------------------------------------------------- 三栏宽度与折叠 */
+
+// 三块区域的宽度记在 localStorage：同一台机器上换个草稿进来还是自己调好的比例。
+// 只存 px 不存百分比：窗口缩放时按百分比换算会让「我调好的对话栏」忽然变宽变窄。
+const LAYOUT_KEY = 'mp.wsLayout';
+const LAYOUT_DEFAULT = { side: 200, chat: 380, sideHidden: false };
+const SIDE_MIN = 140;
+const CHAT_MIN = 280;
+const PANE_MIN = 320;   // 预览区至少留这么宽，否则调宽度时会把预览挤没
+
+let layout = { ...LAYOUT_DEFAULT };
+
+function readLayout() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAYOUT_KEY) || '{}');
+    const pick = (v, def, min) => (Number.isFinite(v) ? Math.max(min, Math.round(v)) : def);
+    return {
+      side: pick(raw.side, LAYOUT_DEFAULT.side, SIDE_MIN),
+      chat: pick(raw.chat, LAYOUT_DEFAULT.chat, CHAT_MIN),
+      sideHidden: Boolean(raw.sideHidden),
+    };
+  } catch {
+    return { ...LAYOUT_DEFAULT };
+  }
+}
+
+function saveLayout() {
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); } catch { /* 无痕模式等 */ }
+}
+
+/** 把当前 layout 应用到 DOM 上。折叠时侧栏宽度归零、拖条一起藏起来。 */
+function applyLayout() {
+  document.querySelector('.wsMain').classList.toggle('sideHidden', layout.sideHidden);
+  wsSide.style.width = layout.sideHidden ? '0px' : layout.side + 'px';
+  wsChat.style.width = layout.chat + 'px';
+  gripSide.hidden = layout.sideHidden;
+  syncToggle();
+}
+
+function syncToggle() {
+  sideToggle.classList.toggle('collapsed', layout.sideHidden);
+  const label = layout.sideHidden ? '展开会话栏 Ctrl+B' : '收起会话栏 Ctrl+B';
+  sideToggle.title = label;
+  sideToggle.setAttribute('aria-label', label);
+}
+
+function setSideHidden(hidden) {
+  layout.sideHidden = hidden;
+  applyLayout();
+  saveLayout();
+}
+
+sideToggle.addEventListener('click', () => setSideHidden(!layout.sideHidden));
+
+document.addEventListener('keydown', (e) => {
+  // Ctrl+B / Cmd+B：和大多数编辑器一致
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'b' || e.key === 'B')) {
+    e.preventDefault();
+    setSideHidden(!layout.sideHidden);
+  }
+});
+
+/**
+ * 给一根拖条装上左右拖动。
+ * @param {HTMLElement} grip 拖条
+ * @param {HTMLElement} target 要改宽度的栏
+ * @param {'side'|'chat'} key layout 里对应的字段
+ * @param {number} min 这栏的最小宽度
+ * @param {(delta:number)=>number} maxOf 这栏最多能拉多宽（要扣掉旁边几栏）
+ */
+function bindGrip(grip, target, key, min, maxOf) {
+  let dragging = false;
+  let startX = 0;
+  let startW = 0;
+
+  const onMove = (e) => {
+    if (!dragging) return;
+    const x = e.touches ? e.touches[0].clientX : e.clientX;
+    const next = Math.min(Math.max(startW + (x - startX), min), maxOf(x));
+    target.style.width = next + 'px';
+    layout[key] = Math.round(next);
+    // 拖动过程中实时重算预览缩放
+    frame.classList.add('resizing');
+  };
+
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    grip.classList.remove('on');
+    document.body.classList.remove('dragging');
+    frame.classList.remove('resizing');
+    saveLayout();
+  };
+
+  const onDown = (e) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    dragging = true;
+    startX = e.touches ? e.touches[0].clientX : e.clientX;
+    startW = target.getBoundingClientRect().width;
+    grip.classList.add('on');
+    document.body.classList.add('dragging');
+    e.preventDefault();
+  };
+
+  grip.addEventListener('mousedown', onDown);
+  grip.addEventListener('touchstart', onDown, { passive: false });
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('touchmove', onMove, { passive: false });
+  document.addEventListener('mouseup', onUp);
+  document.addEventListener('touchend', onUp);
+
+  // 双击恢复默认宽度
+  grip.addEventListener('dblclick', () => {
+    layout[key] = LAYOUT_DEFAULT[key];
+    applyLayout();
+    saveLayout();
+  });
+}
+
+function initLayout() {
+  layout = readLayout();
+  applyLayout();
+
+  bindGrip(gripSide, wsSide, 'side', SIDE_MIN, () => {
+    // 会话栏最多拉到「整个主区减去对话栏最小值、预览最小值、两根拖条」
+    const total = document.querySelector('.wsMain').getBoundingClientRect().width;
+    return Math.max(SIDE_MIN, total - layout.chat - PANE_MIN - 12);
+  });
+
+  bindGrip(gripChat, wsChat, 'chat', CHAT_MIN, () => {
+    const total = document.querySelector('.wsMain').getBoundingClientRect().width;
+    const sideW = layout.sideHidden ? 0 : layout.side;
+    return Math.max(CHAT_MIN, total - sideW - PANE_MIN - 12);
+  });
+
+  // 窗口变小有可能把预览挤到看不见：收一下对话栏，别去动用户主动调的会话栏
+  window.addEventListener('resize', () => {
+    const total = document.querySelector('.wsMain').getBoundingClientRect().width;
+    const sideW = layout.sideHidden ? 0 : layout.side;
+    const avail = total - sideW - PANE_MIN - 12;
+    if (layout.chat > avail && avail >= CHAT_MIN) {
+      layout.chat = Math.round(avail);
+      applyLayout();
+    }
+  });
+}
 
 /* ---------------------------------------------------------------- 顶栏与预览 */
 
@@ -716,6 +877,7 @@ document.getElementById('openDraft').addEventListener('click', () => {
   window.open(MP.draftUrl(USERNAME, NAME), '_blank', 'noopener');
 });
 
+initLayout();
 boot();
 </script>
 </body>
