@@ -672,6 +672,23 @@ async function sendMessage(text) {
   if (text == null) input.value = '';
   MP.autoGrow(input)();
 
+  // 跑的过程中发送按钮变成「停止」：同一个按钮两种状态，
+  // 用户不用去找另一个停的地方（这也是 ChatGPT / Cursor 的做法）
+  let stopper = null;
+  const enterRunning = () => {
+    send.disabled = false;
+    send.classList.add('stopping');
+    send.textContent = '■';
+    send.title = '停止生成（Esc）';
+  };
+  const exitRunning = () => {
+    send.classList.remove('stopping');
+    send.textContent = '↑';
+    send.title = '发送（Enter）';
+    send.disabled = false;
+    stopper = null;
+  };
+
   try {
     await MP.pushMessage({
       list: msgs,
@@ -679,8 +696,10 @@ async function sendMessage(text) {
       name: NAME,
       content,
       threadId,
-      // 任务开跑：把模型名放进底部那行，用户可以确认「这轮用的是谁」
-      onStarted: (data) => {
+      // 任务开跑：按钮切成停止态，把模型名放进底部那行
+      onStarted: (data, ctl) => {
+        stopper = ctl;
+        enterRunning();
         if (data.model && data.model.label) {
           threadModel.textContent = data.model.label;
         }
@@ -710,12 +729,24 @@ async function sendMessage(text) {
     MP.toast(e.message || '发送失败');
   } finally {
     sending = false;
-    send.disabled = false;
+    exitRunning();
     input.focus();
   }
 }
 
-send.addEventListener('click', () => sendMessage(null));
+// 发送键兼任停止键
+send.addEventListener('click', () => {
+  if (stopper) { stopper.cancel(); return; }
+  sendMessage(null);
+});
+
+// Esc 也能停：手在键盘上时不用去够按钮
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && stopper) {
+    e.preventDefault();
+    stopper.cancel();
+  }
+});
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();

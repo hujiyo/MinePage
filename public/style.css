@@ -2450,6 +2450,28 @@ code.token {
 .sendBtn:disabled { background: #f2b8c8; }
 .sendBtn.busy { background: #f2b8c8; }
 
+/* 跑的过程中发送键变成「停止」：白底深色方块，和粉色的「发送」区分开，
+   避免用户以为点了会再发一条。 */
+.sendBtn.stopping {
+  background: var(--panel);
+  color: var(--text);
+  border: 1.6px solid var(--border);
+  font-size: 12px;
+}
+.sendBtn.stopping:hover { background: #fdeeee; border-color: var(--danger); color: var(--danger); }
+
+/* 被用户停下来的那条回复：淡一点，并标一句「已停止」 */
+.chatBubble.stopped {
+  opacity: .85;
+  background: var(--panel2);
+  border: 1px dashed var(--border);
+  color: var(--muted2);
+}
+.chatBubble.stopped::before {
+  content: '已停止 · ';
+  color: var(--muted);
+}
+
 .miniChip {
   flex: none;
   padding: 3px 10px;

@@ -132,8 +132,10 @@ import {
 } from './lib/agent/models.js';
 import { LlmError } from './lib/agent/llm.js';
 import { runAgent } from './lib/agent/loop.js';
+import { cancel as cancelRunningTask, register as registerRunningTask, unregister as unregisterRunningTask } from './lib/agent/running.js';
 import {
   assertDailyQuota,
+  cancelTask,
   createTask,
   failTask,
   findLiveTaskByThread,
@@ -1892,6 +1894,8 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
  */
 async function runAgentTask({ taskId, cfg, site, userId, threadId, userText }) {
   const progress = [];
+  // 登记取消句柄：用户点「停止」时由 /cancel 接口触发这个 signal
+  const signal = registerRunningTask(taskId);
 
   try {
     await markRunning(taskId);
@@ -1911,6 +1915,7 @@ async function runAgentTask({ taskId, cfg, site, userId, threadId, userText }) {
       history,
       userText,
       snapshot,
+      signal,
       onStep: (step) => {
         progress.push({
           name: step.name,
@@ -1924,17 +1929,27 @@ async function runAgentTask({ taskId, cfg, site, userId, threadId, userText }) {
       },
     });
 
-    // 改动落快照：标签里带上模型名，历史面板能看出是哪次改的
+    // 改动落快照：标签里带上模型名，历史面板能看出是哪次改的。
+    // 被用户中断时也要存 —— 中断前已经改的文件必须能回滚，
+    // 这是「停止」这个功能不让人心慌的前提。
+    const changed = result.toolCalls.filter((t) => t.ok).length;
     const saved = snapshot
-      ? await snapshot.commit(`${cfg.label} · 改了 ${result.toolCalls.filter((t) => t.ok).length} 处`).catch(() => null)
+      ? await snapshot.commit(
+        result.abortedByUser
+          ? `已停止 · 已改 ${changed} 处`
+          : `${cfg.label} · 改了 ${changed} 处`,
+      ).catch(() => null)
       : null;
 
-    const replyText = result.toolCalls.length
-      ? result.text
-      : result.text;
+    const replyText = result.text;
 
     const reply = await addSiteMessage(site.id, 'agent', replyText, threadId);
-    await finishTask(taskId, { text: replyText, steps: progress, usage: result.usage });
+
+    if (result.abortedByUser) {
+      await cancelTask(taskId, { text: replyText, steps: progress });
+    } else {
+      await finishTask(taskId, { text: replyText, steps: progress, usage: result.usage });
+    }
 
     // 快照被跳过时，得让用户知道「这次改不可回滚」
     if (saved && saved.skipped) {
@@ -1962,7 +1977,51 @@ async function runAgentTask({ taskId, cfg, site, userId, threadId, userText }) {
       threadId,
     ).catch(() => {});
     await failTask(taskId, message, progress).catch(() => {});
+  } finally {
+    // 不管什么结局都要摘掉取消句柄，否则 Map 会一直涨
+    unregisterRunningTask(taskId);
   }
+}
+
+/**
+ * POST /api/agent/tasks/:id/cancel：停止一轮正在跑的 agent。
+ *
+ * 只置取消信号，不直接改数据库状态 —— 真正的收尾（存快照、写回复、标状态）
+ * 由 runAgentTask 在循环跳出后完成，那样才能保证「已改的文件有快照」。
+ */
+async function handleAgentTaskCancel(req, res, [taskId]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const row = await findTask(taskId);
+  if (!row) {
+    sendJson(res, 404, { ok: false, message: '没有这个任务（可能已经过期）' });
+    return;
+  }
+  if (row.user_id !== user.id && !user.isAdmin) {
+    sendJson(res, 403, { ok: false, message: '不能操作别人的任务' });
+    return;
+  }
+
+  if (row.status !== 'queued' && row.status !== 'running') {
+    sendJson(res, 409, {
+      ok: false,
+      message: '这个任务已经结束了',
+      status: row.status,
+    });
+    return;
+  }
+
+  const outcome = cancelRunningTask(taskId);
+  if (outcome === 'not-running') {
+    // 任务在库里是 running，但内存里没有句柄：通常是进程重启后的残留。
+    // 直接标成已取消，免得前端一直轮询。
+    await cancelTask(taskId, { text: '这个任务已经中断了' }).catch(() => {});
+    sendJson(res, 200, { ok: true, status: 'cancelled', note: '任务已中断' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, status: 'cancelling' });
 }
 
 // ---------------------------------------------------------------- 会话（thread）
@@ -3604,6 +3663,7 @@ const ROUTES = [
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/agent\\/tool$`), handleAgentToolRun],
   ['GET', /^\/api\/agent\/tools$/, handleAgentTools],
   ['GET', /^\/api\/agent\/tasks\/([A-Za-z0-9]+)$/, handleAgentTask],
+  ['POST', /^\/api\/agent\/tasks\/([A-Za-z0-9]+)\/cancel$/, handleAgentTaskCancel],
   // 卡片自定义封面：GET 公开（卡片匿名可见），PUT/DELETE 走「作者或管理员」
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverImage],
   ['PUT', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverUpload],

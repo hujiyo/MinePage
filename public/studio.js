@@ -650,9 +650,26 @@
 
       if (onProgress) onProgress(task);
       if (task.status === 'done') return task;
+      if (task.status === 'cancelled') {
+        throw Object.assign(new Error(task.text || '已停止'), { task });
+      }
       if (task.status === 'failed') throw Object.assign(new Error(task.error || '生成失败'), { task });
     }
   }
+
+  /**
+   * 取消一个正在跑的任务。
+   * 只置信号，真正收尾（存快照、写回复、改状态）由服务端在循环跳出后做，
+   * 所以这里成功返回不代表已经停了，还得继续轮询等 status 变。
+   * @returns {Promise<'cancelling'|'cancelled'>}
+   */
+  MP.cancelTask = async function (taskId) {
+    const data = await MP.api('/api/agent/tasks/' + encodeURIComponent(taskId) + '/cancel', {
+      method: 'POST',
+      body: {},
+    });
+    return data.status === 'cancelled' ? 'cancelled' : 'cancelling';
+  };
 
   /**
    * 往工作区发一条消息：
@@ -665,6 +682,7 @@
    *   list       消息容器
    *   username / name / content / threadId
    *   onProgress(task) 每次轮询回调
+   *   onStarted(data)  拿到 taskId 后回调（返回 { cancel } 让调用方接停止按钮）
    *   onReply(task)    完成回调
    */
   MP.pushMessage = async function (opt) {
@@ -688,15 +706,34 @@
     }
 
     let taskId = null;
+    /** 用户点过停止以后，把最终气泡的样式换成「已停止」而不是普通回复 */
+    let stopped = false;
+
     try {
       const data = await MP.sendSiteMessage(username, name, content, threadId);
       mine.classList.remove('pending');
       taskId = data.taskId;
 
-      if (opt.onStarted) opt.onStarted(data);
+      if (opt.onStarted) {
+        // 把「停止」能力交给调用方（工作区会把它绑到发送按钮上）
+        opt.onStarted(data, {
+          cancel: async () => {
+            if (!taskId || stopped) return;
+            stopped = true;
+            progressBubble.textContent = '正在停止…';
+            try {
+              await MP.cancelTask(taskId);
+            } catch (err) {
+              stopped = false;
+              progressBubble.textContent = err.message || '停止失败';
+            }
+          },
+        });
+      }
 
       const task = await waitTask(taskId, {
         onProgress: (t) => {
+          if (stopped) return;   // 正在停，别让进度把「正在停止…」覆盖掉
           const steps = Array.isArray(t.steps) ? t.steps : [];
           if (!steps.length) return;
           const last = steps[steps.length - 1];
@@ -710,6 +747,11 @@
       progressRow.classList.remove('pending');
       progressBubble.classList.remove('stepping');
       progressBubble.textContent = task.text || '（没有输出）';
+      // 被停止的任务单独标一下，用户一眼能看出「这轮是我停的」
+      if (task.status === 'cancelled') {
+        progressBubble.classList.add('stopped');
+        stopped = true;
+      }
       if (list) list.scrollTop = list.scrollHeight;
 
       if (opt.onReply) opt.onReply(task);
@@ -718,9 +760,18 @@
       mine.classList.remove('pending');
       progressRow.classList.remove('pending');
       progressBubble.classList.remove('stepping');
+      progressRow.classList.add('failed');
+      // 用户主动停止也被 waitTask 当成异常抛出（status=cancelled），
+      // 但这不是错误，别标红吓人 —— 服务端已经在 project.text 里给了人话。
+      if (err.task && err.task.status === 'cancelled') {
+        progressBubble.classList.add('stopped');
+        progressBubble.textContent = err.task.text || '已停止';
+        if (list) list.scrollTop = list.scrollHeight;
+        if (opt.onReply) opt.onReply(err.task);
+        return err.task;
+      }
       progressBubble.classList.add('errtip');
       progressBubble.textContent = err.message || '发送失败';
-      progressRow.classList.add('failed');
       throw err;
     }
   };
