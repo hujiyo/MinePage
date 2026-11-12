@@ -2786,6 +2786,49 @@ body.dragging .wsFrame { pointer-events: none; }
 .chatRow.pending .chatBubble { opacity: .6; }
 .chatRow.failed .chatBubble { background: #fdeeee; border: 1px solid #f7c9c9; }
 .chatBubble.errtip { background: #fdeeee; color: var(--danger); }
+
+/* agent 正在跑时的进度气泡：加个呼吸点，让人知道它没卡死 */
+.chatBubble.stepping {
+  opacity: .8;
+  background: var(--panel2);
+  border: 1px dashed var(--border);
+  color: var(--muted2);
+  font-size: 12px;
+}
+.chatBubble.stepping::before {
+  content: '◔ ';
+  display: inline-block;
+  animation: stepSpin 1.1s linear infinite;
+}
+@keyframes stepSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* 模型标签：没接模型时置灰 + 不可点，接了之后是个可点的按钮 */
+.wsModel.off { color: var(--muted); cursor: default; }
+.wsModel:not(.off) { cursor: pointer; }
+.wsModel:not(.off):hover { color: var(--pink); }
+
+/* 选项列表弹窗（选模型用） */
+.pickCard { width: 340px; padding-bottom: 14px; }
+.pickList { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.pickItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel2);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.pickItem:hover { border-color: var(--pink); background: var(--panel); }
+.pickItem.on { border-color: var(--pink); background: var(--panel); box-shadow: inset 0 0 0 1px var(--pink); }
+.pickItem b { font-size: 13px; font-weight: 600; color: var(--text); }
+.pickItem span { font-size: 11px; color: var(--muted); }
 .chatEmpty {
   margin: auto 0;
   text-align: center;

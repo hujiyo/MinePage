@@ -120,6 +120,31 @@ import {
   toolCatalog,
   toolSchemas,
 } from './lib/agent/tools.js';
+import {
+  AGENT_DEFAULT_MODEL,
+} from './lib/config.js';
+import {
+  modelApiKey,
+  pickUsableModel,
+  probeModel,
+  publicModelList,
+  resolveModel,
+} from './lib/agent/models.js';
+import { LlmError } from './lib/agent/llm.js';
+import { runAgent } from './lib/agent/loop.js';
+import {
+  assertDailyQuota,
+  createTask,
+  failTask,
+  findLiveTaskByThread,
+  findTask,
+  finishTask,
+  markRunning,
+  pruneTasks,
+  publicTask,
+  reapStaleTasks,
+  updateProgress,
+} from './lib/agent/task.js';
 import { getSiteCover, removeSiteCover, setSiteCover, siteHasCover } from './lib/covers.js';
 import {
   createBanner,
@@ -1116,8 +1141,25 @@ async function handleSiteFileUpload(req, res, [username, name]) {
     throw err;
   }
 
+  // 手动保存也留一份快照。
+  //
+  // 为什么必须做：agent 的快照只记录「agent 改动前」的状态。如果用户先在代码面板
+  // 手动改了一版、再让 agent 改同一处，那 agent 的快照里存的就是「用户改后」的版本，
+  // 用户点「还原」只会回到自己手动改的那版，而不是更早的原始版 —— 与直觉不符。
+  const manualSnapshot = createSnapshotCollector({ siteId: site.id });
+  await manualSnapshot.beforeWrite(filePath).catch(() => {});
+
   const saved = await upsertSiteFile(site.id, filePath, content);
-  sendJson(res, isNew ? 201 : 200, { ok: true, path: saved.path, size: saved.size });
+
+  // 快照落库失败不影响保存本身（保存是主操作，快照是附加保障）
+  const snap = await manualSnapshot.commit(`手动编辑 ${filePath}`).catch(() => null);
+
+  sendJson(res, isNew ? 201 : 200, {
+    ok: true,
+    path: saved.path,
+    size: saved.size,
+    snapshot: snap ? { id: snap.id ?? null, skipped: Boolean(snap.skipped) } : null,
+  });
 }
 
 /**
@@ -1498,11 +1540,17 @@ async function handleSiteFileDelete(req, res, [username, name]) {
     return;
   }
 
+  // 手动删除也留一份快照，理由同上面的手动保存
+  const manualSnapshot = createSnapshotCollector({ siteId: site.id });
+  await manualSnapshot.beforeDelete(filePath).catch(() => {});
+
   const changes = await removeSiteFile(site.id, filePath);
   if (changes === 0) {
     sendJson(res, 404, { ok: false, message: '站点里没有这个文件' });
     return;
   }
+
+  await manualSnapshot.commit(`手动删除 ${filePath}`).catch(() => {});
 
   sendJson(res, 200, { ok: true });
 }
@@ -1708,8 +1756,12 @@ async function handleSiteMessagesList(req, res, [username, name]) {
 }
 
 /**
- * POST /api/sites/:用户名/:站名/messages：追加一条用户消息。
- * 本轮 agent 只回一句占位话（不接模型），一起入库，刷新后对话还在。
+ * POST /api/sites/:用户名/:站名/messages：发一条消息，触发一轮 agent。
+ *
+ * 关键设计：**立刻返回 taskId，agent 在后台跑**。
+ * 一轮 agent 要 5–60 秒，同步等会把 HTTP 挂住，nginx 一过 proxy_read_timeout 就是 504，
+ * 前端还完全不知道结果。改成异步之后，前端能轮询进度、刷新页面回来结果还在。
+ *
  * 带 threadId 时消息挂到那个会话上；不带就落到最近一个会话（没有就建一个）。
  */
 async function handleSiteMessageAdd(req, res, [username, name]) {
@@ -1743,15 +1795,174 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
     thread = await ensureDefaultThread(site.id);
   }
 
-  const mine = await addSiteMessage(site.id, 'user', content, thread.id);
-  const reply = await addSiteMessage(
-    site.id,
-    'agent',
-    '（占位回复）已开始生成…',
-    thread.id,
-  );
+  // 同一会话不许并发：两轮 agent 同时改同一批文件会互相踩
+  const live = await findLiveTaskByThread(thread.id);
+  if (live) {
+    sendJson(res, 409, {
+      ok: false,
+      message: '这个对话还在生成中，等它跑完再发下一条',
+      taskId: live.id,
+    });
+    return;
+  }
 
-  sendJson(res, 201, { ok: true, threadId: thread.id, user: mine, agent: reply });
+  // 先看看有没有可用模型，没有就直接告诉用户怎么配，别让他等一轮空跑。
+  // 用 pickUsableModel（带探活）而不是 pickDefaultModel：本机 Ollama 没启动时
+  // 「key 不需要所以算可用」会把用户带进一轮必然失败的请求。
+  let modelId = thread.model || null;
+  if (modelId && !(await probeModel(modelId))) {
+    // 会话里记的模型现在连不上了：降级到当前可用的，并告诉用户实际用了哪个
+    const fallback = await pickUsableModel(AGENT_DEFAULT_MODEL);
+    if (!fallback) {
+      sendJson(res, 503, {
+        ok: false,
+        message: '这个对话选的模型现在连不上，也没有别的可用模型。请检查服务器上的模型配置。',
+        code: 'NO_MODEL',
+      });
+      return;
+    }
+    modelId = fallback;
+  } else if (!modelId) {
+    modelId = await pickUsableModel(AGENT_DEFAULT_MODEL);
+  }
+
+  const cfg = modelId ? resolveModel(modelId) : null;
+  if (!cfg) {
+    sendJson(res, 503, {
+      ok: false,
+      message: '还没有可用的模型。请先在服务器上配置 LLM_API_KEY 环境变量再重启服务。',
+      code: 'NO_MODEL',
+    });
+    return;
+  }
+  if (cfg.apiKeyEnv && !modelApiKey(cfg)) {
+    sendJson(res, 503, {
+      ok: false,
+      message: `模型「${cfg.label}」缺少 API Key（环境变量 ${cfg.apiKeyEnv}）`,
+      code: 'NO_KEY',
+    });
+    return;
+  }
+  if (!cfg.supportsTools) {
+    sendJson(res, 400, {
+      ok: false,
+      message: `模型「${cfg.label}」不支持工具调用，没法替你改文件`,
+      code: 'NO_TOOLS',
+    });
+    return;
+  }
+
+  try {
+    await assertDailyQuota(user.id);
+  } catch (err) {
+    sendJson(res, 429, { ok: false, message: err.message, code: err.code });
+    return;
+  }
+
+  // 用户消息先落库：即便任务失败，用户说的这句话也不能丢
+  const mine = await addSiteMessage(site.id, 'user', content, thread.id);
+
+  const taskId = await createTask({
+    siteId: site.id,
+    threadId: thread.id,
+    userId: user.id,
+    model: modelId,
+  });
+
+  // 后台跑，不阻塞响应
+  setImmediate(() => {
+    runAgentTask({ taskId, cfg, site, userId: user.id, threadId: thread.id, userText: content })
+      .catch((err) => console.error('[agent-task]', err));
+  });
+
+  sendJson(res, 202, {
+    ok: true,
+    taskId,
+    threadId: thread.id,
+    user: mine,
+    model: { id: modelId, label: cfg.label, model: cfg.model },
+  });
+}
+
+/**
+ * 后台跑一轮 agent：写进度 → 跑循环 → 落库结果。
+ *
+ * 这里要把所有异常都兜住 —— 它在 setImmediate 里跑，抛出去没人接，
+ * 任务会永远卡在 running，前端就一直转圈。
+ */
+async function runAgentTask({ taskId, cfg, site, userId, threadId, userText }) {
+  const progress = [];
+
+  try {
+    await markRunning(taskId);
+
+    // 这个会话的历史（不含刚写进去的这条用户消息，它由 userText 单独传）
+    const rows = await listThreadMessages(threadId, SITE_MESSAGES_KEEP);
+    const history = rows
+      .filter((m) => m.content !== userText || m.role !== 'user')
+      .slice(-40);
+
+    const snapshot = createSnapshotCollector({ siteId: site.id, threadId });
+
+    const result = await runAgent({
+      cfg,
+      site,
+      userId,
+      history,
+      userText,
+      snapshot,
+      onStep: (step) => {
+        progress.push({
+          name: step.name,
+          ok: step.ok,
+          path: step.path,
+          error: step.error,
+          at: Date.now(),
+        });
+        // 进度写库失败不能影响主流程，吞掉
+        updateProgress(taskId, step.step, progress).catch(() => {});
+      },
+    });
+
+    // 改动落快照：标签里带上模型名，历史面板能看出是哪次改的
+    const saved = snapshot
+      ? await snapshot.commit(`${cfg.label} · 改了 ${result.toolCalls.filter((t) => t.ok).length} 处`).catch(() => null)
+      : null;
+
+    const replyText = result.toolCalls.length
+      ? result.text
+      : result.text;
+
+    const reply = await addSiteMessage(site.id, 'agent', replyText, threadId);
+    await finishTask(taskId, { text: replyText, steps: progress, usage: result.usage });
+
+    // 快照被跳过时，得让用户知道「这次改不可回滚」
+    if (saved && saved.skipped) {
+      await addSiteMessage(
+        site.id,
+        'agent',
+        `提醒：这次改动${saved.reason}，所以没能存快照，回滚不了。`,
+        threadId,
+      );
+    }
+
+    return { reply, saved };
+  } catch (err) {
+    const message = err instanceof LlmError
+      ? `${err.message}${err.detail ? `（${String(err.detail).slice(0, 120)}）` : ''}`
+      : (err?.message || '生成失败了');
+
+    console.error('[agent-task]', taskId, err?.code ?? '', message);
+
+    // 失败也要给用户一句人话，否则前端只能显示「失败」
+    await addSiteMessage(
+      site.id,
+      'agent',
+      `这边出了点问题：${message}。可以再试一次，或者换个说法。`,
+      threadId,
+    ).catch(() => {});
+    await failTask(taskId, message, progress).catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------- 会话（thread）
@@ -1960,10 +2171,13 @@ function sendZip(res, filename, buf) {
 
 // ---------------------------------------------------------------- 工具集（给前端/调试用）
 
-/** GET /api/agent/tools：agent 能用哪些工具。不接模型也能先看到清单。 */
+/** GET /api/agent/tools：agent 能用哪些工具 + 可用模型清单。 */
 async function handleAgentTools(req, res) {
   const user = await requireLogin(req, res);
   if (!user) return;
+
+  const defaultModel = await pickUsableModel(AGENT_DEFAULT_MODEL);
+  const models = await publicModelList(defaultModel);
 
   sendJson(res, 200, {
     ok: true,
@@ -1971,7 +2185,31 @@ async function handleAgentTools(req, res) {
     // 接入模型时直接把这个塞进请求体的 tools 字段
     schemas: toolSchemas(),
     names: AGENT_TOOL_NAMES,
+    // 模型清单只给 id / 名字 / 能力，**绝不带 key 和 baseURL**
+    models,
+    defaultModel,
+    // 一个都没有说明还没配 key，前端据此把输入框改成「未接模型」状态
+    ready: Boolean(defaultModel),
   });
+}
+
+/** GET /api/agent/tasks/:id：轮询一轮 agent 的进度和结果。 */
+async function handleAgentTask(req, res, [taskId]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const row = await findTask(taskId);
+  if (!row) {
+    sendJson(res, 404, { ok: false, message: '没有这个任务（可能已经过期）' });
+    return;
+  }
+  // 只能看自己的任务
+  if (row.user_id !== user.id && !user.isAdmin) {
+    sendJson(res, 403, { ok: false, message: '不能看别人的任务' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, task: publicTask(row) });
 }
 
 /**
@@ -3365,6 +3603,7 @@ const ROUTES = [
   // agent 工具集：接模型之前也能手动验证工具是否好用
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/agent\\/tool$`), handleAgentToolRun],
   ['GET', /^\/api\/agent\/tools$/, handleAgentTools],
+  ['GET', /^\/api\/agent\/tasks\/([A-Za-z0-9]+)$/, handleAgentTask],
   // 卡片自定义封面：GET 公开（卡片匿名可见），PUT/DELETE 走「作者或管理员」
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverImage],
   ['PUT', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverUpload],
@@ -3537,6 +3776,25 @@ server.listen(PORT, HOST, async () => {
       pruneDraftSites(DRAFT_TTL_HOURS)
         .catch((err) => console.error('[draft] 清理上传草稿失败：', err?.message ?? err));
     }, 24 * 3600_000).unref();
+
+    // agent 任务：上次进程被杀时残留的「跑着」任务要标成失败，
+    // 否则前端轮询会一直转圈等一个永远不会结束的任务
+    const reaped = await reapStaleTasks();
+    if (reaped > 0) console.log(`回收了 ${reaped} 个中断的 agent 任务`);
+    const prunedTasks = await pruneTasks();
+    if (prunedTasks > 0) console.log(`清理了 ${prunedTasks} 条过期 agent 任务`);
+    setInterval(() => {
+      pruneTasks().catch((err) => console.error('[agent] 清理任务失败：', err?.message ?? err));
+    }, 6 * 3600_000).unref();
+
+    // 启动时把模型可用情况打出来，部署后一眼就能看出 key 配没配、本机模型起没起
+    const defaultModel = await pickUsableModel(AGENT_DEFAULT_MODEL);
+    if (defaultModel) {
+      const cfg = resolveModel(defaultModel);
+      console.log(`agent 默认模型：${cfg.label}（${cfg.model}）`);
+    } else {
+      console.log('agent 未启用：没找到可用的模型，请配置 LLM_API_KEY 后重启');
+    }
 
     const created = await ensureAdminAccount();
 

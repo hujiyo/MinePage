@@ -328,12 +328,86 @@ async function boot() {
   reload();
   loadFiles();
   await loadThreads();
+  await loadModels();
 
   // 从 /new 带过来的第一条消息：草稿已经建好，这里补发一次
   const first = sessionStorage.getItem('mp:firstMessage:' + NAME);
   if (first) {
     sessionStorage.removeItem('mp:firstMessage:' + NAME);
     sendMessage(first);
+  }
+}
+
+/* ---------------------------------------------------------------- 模型 */
+
+// 模型清单只在进页面时拿一次；切换会话时按会话上记的 model 同步显示
+let MODELS = [];
+let DEFAULT_MODEL = '';
+
+async function loadModels() {
+  try {
+    const data = await MP.api('/api/agent/tools');
+    MODELS = data.models || [];
+    DEFAULT_MODEL = data.defaultModel || '';
+  } catch {
+    MODELS = [];
+    DEFAULT_MODEL = '';
+  }
+  syncModelLabel();
+}
+
+/** 底部那行显示当前会话用哪个模型；没配 key 就显示「未接模型」。 */
+function syncModelLabel() {
+  const t = THREADS.find((x) => x.id === threadId);
+  const wanted = (t && t.model) || DEFAULT_MODEL;
+  const m = MODELS.find((x) => x.id === wanted) || MODELS.find((x) => x.ready);
+
+  if (!m) {
+    threadModel.textContent = '未接模型';
+    threadModel.title = '服务器还没配置模型，先在环境变量里加 LLM_API_KEY';
+    threadModel.classList.add('off');
+    return;
+  }
+
+  const id = m.id;
+  threadModel.classList.remove('off');
+  threadModel.textContent = m.label;
+  threadModel.title = `${m.provider} / ${m.model}`;
+
+  // 点一下换模型：把选择记到当前会话上，下次这轮就用它
+  threadModel.onclick = () => pickModel(id);
+}
+
+async function pickModel(currentId) {
+  if (!MODELS.length) {
+    MP.alert('还没有可用的模型，先在服务器上配 LLM_API_KEY 再重启');
+    return;
+  }
+  const usable = MODELS.filter((m) => m.ready && m.supportsTools);
+  if (!usable.length) {
+    MP.alert('清单里的模型都缺 Key 或不支持工具调用');
+    return;
+  }
+
+  const choice = await MP.pick({
+    text: '这个对话用哪个模型？',
+    options: usable.map((m) => ({
+      value: m.id,
+      label: m.label,
+      hint: `${m.hint} · ${m.provider}`,
+      active: m.id === currentId,
+    })),
+  });
+  if (!choice || choice === currentId) return;
+
+  try {
+    await MP.api(api('/threads/' + threadId), { method: 'PUT', body: { model: choice } });
+    const t = THREADS.find((x) => x.id === threadId);
+    if (t) t.model = choice;
+    syncModelLabel();
+    MP.toast('已切到 ' + (MODELS.find((m) => m.id === choice)?.label ?? choice));
+  } catch (e) {
+    MP.toast(e.message || '切换模型失败');
   }
 }
 
@@ -605,6 +679,12 @@ async function sendMessage(text) {
       name: NAME,
       content,
       threadId,
+      // 任务开跑：把模型名放进底部那行，用户可以确认「这轮用的是谁」
+      onStarted: (data) => {
+        if (data.model && data.model.label) {
+          threadModel.textContent = data.model.label;
+        }
+      },
       onReply: () => {
         // 第一条消息自动给会话起名，列表里不再全是「新对话」。
         // 注意字段来源有两处：接口列表是 msg_count（下划线），新建返回的是 msgCount，
@@ -621,6 +701,9 @@ async function sendMessage(text) {
             })
             .catch(() => {});
         }
+        // agent 改了文件，预览要跟着刷新
+        reload();
+        loadFiles();
       },
     });
   } catch (e) {

@@ -284,6 +284,58 @@
     });
   };
 
+  /**
+   * 选项列表小弹窗（单选）。用来做「选模型」这类有几个固定选项的场景。
+   * @param {{text:string, options:{value:string,label:string,hint?:string,active?:boolean}[]}} opt
+   * @returns {Promise<string|null>} 选中的 value；取消 / Esc / 点遮罩返回 null
+   */
+  MP.pick = function (opt) {
+    const o = opt || {};
+    return new Promise((resolve) => {
+      const mask = document.createElement('div');
+      mask.className = 'askMask';
+      const card = document.createElement('div');
+      card.className = 'askCard pickCard';
+      card.innerHTML = '<div class="askText"></div><div class="pickList"></div><div class="askBtns"></div>';
+      card.querySelector('.askText').textContent = o.text || '';
+
+      let settled = false;
+      const done = (value) => {
+        if (settled) return;
+        settled = true;
+        mask.remove();
+        document.removeEventListener('keydown', onKey);
+        resolve(value);
+      };
+      const onKey = (e) => { if (e.key === 'Escape') done(null); };
+
+      (o.options || []).forEach((item) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'pickItem' + (item.active ? ' on' : '');
+        btn.innerHTML = '<b></b><span></span>';
+        btn.querySelector('b').textContent = item.label;
+        const hint = btn.querySelector('span');
+        if (item.hint) hint.textContent = item.hint;
+        else hint.remove();
+        btn.addEventListener('click', () => done(item.value));
+        card.querySelector('.pickList').appendChild(btn);
+      });
+
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'askBtn ghost';
+      cancel.textContent = '取消';
+      cancel.addEventListener('click', () => done(null));
+      card.querySelector('.askBtns').appendChild(cancel);
+
+      mask.appendChild(card);
+      mask.addEventListener('click', (e) => { if (e.target === mask) done(null); });
+      document.addEventListener('keydown', onKey);
+      document.body.appendChild(mask);
+    });
+  };
+
   /* ----------------------------------------------------------
      3. 发布弹窗
      ---------------------------------------------------------- */
@@ -558,37 +610,117 @@
   };
 
   /* ----------------------------------------------------------
-     5. 发送一条消息（乐观插入 + 服务端回执）
+     5. 发送一条消息：异步任务 + 轮询进度
      ---------------------------------------------------------- */
 
+  // 工具名 → 给用户看的动作短语。技术词对用户没意义，翻译成人话。
+  const STEP_LABELS = {
+    list_files: '看看有哪些文件',
+    read_file: '读文件',
+    write_file: '改文件',
+    delete_file: '删文件',
+    update_meta: '改页面信息',
+  };
+
+  /** 把一步工具调用渲染成一行进度文案。 */
+  function stepText(step) {
+    const label = STEP_LABELS[step.name] ?? step.name;
+    const tail = step.path ? ` ${step.path}` : '';
+    return step.ok === false ? `${label}${tail} 失败` : `${label}${tail}`;
+  }
+
+  /** 轮询一个任务直到结束。返回任务对象；失败抛错。 */
+  async function waitTask(taskId, { onProgress, interval = 1500, timeoutMs = 150000 } = {}) {
+    const startedAt = Date.now();
+    for (;;) {
+      if (Date.now() - startedAt > timeoutMs) {
+        throw new Error('等太久了，刷新页面看看进度');
+      }
+      await new Promise((r) => setTimeout(r, interval));
+
+      let task;
+      try {
+        const data = await MP.api('/api/agent/tasks/' + encodeURIComponent(taskId));
+        task = data.task;
+      } catch (err) {
+        // 任务过期（24 小时后清掉）就别再轮询了
+        if (err.status === 404) throw new Error('这个任务已经过期了，刷新页面看看结果');
+        throw err;
+      }
+
+      if (onProgress) onProgress(task);
+      if (task.status === 'done') return task;
+      if (task.status === 'failed') throw Object.assign(new Error(task.error || '生成失败'), { task });
+    }
+  }
+
   /**
-   * 往工作区发一条消息：先插自己的气泡，再等接口返回把 agent 占位回复补上。
-   * 失败时把乐观气泡标红并给出原因（保留输入内容，用户不用重打）。
+   * 往工作区发一条消息：
+   *   1. 乐观插入用户气泡
+   *   2. POST 拿到 taskId（服务端立刻返回，不在请求里等 agent）
+   *   3. 轮询任务，实时把「正在读 xxx」写进一个进度气泡
+   *   4. 任务完成 → 进度气泡换成最终回复；失败 → 标红并给原因
+   *
+   * @param {object} opt
+   *   list       消息容器
+   *   username / name / content / threadId
+   *   onProgress(task) 每次轮询回调
+   *   onReply(task)    完成回调
    */
   MP.pushMessage = async function (opt) {
     const { list, username, name, content, threadId } = opt;
-    const pending = MP.bubble('user', content, true);
+
+    const mine = MP.bubble('user', content, true);
     if (list) {
       const empty = list.querySelector('.chatEmpty');
       if (empty) empty.remove();
-      list.appendChild(pending);
+      list.appendChild(mine);
       list.scrollTop = list.scrollHeight;
     }
+
+    // 进度气泡：先显示「正在想…」，随后被工具进度替换
+    const progressRow = MP.bubble('agent', '正在想…', true);
+    const progressBubble = progressRow.querySelector('.chatBubble');
+    progressBubble.classList.add('stepping');
+    if (list) {
+      list.appendChild(progressRow);
+      list.scrollTop = list.scrollHeight;
+    }
+
+    let taskId = null;
     try {
       const data = await MP.sendSiteMessage(username, name, content, threadId);
-      pending.classList.remove('pending');
-      if (list && data.agent) {
-        list.appendChild(MP.bubble('agent', data.agent.content));
-        list.scrollTop = list.scrollHeight;
-      }
-      if (opt.onReply) opt.onReply(data);
-      return data;
+      mine.classList.remove('pending');
+      taskId = data.taskId;
+
+      if (opt.onStarted) opt.onStarted(data);
+
+      const task = await waitTask(taskId, {
+        onProgress: (t) => {
+          const steps = Array.isArray(t.steps) ? t.steps : [];
+          if (!steps.length) return;
+          const last = steps[steps.length - 1];
+          progressBubble.textContent = stepText(last);
+          if (list) list.scrollTop = list.scrollHeight;
+          if (opt.onProgress) opt.onProgress(t);
+        },
+      });
+
+      // 任务完成：把进度气泡换成真正的回复
+      progressRow.classList.remove('pending');
+      progressBubble.classList.remove('stepping');
+      progressBubble.textContent = task.text || '（没有输出）';
+      if (list) list.scrollTop = list.scrollHeight;
+
+      if (opt.onReply) opt.onReply(task);
+      return task;
     } catch (err) {
-      pending.classList.remove('pending');
-      pending.classList.add('failed');
-      const tip = MP.bubble('agent', err.message || '发送失败');
-      tip.querySelector('.chatBubble').classList.add('errtip');
-      if (list) list.appendChild(tip);
+      mine.classList.remove('pending');
+      progressRow.classList.remove('pending');
+      progressBubble.classList.remove('stepping');
+      progressBubble.classList.add('errtip');
+      progressBubble.textContent = err.message || '发送失败';
+      progressRow.classList.add('failed');
       throw err;
     }
   };
