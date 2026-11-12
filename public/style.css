@@ -2637,22 +2637,62 @@ body.dragging .wsFrame { pointer-events: none; }
   cursor: pointer;
 }
 .wsThread.on .wsThreadName { font-weight: 600; }
-.wsThreadOps { display: flex; flex: none; gap: 1px; opacity: 0; transition: opacity .15s; }
-.wsThread:hover .wsThreadOps,
-.wsThread.on .wsThreadOps { opacity: 1; }
-.wsThreadOp {
-  width: 20px;
-  height: 20px;
+/* 「⋯」更多按钮：平时淡出，hover / 选中 / 菜单打开时才显形。
+   一个按钮管住所有操作，以后往菜单里加功能不会再挤占列表行。 */
+.wsThreadMore {
+  flex: none;
+  width: 22px;
+  height: 22px;
   padding: 0;
   border: 0;
-  border-radius: 5px;
+  border-radius: 6px;
   background: transparent;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13px;
+  line-height: 1;
+  letter-spacing: 1px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .15s, background .15s;
+}
+.wsThread:hover .wsThreadMore,
+.wsThread.on .wsThreadMore,
+.wsThreadMore:focus-visible { opacity: 1; }
+.wsThreadMore:hover { background: var(--panel2); color: var(--pink); }
+
+/* 会话的弹出菜单：fixed 定位，贴着「⋯」按钮，点外面就收 */
+.wsMenu {
+  position: fixed;
+  z-index: 400;
+  min-width: 116px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: var(--shadow-lift);
+  animation: menuIn .12s ease-out;
+}
+@keyframes menuIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+.wsMenuItem {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
   cursor: pointer;
 }
-.wsThreadOp:hover { background: var(--panel2); color: var(--pink); }
-.wsThreadOp.danger:hover { color: var(--danger); }
+.wsMenuItem:hover { background: var(--panel2); color: var(--pink); }
+.wsMenuItem.danger { color: var(--danger); }
+.wsMenuItem.danger:hover { background: #fdeeee; color: var(--danger); }
 .wsThreadEmpty {
   padding: 20px 8px;
   text-align: center;

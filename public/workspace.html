@@ -379,29 +379,93 @@ function renderThreads() {
     name.addEventListener('click', () => selectThread(t.id));
     row.appendChild(name);
 
-    const ops = document.createElement('div');
-    ops.className = 'wsThreadOps';
+    // 更多操作收进一个「⋯」按钮：以后加功能只往菜单里塞，列表行不会被撑爆
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'wsThreadMore';
+    more.title = '更多操作';
+    more.setAttribute('aria-label', '更多操作');
+    more.setAttribute('aria-haspopup', 'menu');
+    more.innerHTML = '<span aria-hidden="true">···</span>';
+    more.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openThreadMenu(more, t);
+    });
+    row.appendChild(more);
 
-    const rename = document.createElement('button');
-    rename.type = 'button';
-    rename.className = 'wsThreadOp';
-    rename.textContent = '改';
-    rename.title = '改会话名字';
-    rename.addEventListener('click', () => renameThread(t));
-    ops.appendChild(rename);
-
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'wsThreadOp danger';
-    del.textContent = '删';
-    del.title = '删掉这个会话';
-    del.addEventListener('click', () => removeThread(t));
-    ops.appendChild(del);
-
-    row.appendChild(ops);
     threadList.appendChild(row);
   });
 }
+
+/* ---------------------------------------------------------------- 会话的「更多」菜单 */
+
+let openMenuEl = null;
+
+/** 关掉当前打开的菜单（如果点的是菜单自己就跳过）。 */
+function closeThreadMenu() {
+  if (openMenuEl) {
+    openMenuEl.remove();
+    openMenuEl = null;
+  }
+}
+
+/**
+ * 在按钮旁边弹出操作菜单。
+ * @param {HTMLElement} anchor 「⋯」按钮
+ * @param {object} thread 对应的会话
+ */
+function openThreadMenu(anchor, thread) {
+  // 再点同一个按钮就是收起
+  if (openMenuEl && openMenuEl.dataset.for === String(thread.id)) {
+    closeThreadMenu();
+    return;
+  }
+  closeThreadMenu();
+
+  const menu = document.createElement('div');
+  menu.className = 'wsMenu';
+  menu.dataset.for = String(thread.id);
+  menu.setAttribute('role', 'menu');
+
+  const item = (label, danger, onClick) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'wsMenuItem' + (danger ? ' danger' : '');
+    btn.textContent = label;
+    btn.setAttribute('role', 'menuitem');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeThreadMenu();
+      onClick();
+    });
+    menu.appendChild(btn);
+  };
+
+  item('重命名', false, () => renameThread(thread));
+  item('删除', true, () => removeThread(thread));
+
+  document.body.appendChild(menu);
+
+  // 贴着按钮定位，超出视口就往回收
+  const r = anchor.getBoundingClientRect();
+  const mw = menu.offsetWidth;
+  const mh = menu.offsetHeight;
+  let left = r.right - mw;
+  let top = r.bottom + 4;
+  if (left < 8) left = 8;
+  if (left + mw > window.innerWidth - 8) left = window.innerWidth - mw - 8;
+  if (top + mh > window.innerHeight - 8) top = r.top - mh - 4;
+  menu.style.left = left + 'px';
+  menu.style.top = Math.max(8, top) + 'px';
+
+  openMenuEl = menu;
+}
+
+// 点别处 / 按 Esc / 滚动 / 改窗口大小都收起菜单
+document.addEventListener('click', closeThreadMenu);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeThreadMenu(); });
+document.addEventListener('scroll', closeThreadMenu, true);
+window.addEventListener('resize', closeThreadMenu);
 
 async function selectThread(id) {
   if (id === threadId) return;
