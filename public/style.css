@@ -2303,6 +2303,13 @@ code.token {
 .pubFields { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
 @media (max-width: 620px) { .pubFields { grid-template-columns: 1fr; } }
 
+/* 必填标记：地址现在是必填项，用一个小红星标出来 */
+.label .req {
+  margin-left: 3px;
+  color: var(--danger);
+  font-weight: 600;
+}
+
 .pubErr {
   margin: -4px 0 12px;
   padding: 9px 12px;

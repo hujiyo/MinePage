@@ -289,25 +289,9 @@
      ---------------------------------------------------------- */
 
   // 与后端 lib/names.js 同口径：3–32 位小写字母 / 数字 / 连字符，
-  // 首尾不能是连字符。留空则自动生成。
+  // 首尾不能是连字符。地址必须手动填写，不再自动生成 —— 中文标题转不出
+  // 有意义的英文地址，硬转只会得到一串乱七八糟的字母数字。
   const NAME_RE = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/;
-
-  /** 标题 → 可用的站名（非 ASCII 一律丢掉；凑不够 3 位就加随机后缀）。 */
-  function autoName(title) {
-    const base = String(title || '')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 24)
-      .replace(/-+$/g, '');
-    if (base.length >= 3 && NAME_RE.test(base)) return base;
-    if (base.length >= 2) {
-      const tail = '-' + Math.random().toString(36).slice(2, 6);
-      const full = (base + tail).slice(0, 32).replace(/-+$/g, '');
-      if (NAME_RE.test(full)) return full;
-    }
-    return 'page-' + Math.random().toString(36).slice(2, 8);
-  }
 
   /**
    * 发布弹窗：中间草稿实时首屏 + 标题 / 自定义地址两个字段 + 底部四个动作。
@@ -343,11 +327,11 @@
       +     '<input class="pubTitle" type="text" autocomplete="off" spellcheck="false" placeholder="给页面起个名字">'
       +   '</label>'
       +   '<div class="field">'
-      +     '<span class="label">自定义地址</span>'
+      +     '<span class="label">自定义地址<span class="req">*</span></span>'
       +     '<div class="slug"><span class="prefix"></span>'
-      +       '<input class="pubName" type="text" autocomplete="off" spellcheck="false" maxlength="32" placeholder="留空自动生成">'
+      +       '<input class="pubName" type="text" autocomplete="off" spellcheck="false" maxlength="32" placeholder="必填，如 my-page">'
       +     '</div>'
-      +     '<span class="hint">只接受小写字母、数字和连字符，3–32 位</span>'
+      +     '<span class="hint">必填。只接受小写字母、数字和连字符，3–32 位，首尾不能是连字符</span>'
       +   '</div>'
       + '</div>'
       + '<div class="pubErr" hidden></div>'
@@ -437,8 +421,14 @@
         titleEl.focus();
         return;
       }
-      const raw = nameEl.value.trim().toLowerCase();
-      const name = raw || autoName(title);
+      // 地址改成必填：中文标题自动生成会得到一串没意义的字母数字，
+      // 与其替用户猜，不如让他自己定一个记得住的地址。
+      const name = nameEl.value.trim().toLowerCase();
+      if (!name) {
+        error('地址不能为空，自己起一个吧（比如 my-page）');
+        nameEl.focus();
+        return;
+      }
       if (!NAME_RE.test(name)) {
         error('地址只能用小写字母、数字和连字符，3–32 位，首尾不能是连字符');
         nameEl.focus();
