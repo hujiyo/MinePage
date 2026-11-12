@@ -2717,6 +2717,49 @@ body.dragging .wsFrame { pointer-events: none; }
   background: var(--panel);
   border-right: 1px solid var(--border);
 }
+
+/* 对话栏自己的导航栏：左边收会话栏、中间当前会话名、右边「⋯」。
+   把折叠按钮从顶栏挪到这里，视觉上「管哪一栏就待在哪一栏」。 */
+.wsChatHead {
+  flex: none;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.wsChatTitle {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wsChatMore {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted2);
+  font-size: 14px;
+  line-height: 1;
+  letter-spacing: 1px;
+  cursor: pointer;
+}
+.wsChatMore:hover { background: var(--panel2); color: var(--pink); }
+.wsChatMore:focus-visible { outline: 2px solid var(--pink); outline-offset: 1px; }
 .wsMsgs {
   flex: 1;
   min-height: 0;

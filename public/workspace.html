@@ -11,9 +11,6 @@
   <header class="wsHead">
     <div class="wsHeadL">
       <a class="wsBack" href="/sites" title="回创作页">←</a>
-      <button type="button" class="wsToggle" id="sideToggle" title="收起会话栏 Ctrl+B" aria-label="收起会话栏">
-        <span class="wsToggleIcon" aria-hidden="true"></span>
-      </button>
       <span class="wsTitle" id="wsTitle">草稿</span>
       <span class="badge" id="wsBadge">草稿</span>
     </div>
@@ -38,6 +35,16 @@
          title="拖动调整会话栏宽度，双击恢复默认"></div>
 
     <aside class="wsChat" id="wsChat">
+      <div class="wsChatHead">
+        <button type="button" class="wsToggle" id="sideToggle" title="收起会话栏 Ctrl+B" aria-label="收起会话栏">
+          <span class="wsToggleIcon" aria-hidden="true"></span>
+        </button>
+        <span class="wsChatTitle" id="chatTitle">对话</span>
+        <button type="button" class="wsChatMore" id="chatMore" title="当前对话的更多操作"
+                aria-label="当前对话的更多操作" aria-haspopup="menu">
+          <span aria-hidden="true">···</span>
+        </button>
+      </div>
       <div class="wsMsgs" id="msgs"></div>
       <div class="wsComposer">
         <textarea id="input" rows="1" placeholder="说说要改什么…"></textarea>
@@ -130,6 +137,8 @@ const wsChat = document.getElementById('wsChat');
 const gripSide = document.getElementById('gripSide');
 const gripChat = document.getElementById('gripChat');
 const sideToggle = document.getElementById('sideToggle');
+const chatTitle = document.getElementById('chatTitle');
+const chatMore = document.getElementById('chatMore');
 
 if (!/^[a-z0-9-]+$/.test(NAME)) location.href = '/sites';
 
@@ -363,6 +372,7 @@ function renderThreads() {
     tip.className = 'wsThreadEmpty';
     tip.textContent = '还没有会话';
     threadList.appendChild(tip);
+    syncChatTitle();
     return;
   }
 
@@ -395,6 +405,9 @@ function renderThreads() {
 
     threadList.appendChild(row);
   });
+
+  // 会话标题变了、切换了，顶部导航栏的标题要跟着走
+  syncChatTitle();
 }
 
 /* ---------------------------------------------------------------- 会话的「更多」菜单 */
@@ -466,6 +479,25 @@ document.addEventListener('click', closeThreadMenu);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeThreadMenu(); });
 document.addEventListener('scroll', closeThreadMenu, true);
 window.addEventListener('resize', closeThreadMenu);
+
+/** 对话栏顶部的标题跟着当前会话说：显示会话名，没会话时显示「对话」。 */
+function syncChatTitle() {
+  const t = THREADS.find((x) => x.id === threadId);
+  const title = (t && t.title) || '对话';
+  chatTitle.textContent = title;
+  chatTitle.title = t ? (title + '（' + Number(t.msg_count ?? t.msgCount ?? 0) + ' 条消息）') : '当前对话';
+}
+
+/** 顶部「⋯」：对当前会话开菜单。没有会话时按钮置灰。 */
+chatMore.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const t = THREADS.find((x) => x.id === threadId);
+  if (!t) {
+    MP.toast('还没有会话，先点左上角「＋ 新对话」');
+    return;
+  }
+  openThreadMenu(chatMore, t);
+});
 
 async function selectThread(id) {
   if (id === threadId) return;
