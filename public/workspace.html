@@ -16,24 +16,50 @@
     </div>
     <div class="wsHeadR">
       <button type="button" class="ghost tiny" id="openDraft">打开草稿</button>
+      <button type="button" class="ghost tiny" id="exportBtn">导出</button>
+      <button type="button" class="ghost tiny" id="historyBtn">历史</button>
       <button type="button" class="wsPub" id="publish">发布</button>
     </div>
   </header>
 
   <div class="wsMain">
-    <aside class="wsChat">
+    <aside class="wsSide" id="wsSide">
+      <div class="wsSideHead">
+        <span>会话</span>
+        <button type="button" class="tiny ghost" id="newThread" title="开一个新对话">＋ 新对话</button>
+      </div>
+      <div class="wsThreadList" id="threadList"></div>
+    </aside>
+
+    <div class="wsGrip" id="gripSide" role="separator" aria-orientation="vertical"
+         title="拖动调整会话栏宽度，双击恢复默认"></div>
+
+    <aside class="wsChat" id="wsChat">
+      <div class="wsChatHead">
+        <button type="button" class="wsToggle" id="sideToggle" title="收起会话栏 Ctrl+B" aria-label="收起会话栏">
+          <span class="wsToggleIcon" aria-hidden="true"></span>
+        </button>
+        <span class="wsChatTitle" id="chatTitle">对话</span>
+        <button type="button" class="wsChatMore" id="chatMore" title="当前对话的更多操作"
+                aria-label="当前对话的更多操作" aria-haspopup="menu">
+          <span aria-hidden="true">···</span>
+        </button>
+      </div>
       <div class="wsMsgs" id="msgs"></div>
       <div class="wsComposer">
         <textarea id="input" rows="1" placeholder="说说要改什么…"></textarea>
         <div class="wsBar">
           <button type="button" class="iconBtn" id="plus" title="附加内容">＋</button>
-          <span class="wsModel">GLM-5.3-Flash · 适中</span>
+          <span class="wsModel" id="threadModel">未接模型</span>
           <button type="button" class="miniChip" id="skill">技能</button>
           <span class="spacer"></span>
           <button type="button" class="sendBtn" id="send" title="发送（Enter）">↑</button>
         </div>
       </div>
     </aside>
+
+    <div class="wsGrip" id="gripChat" role="separator" aria-orientation="vertical"
+         title="拖动调整对话栏宽度，双击恢复默认"></div>
 
     <section class="wsPane">
       <div class="wsTabs">
@@ -73,7 +99,7 @@
         </div>
       </div>
     </section>
-  </aside>
+  </div>
 </main>
 
 <script src="/_assets/app.js"></script>
@@ -88,6 +114,10 @@ let savedText = '';
 let dirty = false;
 let sending = false;
 
+// 会话
+let THREADS = [];
+let threadId = 0;          // 当前会话；0 表示还没选（首次进来自动落到最近一个）
+
 const msgs = document.getElementById('msgs');
 const input = document.getElementById('input');
 const send = document.getElementById('send');
@@ -100,11 +130,167 @@ const editState = document.getElementById('editState');
 const saveFile = document.getElementById('saveFile');
 const codeWrap = document.getElementById('codeWrap');
 const editEmpty = document.getElementById('editEmpty');
+const threadList = document.getElementById('threadList');
+const threadModel = document.getElementById('threadModel');
+const wsSide = document.getElementById('wsSide');
+const wsChat = document.getElementById('wsChat');
+const gripSide = document.getElementById('gripSide');
+const gripChat = document.getElementById('gripChat');
+const sideToggle = document.getElementById('sideToggle');
+const chatTitle = document.getElementById('chatTitle');
+const chatMore = document.getElementById('chatMore');
 
 if (!/^[a-z0-9-]+$/.test(NAME)) location.href = '/sites';
 
 MP.topbar({ active: 'create' });
 MP.autoGrow(input);
+
+/* ---------------------------------------------------------------- 三栏宽度与折叠 */
+
+// 三块区域的宽度记在 localStorage：同一台机器上换个草稿进来还是自己调好的比例。
+// 只存 px 不存百分比：窗口缩放时按百分比换算会让「我调好的对话栏」忽然变宽变窄。
+const LAYOUT_KEY = 'mp.wsLayout';
+const LAYOUT_DEFAULT = { side: 200, chat: 380, sideHidden: false };
+const SIDE_MIN = 140;
+const CHAT_MIN = 280;
+const PANE_MIN = 320;   // 预览区至少留这么宽，否则调宽度时会把预览挤没
+
+let layout = { ...LAYOUT_DEFAULT };
+
+function readLayout() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAYOUT_KEY) || '{}');
+    const pick = (v, def, min) => (Number.isFinite(v) ? Math.max(min, Math.round(v)) : def);
+    return {
+      side: pick(raw.side, LAYOUT_DEFAULT.side, SIDE_MIN),
+      chat: pick(raw.chat, LAYOUT_DEFAULT.chat, CHAT_MIN),
+      sideHidden: Boolean(raw.sideHidden),
+    };
+  } catch {
+    return { ...LAYOUT_DEFAULT };
+  }
+}
+
+function saveLayout() {
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); } catch { /* 无痕模式等 */ }
+}
+
+/** 把当前 layout 应用到 DOM 上。折叠时侧栏宽度归零、拖条一起藏起来。 */
+function applyLayout() {
+  document.querySelector('.wsMain').classList.toggle('sideHidden', layout.sideHidden);
+  wsSide.style.width = layout.sideHidden ? '0px' : layout.side + 'px';
+  wsChat.style.width = layout.chat + 'px';
+  gripSide.hidden = layout.sideHidden;
+  syncToggle();
+}
+
+function syncToggle() {
+  sideToggle.classList.toggle('collapsed', layout.sideHidden);
+  const label = layout.sideHidden ? '展开会话栏 Ctrl+B' : '收起会话栏 Ctrl+B';
+  sideToggle.title = label;
+  sideToggle.setAttribute('aria-label', label);
+}
+
+function setSideHidden(hidden) {
+  layout.sideHidden = hidden;
+  applyLayout();
+  saveLayout();
+}
+
+sideToggle.addEventListener('click', () => setSideHidden(!layout.sideHidden));
+
+document.addEventListener('keydown', (e) => {
+  // Ctrl+B / Cmd+B：和大多数编辑器一致
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'b' || e.key === 'B')) {
+    e.preventDefault();
+    setSideHidden(!layout.sideHidden);
+  }
+});
+
+/**
+ * 给一根拖条装上左右拖动。
+ * @param {HTMLElement} grip 拖条
+ * @param {HTMLElement} target 要改宽度的栏
+ * @param {'side'|'chat'} key layout 里对应的字段
+ * @param {number} min 这栏的最小宽度
+ * @param {(delta:number)=>number} maxOf 这栏最多能拉多宽（要扣掉旁边几栏）
+ */
+function bindGrip(grip, target, key, min, maxOf) {
+  let dragging = false;
+  let startX = 0;
+  let startW = 0;
+
+  const onMove = (e) => {
+    if (!dragging) return;
+    const x = e.touches ? e.touches[0].clientX : e.clientX;
+    const next = Math.min(Math.max(startW + (x - startX), min), maxOf(x));
+    target.style.width = next + 'px';
+    layout[key] = Math.round(next);
+    // 拖动过程中实时重算预览缩放
+    frame.classList.add('resizing');
+  };
+
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    grip.classList.remove('on');
+    document.body.classList.remove('dragging');
+    frame.classList.remove('resizing');
+    saveLayout();
+  };
+
+  const onDown = (e) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    dragging = true;
+    startX = e.touches ? e.touches[0].clientX : e.clientX;
+    startW = target.getBoundingClientRect().width;
+    grip.classList.add('on');
+    document.body.classList.add('dragging');
+    e.preventDefault();
+  };
+
+  grip.addEventListener('mousedown', onDown);
+  grip.addEventListener('touchstart', onDown, { passive: false });
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('touchmove', onMove, { passive: false });
+  document.addEventListener('mouseup', onUp);
+  document.addEventListener('touchend', onUp);
+
+  // 双击恢复默认宽度
+  grip.addEventListener('dblclick', () => {
+    layout[key] = LAYOUT_DEFAULT[key];
+    applyLayout();
+    saveLayout();
+  });
+}
+
+function initLayout() {
+  layout = readLayout();
+  applyLayout();
+
+  bindGrip(gripSide, wsSide, 'side', SIDE_MIN, () => {
+    // 会话栏最多拉到「整个主区减去对话栏最小值、预览最小值、两根拖条」
+    const total = document.querySelector('.wsMain').getBoundingClientRect().width;
+    return Math.max(SIDE_MIN, total - layout.chat - PANE_MIN - 12);
+  });
+
+  bindGrip(gripChat, wsChat, 'chat', CHAT_MIN, () => {
+    const total = document.querySelector('.wsMain').getBoundingClientRect().width;
+    const sideW = layout.sideHidden ? 0 : layout.side;
+    return Math.max(CHAT_MIN, total - sideW - PANE_MIN - 12);
+  });
+
+  // 窗口变小有可能把预览挤到看不见：收一下对话栏，别去动用户主动调的会话栏
+  window.addEventListener('resize', () => {
+    const total = document.querySelector('.wsMain').getBoundingClientRect().width;
+    const sideW = layout.sideHidden ? 0 : layout.side;
+    const avail = total - sideW - PANE_MIN - 12;
+    if (layout.chat > avail && avail >= CHAT_MIN) {
+      layout.chat = Math.round(avail);
+      applyLayout();
+    }
+  });
+}
 
 /* ---------------------------------------------------------------- 顶栏与预览 */
 
@@ -140,8 +326,8 @@ async function boot() {
   }
 
   reload();
-  loadMessages();
   loadFiles();
+  await loadThreads();
 
   // 从 /new 带过来的第一条消息：草稿已经建好，这里补发一次
   const first = sessionStorage.getItem('mp:firstMessage:' + NAME);
@@ -151,25 +337,292 @@ async function boot() {
   }
 }
 
-function loadMessages() {
-  MP.loadSiteMessages(USERNAME, NAME)
-    .then((list) => MP.renderMessages(msgs, list, '有什么想改的，直接说。'))
-    .catch(() => MP.renderMessages(msgs, [], '对话记录加载失败，可以继续发消息。'));
+/* ---------------------------------------------------------------- 会话列表 */
+
+const api = (tail) => MP.siteApiOf(USERNAME, NAME, tail);
+
+async function loadThreads() {
+  try {
+    const data = await MP.api(api('/threads'));
+    THREADS = data.threads || [];
+  } catch {
+    THREADS = [];
+  }
+
+  // 没有任何会话时自动建一个，避免用户面对一个空下拉无从下手
+  if (!THREADS.length) {
+    try {
+      const created = await MP.api(api('/threads'), { method: 'POST', body: {} });
+      THREADS = [created.thread];
+    } catch { /* 建不出来就保持空列表，下面会显示提示 */ }
+  }
+
+  // 首次进入：落到最近更新的那个会话
+  if (!threadId && THREADS.length) threadId = THREADS[0].id;
+
+  renderThreads();
+  await loadMessages();
 }
 
-/* ---------------------------------------------------------------- 发送 */
+function renderThreads() {
+  threadList.textContent = '';
+
+  if (!THREADS.length) {
+    const tip = document.createElement('div');
+    tip.className = 'wsThreadEmpty';
+    tip.textContent = '还没有会话';
+    threadList.appendChild(tip);
+    syncChatTitle();
+    return;
+  }
+
+  THREADS.forEach((t) => {
+    const row = document.createElement('div');
+    row.className = 'wsThread' + (t.id === threadId ? ' on' : '');
+    row.dataset.id = String(t.id);
+
+    const name = document.createElement('button');
+    name.type = 'button';
+    name.className = 'wsThreadName';
+    name.textContent = t.title || '未命名会话';
+    name.title = (t.title || '未命名会话') + '（' + (t.msg_count || 0) + ' 条消息）';
+    name.addEventListener('click', () => selectThread(t.id));
+    row.appendChild(name);
+
+    // 更多操作收进一个「⋯」按钮：以后加功能只往菜单里塞，列表行不会被撑爆
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'wsThreadMore';
+    more.title = '更多操作';
+    more.setAttribute('aria-label', '更多操作');
+    more.setAttribute('aria-haspopup', 'menu');
+    more.innerHTML = '<span aria-hidden="true">···</span>';
+    more.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openThreadMenu(more, t);
+    });
+    row.appendChild(more);
+
+    threadList.appendChild(row);
+  });
+
+  // 会话标题变了、切换了，顶部导航栏的标题要跟着走
+  syncChatTitle();
+}
+
+/* ---------------------------------------------------------------- 会话的「更多」菜单 */
+
+let openMenuEl = null;
+
+/** 关掉当前打开的菜单（如果点的是菜单自己就跳过）。 */
+function closeThreadMenu() {
+  if (openMenuEl) {
+    openMenuEl.remove();
+    openMenuEl = null;
+  }
+}
+
+/**
+ * 在按钮旁边弹出操作菜单。
+ * @param {HTMLElement} anchor 「⋯」按钮
+ * @param {object} thread 对应的会话
+ */
+function openThreadMenu(anchor, thread) {
+  // 再点同一个按钮就是收起
+  if (openMenuEl && openMenuEl.dataset.for === String(thread.id)) {
+    closeThreadMenu();
+    return;
+  }
+  closeThreadMenu();
+
+  const menu = document.createElement('div');
+  menu.className = 'wsMenu';
+  menu.dataset.for = String(thread.id);
+  menu.setAttribute('role', 'menu');
+
+  const item = (label, danger, onClick) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'wsMenuItem' + (danger ? ' danger' : '');
+    btn.textContent = label;
+    btn.setAttribute('role', 'menuitem');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeThreadMenu();
+      onClick();
+    });
+    menu.appendChild(btn);
+  };
+
+  item('重命名', false, () => renameThread(thread));
+  item('删除', true, () => removeThread(thread));
+
+  document.body.appendChild(menu);
+
+  // 贴着按钮定位，超出视口就往回收
+  const r = anchor.getBoundingClientRect();
+  const mw = menu.offsetWidth;
+  const mh = menu.offsetHeight;
+  let left = r.right - mw;
+  let top = r.bottom + 4;
+  if (left < 8) left = 8;
+  if (left + mw > window.innerWidth - 8) left = window.innerWidth - mw - 8;
+  if (top + mh > window.innerHeight - 8) top = r.top - mh - 4;
+  menu.style.left = left + 'px';
+  menu.style.top = Math.max(8, top) + 'px';
+
+  openMenuEl = menu;
+}
+
+// 点别处 / 按 Esc / 滚动 / 改窗口大小都收起菜单
+document.addEventListener('click', closeThreadMenu);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeThreadMenu(); });
+document.addEventListener('scroll', closeThreadMenu, true);
+window.addEventListener('resize', closeThreadMenu);
+
+/** 对话栏顶部的标题跟着当前会话说：显示会话名，没会话时显示「对话」。 */
+function syncChatTitle() {
+  const t = THREADS.find((x) => x.id === threadId);
+  const title = (t && t.title) || '对话';
+  chatTitle.textContent = title;
+  chatTitle.title = t ? (title + '（' + Number(t.msg_count ?? t.msgCount ?? 0) + ' 条消息）') : '当前对话';
+}
+
+/** 顶部「⋯」：对当前会话开菜单。没有会话时按钮置灰。 */
+chatMore.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const t = THREADS.find((x) => x.id === threadId);
+  if (!t) {
+    MP.toast('还没有会话，先点左上角「＋ 新对话」');
+    return;
+  }
+  openThreadMenu(chatMore, t);
+});
+
+async function selectThread(id) {
+  if (id === threadId) return;
+  if (sending) {
+    MP.toast('等这条回复出来再切会话');
+    return;
+  }
+  threadId = id;
+  renderThreads();
+  await loadMessages();
+}
+
+async function renameThread(t) {
+  const next = await MP.prompt({
+    text: '给这个会话起个名字',
+    value: t.title || '',
+    placeholder: '比如：改配色、加导航',
+  });
+  if (next === null) return;
+  const title = String(next).trim();
+  if (!title) return;
+  try {
+    await MP.api(api('/threads/' + t.id), { method: 'PUT', body: { title } });
+    t.title = title;
+    renderThreads();
+  } catch (e) {
+    MP.toast(e.message || '改名失败');
+  }
+}
+
+async function removeThread(t) {
+  const ok = await MP.ask({
+    text: '删掉会话「' + (t.title || '未命名会话') + '」？里面的对话记录会一起删掉，删了不能恢复。',
+    buttons: [
+      { key: 'cancel', label: '取消' },
+      { key: 'delete', label: '删除', primary: true },
+    ],
+  });
+  if (ok !== 'delete') return;
+
+  try {
+    await MP.api(api('/threads/' + t.id), { method: 'DELETE' });
+    THREADS = THREADS.filter((x) => x.id !== t.id);
+    if (threadId === t.id) threadId = THREADS.length ? THREADS[0].id : 0;
+    if (!THREADS.length) {
+      await loadThreads();   // 删光了就再建一个默认的
+      return;
+    }
+    renderThreads();
+    await loadMessages();
+  } catch (e) {
+    MP.toast(e.message || '删除失败');
+  }
+}
+
+document.getElementById('newThread').addEventListener('click', async () => {
+  if (sending) {
+    MP.toast('等这条回复出来再开新对话');
+    return;
+  }
+  try {
+    const created = await MP.api(api('/threads'), { method: 'POST', body: {} });
+    THREADS.unshift(created.thread);
+    threadId = created.thread.id;
+    renderThreads();
+    await loadMessages();
+    input.focus();
+  } catch (e) {
+    MP.toast(e.message || '建会话失败');
+  }
+});
+
+/* ---------------------------------------------------------------- 消息 */
+
+async function loadMessages() {
+  if (!threadId) {
+    MP.renderMessages(msgs, [], '还没有会话，点左上角「新对话」开始。');
+    return;
+  }
+  try {
+    const data = await MP.api(api('/threads/' + threadId + '/messages'));
+    MP.renderMessages(msgs, data.messages || [], '有什么想改的，直接说。');
+  } catch {
+    MP.renderMessages(msgs, [], '对话记录加载失败，可以继续发消息。');
+  }
+}
 
 async function sendMessage(text) {
   if (sending) return;
   const content = String(text == null ? input.value : text).trim();
   if (!content) return;
+  if (!threadId) {
+    MP.toast('先建一个会话');
+    return;
+  }
   sending = true;
   send.disabled = true;
   if (text == null) input.value = '';
   MP.autoGrow(input)();
 
   try {
-    await MP.pushMessage({ list: msgs, username: USERNAME, name: NAME, content });
+    await MP.pushMessage({
+      list: msgs,
+      username: USERNAME,
+      name: NAME,
+      content,
+      threadId,
+      onReply: () => {
+        // 第一条消息自动给会话起名，列表里不再全是「新对话」。
+        // 注意字段来源有两处：接口列表是 msg_count（下划线），新建返回的是 msgCount，
+        // 两个都要认，否则自动改名永远不触发。
+        const t = THREADS.find((x) => x.id === threadId);
+        const count = t ? Number(t.msg_count ?? t.msgCount ?? 0) : 0;
+        if (t && (!t.title || t.title === '新对话') && count === 0) {
+          const title = content.slice(0, 20);
+          MP.api(api('/threads/' + threadId), { method: 'PUT', body: { title } })
+            .then(() => {
+              t.title = title;
+              t.msg_count = 2;
+              renderThreads();
+            })
+            .catch(() => {});
+        }
+      },
+    });
   } catch (e) {
     MP.toast(e.message || '发送失败');
   } finally {
@@ -214,7 +667,7 @@ document.getElementById('reload').addEventListener('click', () => {
 
 async function loadFiles() {
   try {
-    const data = await MP.api(MP.siteApiOf(USERNAME, NAME, '/files'));
+    const data = await MP.api(api('/files'));
     FILES = data.files || [];
     fileList.textContent = '';
     if (!FILES.length) {
@@ -298,7 +751,7 @@ async function loadFile(path) {
   editPath.textContent = path;
 
   try {
-    const data = await MP.api(MP.siteApiOf(USERNAME, NAME, '/files/content?path=' + encodeURIComponent(path)));
+    const data = await MP.api(api('/files/content?path=' + encodeURIComponent(path)));
     if (data.binary) {
       codeWrap.hidden = true;
       editEmpty.hidden = false;
@@ -348,7 +801,7 @@ async function saveCurrent() {
   saveFile.textContent = '保存中…';
   try {
     // 文件接口按原始字节存，这里直接传文本
-    await fetch(MP.siteApiOf(USERNAME, NAME, '/files?path=' + encodeURIComponent(currentPath)), {
+    await fetch(api('/files?path=' + encodeURIComponent(currentPath)), {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
       body: code.value,
@@ -379,6 +832,126 @@ window.addEventListener('beforeunload', (e) => {
   e.returnValue = '';
 });
 
+/* ---------------------------------------------------------------- 历史与回滚 */
+
+let snapshots = [];
+
+async function openHistory() {
+  try {
+    const data = await MP.api(api('/snapshots'));
+    snapshots = data.snapshots || [];
+  } catch (e) {
+    MP.alert(e.message || '读不到历史');
+    return;
+  }
+
+  const mask = document.createElement('div');
+  mask.className = 'modal-mask';
+  const card = document.createElement('div');
+  card.className = 'modal historyModal';
+  card.innerHTML = ''
+    + '<button type="button" class="modal-x" aria-label="关闭">×</button>'
+    + '<h2 class="modal-title">改动历史</h2>'
+    + '<p class="hint" style="margin:0 0 12px">'
+    +   '每次改动前会自动存一份快照，点「还原」就能退回去。只记录被改动的那几个文件。'
+    + '</p>'
+    + '<div class="historyList"></div>';
+
+  const list = card.querySelector('.historyList');
+  if (!snapshots.length) {
+    const empty = document.createElement('div');
+    empty.className = 'historyEmpty';
+    empty.textContent = '还没有改动记录。';
+    list.appendChild(empty);
+  } else {
+    snapshots.forEach((s) => list.appendChild(historyRow(s, card)));
+  }
+
+  const close = () => mask.remove();
+  card.querySelector('.modal-x').addEventListener('click', close);
+  mask.addEventListener('click', (e) => { if (e.target === mask) close(); });
+  document.addEventListener('keydown', function onEsc(e) {
+    if (e.key !== 'Escape') return;
+    document.removeEventListener('keydown', onEsc);
+    close();
+  });
+
+  mask.appendChild(card);
+  document.body.appendChild(mask);
+}
+
+function historyRow(s, card) {
+  const row = document.createElement('div');
+  row.className = 'historyRow';
+
+  const info = document.createElement('div');
+  info.className = 'historyInfo';
+  const title = document.createElement('b');
+  title.textContent = s.label || '改动';
+  const meta = document.createElement('span');
+  meta.className = 'muted';
+  meta.textContent = fmtTime(s.created_at) + ' · ' + fmtSize(s.size);
+  info.appendChild(title);
+  info.appendChild(meta);
+  row.appendChild(info);
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'tiny ghost';
+  btn.textContent = '还原';
+  btn.addEventListener('click', () => restore(s, btn, card));
+  row.appendChild(btn);
+
+  return row;
+}
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso || '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function restore(snap, btn, card) {
+  const ok = await MP.ask({
+    text: '还原到「' + (snap.label || '这次改动') + '」之前的状态？\n'
+      + '当前状态会先自动存一份，点错了还能退回来。',
+    buttons: [
+      { key: 'cancel', label: '取消' },
+      { key: 'restore', label: '还原', primary: true },
+    ],
+  });
+  if (ok !== 'restore') return;
+
+  btn.disabled = true;
+  btn.textContent = '还原中…';
+  try {
+    const data = await MP.api(api('/snapshots/' + snap.id + '/restore'), { method: 'POST' });
+    card.remove();
+    document.querySelector('.modal-mask')?.remove();
+    MP.toast('已还原，刷新预览看看');
+    reload();
+    loadFiles();
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '还原';
+    MP.alert(e.message || '还原失败');
+  }
+}
+
+document.getElementById('historyBtn').addEventListener('click', openHistory);
+
+/* ---------------------------------------------------------------- 导出 */
+
+document.getElementById('exportBtn').addEventListener('click', () => {
+  if (dirty) {
+    MP.alert('先把代码保存了再导出');
+    return;
+  }
+  // 走浏览器原生下载：后端已经设了 Content-Disposition: attachment
+  location.href = api('/export');
+});
+
 /* ---------------------------------------------------------------- 发布 */
 
 document.getElementById('publish').addEventListener('click', () => {
@@ -400,6 +973,7 @@ document.getElementById('openDraft').addEventListener('click', () => {
   window.open(MP.draftUrl(USERNAME, NAME), '_blank', 'noopener');
 });
 
+initLayout();
 boot();
 </script>
 </body>

@@ -2235,6 +2235,18 @@ code.token {
   animation: modalIn .16s ease-out;
 }
 .askText { font-size: 14px; color: var(--text); line-height: 1.7; margin-bottom: 18px; white-space: pre-wrap; }
+.askInput {
+  width: 100%;
+  margin: -6px 0 16px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel2);
+  font-family: inherit;
+  font-size: 13px;
+  outline: 0;
+}
+.askInput:focus { border-color: var(--pink); background: var(--panel); }
 .askBtns { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
 .askBtn {
   padding: 7px 16px;
@@ -2290,6 +2302,13 @@ code.token {
 
 .pubFields { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
 @media (max-width: 620px) { .pubFields { grid-template-columns: 1fr; } }
+
+/* 必填标记：地址现在是必填项，用一个小红星标出来 */
+.label .req {
+  margin-left: 3px;
+  color: var(--danger);
+  font-weight: 600;
+}
 
 .pubErr {
   margin: -4px 0 12px;
@@ -2489,7 +2508,204 @@ code.token {
 }
 .wsPub { padding: 6px 18px; font-size: 13px; }
 
+/* 折叠按钮：图标是一个「左栏 + 右栏」的方框，收起后左边那条变空心。
+   位置在返回键右边，和常见编辑器（VS Code / Cursor）一致。 */
+.wsToggle {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted2);
+  cursor: pointer;
+}
+.wsToggle:hover { background: var(--panel2); color: var(--text); }
+.wsToggleIcon {
+  width: 15px;
+  height: 13px;
+  border: 1.6px solid currentColor;
+  border-radius: 3px;
+  position: relative;
+  display: block;
+}
+/* 左栏那条竖条：展开时是实心的（表示「会话栏在这儿」），收起后消失只剩外框。
+   这样图标本身就说清了当前状态，不用靠记忆去猜。 */
+.wsToggleIcon::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: currentColor;
+  transition: opacity .16s ease;
+}
+.wsToggle.collapsed .wsToggleIcon::before { opacity: 0; }
+
 .wsMain { flex: 1; display: flex; min-height: 0; }
+
+/* 两栏之间的拖条：平时透明，hover 才显形；拖的时候整页锁光标 */
+.wsGrip {
+  flex: none;
+  width: 6px;
+  margin: 0 -3px;
+  position: relative;
+  z-index: 5;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+.wsGrip::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: transparent;
+  transition: background .15s;
+}
+.wsGrip:hover::after,
+.wsGrip.on::after { background: var(--pink); }
+.wsGrip[hidden] { display: none; }
+
+/* 拖动中：整页不让选中文字，鼠标一直是 col-resize */
+body.dragging { cursor: col-resize; user-select: none; }
+body.dragging * { cursor: col-resize !important; }
+/* 拖动时预览里的 iframe 会吃掉鼠标事件，pointer-events:none 让它别捣乱 */
+body.dragging .wsFrame { pointer-events: none; }
+.wsFrame.resizing { pointer-events: none; }
+
+/* 收起会话栏：宽度归零、内容一起藏掉 */
+.wsMain.sideHidden .wsSide {
+  width: 0 !important;
+  overflow: hidden;
+  visibility: hidden;
+  border-right: 0;
+}
+
+/* 会话栏：一个草稿可以有多条对话，这里列出来 */
+.wsSide {
+  flex: none;
+  width: 200px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel2);
+  border-right: 1px solid var(--border);
+}
+.wsSideHead {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 10px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted2);
+}
+.wsSideHead button { padding: 3px 8px; font-size: 11px; }
+.wsThreadList {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.wsThread {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 8px;
+  padding: 0 2px;
+}
+.wsThread:hover { background: var(--panel); }
+.wsThread.on { background: var(--panel); box-shadow: inset 2px 0 0 var(--pink); }
+.wsThreadName {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 6px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.wsThread.on .wsThreadName { font-weight: 600; }
+/* 「⋯」更多按钮：平时淡出，hover / 选中 / 菜单打开时才显形。
+   一个按钮管住所有操作，以后往菜单里加功能不会再挤占列表行。 */
+.wsThreadMore {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  letter-spacing: 1px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .15s, background .15s;
+}
+.wsThread:hover .wsThreadMore,
+.wsThread.on .wsThreadMore,
+.wsThreadMore:focus-visible { opacity: 1; }
+.wsThreadMore:hover { background: var(--panel2); color: var(--pink); }
+
+/* 会话的弹出菜单：fixed 定位，贴着「⋯」按钮，点外面就收 */
+.wsMenu {
+  position: fixed;
+  z-index: 400;
+  min-width: 116px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: var(--shadow-lift);
+  animation: menuIn .12s ease-out;
+}
+@keyframes menuIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+.wsMenuItem {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.wsMenuItem:hover { background: var(--panel2); color: var(--pink); }
+.wsMenuItem.danger { color: var(--danger); }
+.wsMenuItem.danger:hover { background: #fdeeee; color: var(--danger); }
+.wsThreadEmpty {
+  padding: 20px 8px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
 
 /* 左：对话栏 */
 .wsChat {
@@ -2501,6 +2717,49 @@ code.token {
   background: var(--panel);
   border-right: 1px solid var(--border);
 }
+
+/* 对话栏自己的导航栏：左边收会话栏、中间当前会话名、右边「⋯」。
+   把折叠按钮从顶栏挪到这里，视觉上「管哪一栏就待在哪一栏」。 */
+.wsChatHead {
+  flex: none;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.wsChatTitle {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wsChatMore {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted2);
+  font-size: 14px;
+  line-height: 1;
+  letter-spacing: 1px;
+  cursor: pointer;
+}
+.wsChatMore:hover { background: var(--panel2); color: var(--pink); }
+.wsChatMore:focus-visible { outline: 2px solid var(--pink); outline-offset: 1px; }
 .wsMsgs {
   flex: 1;
   min-height: 0;
@@ -2722,11 +2981,54 @@ code.token {
 }
 .wsCodeWrap textarea#code:focus { border: 0; }
 
-/* 窄屏：对话栏收到上面，预览占满 */
+/* 历史面板：列出每次改动前的快照，可逐条还原 */
+.historyModal { width: 560px; padding: 22px 24px 18px; }
+.historyList {
+  max-height: 52vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.historyRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel2);
+}
+.historyInfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.historyInfo b {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.historyInfo span { font-size: 11px; }
+.historyEmpty {
+  padding: 30px 10px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 窄屏：三栏改成上下堆叠，拖条这时候没有意义，藏掉 */
 @media (max-width: 880px) {
   .wsMain { flex-direction: column; }
+  .wsGrip { display: none; }
+  .wsSide {
+    width: auto !important;
+    max-height: 132px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .wsThreadList { flex-direction: row; flex-wrap: wrap; }
+  .wsThread { flex: none; max-width: 46%; }
   .wsChat {
-    width: 100%;
+    width: auto !important;
     height: 46vh;
     border-right: 0;
     border-bottom: 1px solid var(--border);
@@ -2735,6 +3037,7 @@ code.token {
   .wsFiles { width: 150px; }
   .studioHead { flex-wrap: wrap; }
   .pubModal { width: 100%; }
+  .historyModal { width: 100%; }
   .homeGrid { grid-template-columns: 1fr; }
   .homeSide { position: static; }
 }

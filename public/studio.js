@@ -42,11 +42,12 @@
     return data.messages || [];
   };
 
-  /** 发一条消息；服务端同时落库用户消息与 agent 占位回复，一起返回。 */
-  MP.sendSiteMessage = function (username, name, content) {
+  /** 发一条消息；服务端同时落库用户消息与 agent 占位回复，一起返回。
+   *  threadId 给了就挂到那个会话上，不给就落到最近一个会话。 */
+  MP.sendSiteMessage = function (username, name, content, threadId) {
     return MP.api(MP.siteApiOf(username, name, '/messages'), {
       method: 'POST',
-      body: { content },
+      body: threadId ? { content, threadId } : { content },
     });
   };
 
@@ -230,30 +231,67 @@
     return MP.ask({ text });
   };
 
+  /**
+   * 单行输入小弹窗（改名字这类场景）。
+   * @param {{text:string, value?:string, placeholder?:string, okLabel?:string}} opt
+   * @returns {Promise<string|null>} 输入的值；取消 / Esc / 点遮罩返回 null
+   */
+  MP.prompt = function (opt) {
+    const o = opt || {};
+    return new Promise((resolve) => {
+      const mask = document.createElement('div');
+      mask.className = 'askMask';
+      const card = document.createElement('div');
+      card.className = 'askCard';
+      card.innerHTML = '<div class="askText"></div>'
+        + '<input class="askInput" type="text" autocomplete="off" spellcheck="false">'
+        + '<div class="askBtns"></div>';
+      card.querySelector('.askText').textContent = o.text || '';
+
+      const field = card.querySelector('.askInput');
+      field.value = o.value ?? '';
+      if (o.placeholder) field.placeholder = o.placeholder;
+
+      let settled = false;
+      const done = (value) => {
+        if (settled) return;
+        settled = true;
+        mask.remove();
+        document.removeEventListener('keydown', onKey);
+        resolve(value);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') done(null);
+        if (e.key === 'Enter') { e.preventDefault(); done(field.value); }
+      };
+
+      [{ key: 'cancel', label: '取消', primary: false },
+        { key: 'ok', label: o.okLabel || '确定', primary: true }].forEach((b) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = b.primary ? 'askBtn primary' : 'askBtn ghost';
+        btn.textContent = b.label;
+        btn.addEventListener('click', () => done(b.primary ? field.value : null));
+        card.querySelector('.askBtns').appendChild(btn);
+      });
+
+      mask.appendChild(card);
+      mask.addEventListener('click', (e) => { if (e.target === mask) done(null); });
+      document.addEventListener('keydown', onKey);
+      document.body.appendChild(mask);
+      field.focus();
+      field.select();
+    });
+  };
+
   /* ----------------------------------------------------------
      3. 发布弹窗
      ---------------------------------------------------------- */
 
   // 与后端 lib/names.js 同口径：3–32 位小写字母 / 数字 / 连字符，
-  // 首尾不能是连字符。留空则自动生成。
+  // 首尾不能是连字符。地址必须手动填写，不再自动生成 —— 中文标题转不出
+  // 有意义的英文地址，硬转只会得到一串乱七八糟的字母数字。
   const NAME_RE = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/;
-
-  /** 标题 → 可用的站名（非 ASCII 一律丢掉；凑不够 3 位就加随机后缀）。 */
-  function autoName(title) {
-    const base = String(title || '')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 24)
-      .replace(/-+$/g, '');
-    if (base.length >= 3 && NAME_RE.test(base)) return base;
-    if (base.length >= 2) {
-      const tail = '-' + Math.random().toString(36).slice(2, 6);
-      const full = (base + tail).slice(0, 32).replace(/-+$/g, '');
-      if (NAME_RE.test(full)) return full;
-    }
-    return 'page-' + Math.random().toString(36).slice(2, 8);
-  }
 
   /**
    * 发布弹窗：中间草稿实时首屏 + 标题 / 自定义地址两个字段 + 底部四个动作。
@@ -289,11 +327,11 @@
       +     '<input class="pubTitle" type="text" autocomplete="off" spellcheck="false" placeholder="给页面起个名字">'
       +   '</label>'
       +   '<div class="field">'
-      +     '<span class="label">自定义地址</span>'
+      +     '<span class="label">自定义地址<span class="req">*</span></span>'
       +     '<div class="slug"><span class="prefix"></span>'
-      +       '<input class="pubName" type="text" autocomplete="off" spellcheck="false" maxlength="32" placeholder="留空自动生成">'
+      +       '<input class="pubName" type="text" autocomplete="off" spellcheck="false" maxlength="32" placeholder="必填，如 my-page">'
       +     '</div>'
-      +     '<span class="hint">只接受小写字母、数字和连字符，3–32 位</span>'
+      +     '<span class="hint">必填。只接受小写字母、数字和连字符，3–32 位，首尾不能是连字符</span>'
       +   '</div>'
       + '</div>'
       + '<div class="pubErr" hidden></div>'
@@ -383,8 +421,14 @@
         titleEl.focus();
         return;
       }
-      const raw = nameEl.value.trim().toLowerCase();
-      const name = raw || autoName(title);
+      // 地址改成必填：中文标题自动生成会得到一串没意义的字母数字，
+      // 与其替用户猜，不如让他自己定一个记得住的地址。
+      const name = nameEl.value.trim().toLowerCase();
+      if (!name) {
+        error('地址不能为空，自己起一个吧（比如 my-page）');
+        nameEl.focus();
+        return;
+      }
       if (!NAME_RE.test(name)) {
         error('地址只能用小写字母、数字和连字符，3–32 位，首尾不能是连字符');
         nameEl.focus();
@@ -522,7 +566,7 @@
    * 失败时把乐观气泡标红并给出原因（保留输入内容，用户不用重打）。
    */
   MP.pushMessage = async function (opt) {
-    const { list, username, name, content } = opt;
+    const { list, username, name, content, threadId } = opt;
     const pending = MP.bubble('user', content, true);
     if (list) {
       const empty = list.querySelector('.chatEmpty');
@@ -531,7 +575,7 @@
       list.scrollTop = list.scrollHeight;
     }
     try {
-      const data = await MP.sendSiteMessage(username, name, content);
+      const data = await MP.sendSiteMessage(username, name, content, threadId);
       pending.classList.remove('pending');
       if (list && data.agent) {
         list.appendChild(MP.bubble('agent', data.agent.content));
