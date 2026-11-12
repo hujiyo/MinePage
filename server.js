@@ -1,3 +1,8 @@
+// 必须放在所有其他 import 之前：ESM 按声明顺序求值，
+// 这个模块负责把 .env 里的变量塞进 process.env，
+// 后面的 config.js 才能读到。生产环境用 systemd 的 EnvironmentFile，没有 .env 也无妨。
+import './lib/env.js';
+
 import http from 'node:http';
 import path from 'node:path';
 import zlib from 'node:zlib';
@@ -145,6 +150,7 @@ import {
   pruneTasks,
   publicTask,
   reapStaleTasks,
+  updatePartial,
   updateProgress,
 } from './lib/agent/task.js';
 import { getSiteCover, removeSiteCover, setSiteCover, siteHasCover } from './lib/covers.js';
@@ -1897,6 +1903,20 @@ async function runAgentTask({ taskId, cfg, site, userId, threadId, userText }) {
   // 登记取消句柄：用户点「停止」时由 /cancel 接口触发这个 signal
   const signal = registerRunningTask(taskId);
 
+  // 流式文本缓冲：模型逐字吐出来时先攒在这里，节流写库。
+  // 每来一个字就写库会把 agent_tasks 表写热（一次回复上千个字 = 上千次 UPDATE）。
+  // 250ms 是折中：再快对 MySQL 不友好，再慢前端看起来就「一段一段跳」。
+  // 前端轮询间隔配成 300ms，两者错开一点，体感更接近逐字。
+  let streamed = '';
+  let lastFlush = 0;
+  const FLUSH_MS = 250;
+  const flushPartial = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastFlush < FLUSH_MS) return;
+    lastFlush = now;
+    updatePartial(taskId, streamed).catch(() => {});
+  };
+
   try {
     await markRunning(taskId);
 
@@ -1916,6 +1936,11 @@ async function runAgentTask({ taskId, cfg, site, userId, threadId, userText }) {
       userText,
       snapshot,
       signal,
+      // 流式：每段文字追加到缓冲并节流落库，前端轮询就能看到「正在生成」
+      onDelta: (text) => {
+        streamed += text;
+        flushPartial();
+      },
       onStep: (step) => {
         progress.push({
           name: step.name,
@@ -1924,6 +1949,8 @@ async function runAgentTask({ taskId, cfg, site, userId, threadId, userText }) {
           error: step.error,
           at: Date.now(),
         });
+        // 开始调工具了，说明这一轮的「说话」部分告一段落：立刻落一次
+        flushPartial(true);
         // 进度写库失败不能影响主流程，吞掉
         updateProgress(taskId, step.step, progress).catch(() => {});
       },

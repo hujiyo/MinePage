@@ -659,6 +659,11 @@ async function loadMessages() {
   }
 }
 
+// 当前这轮 agent 的取消句柄。
+// 必须放在模块作用域：点击处理器和 Esc 监听都在 sendMessage 外面，
+// 早先把它写在函数里，外面读不到直接抛 ReferenceError，点发送毫无反应。
+let activeCancel = null;
+
 async function sendMessage(text) {
   if (sending) return;
   const content = String(text == null ? input.value : text).trim();
@@ -674,7 +679,6 @@ async function sendMessage(text) {
 
   // 跑的过程中发送按钮变成「停止」：同一个按钮两种状态，
   // 用户不用去找另一个停的地方（这也是 ChatGPT / Cursor 的做法）
-  let stopper = null;
   const enterRunning = () => {
     send.disabled = false;
     send.classList.add('stopping');
@@ -686,7 +690,7 @@ async function sendMessage(text) {
     send.textContent = '↑';
     send.title = '发送（Enter）';
     send.disabled = false;
-    stopper = null;
+    activeCancel = null;
   };
 
   try {
@@ -698,7 +702,7 @@ async function sendMessage(text) {
       threadId,
       // 任务开跑：按钮切成停止态，把模型名放进底部那行
       onStarted: (data, ctl) => {
-        stopper = ctl;
+        activeCancel = ctl;
         enterRunning();
         if (data.model && data.model.label) {
           threadModel.textContent = data.model.label;
@@ -736,15 +740,15 @@ async function sendMessage(text) {
 
 // 发送键兼任停止键
 send.addEventListener('click', () => {
-  if (stopper) { stopper.cancel(); return; }
+  if (activeCancel) { activeCancel.cancel(); return; }
   sendMessage(null);
 });
 
 // Esc 也能停：手在键盘上时不用去够按钮
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && stopper) {
+  if (e.key === 'Escape' && activeCancel) {
     e.preventDefault();
-    stopper.cancel();
+    activeCancel.cancel();
   }
 });
 input.addEventListener('keydown', (e) => {

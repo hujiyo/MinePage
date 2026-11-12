@@ -2472,6 +2472,26 @@ code.token {
   color: var(--muted);
 }
 
+/* 正在流式输出：去掉虚线和旋转点，让它看起来像正常回复在长出来 */
+.chatBubble.stepping.streaming {
+  opacity: 1;
+  border-style: solid;
+  background: var(--panel2);
+  color: var(--text);
+}
+.chatBubble.stepping.streaming::before { content: ''; animation: none; display: none; }
+/* 末尾加一条闪烁光标，暗示「还在写」 */
+.chatBubble.stepping.streaming::after {
+  content: '▍';
+  margin-left: 1px;
+  color: var(--pink);
+  animation: caretBlink 1s steps(2) infinite;
+}
+@keyframes caretBlink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
 .miniChip {
   flex: none;
   padding: 3px 10px;

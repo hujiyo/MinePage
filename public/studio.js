@@ -629,8 +629,14 @@
     return step.ok === false ? `${label}${tail} 失败` : `${label}${tail}`;
   }
 
-  /** 轮询一个任务直到结束。返回任务对象；失败抛错。 */
-  async function waitTask(taskId, { onProgress, interval = 1500, timeoutMs = 150000 } = {}) {
+  /**
+   * 轮询一个任务直到结束。返回任务对象；失败抛错。
+   *
+   * interval 默认 300ms：服务端每 250ms 落一次流式文本，
+   * 轮询太慢会让「逐字出现」变成「一段一段跳」，看起来反而更卡。
+   * 300ms 一个轻量 GET，对本地/内网完全不是负担。
+   */
+  async function waitTask(taskId, { onProgress, interval = 300, timeoutMs = 150000 } = {}) {
     const startedAt = Date.now();
     for (;;) {
       if (Date.now() - startedAt > timeoutMs) {
@@ -734,10 +740,23 @@
       const task = await waitTask(taskId, {
         onProgress: (t) => {
           if (stopped) return;   // 正在停，别让进度把「正在停止…」覆盖掉
-          const steps = Array.isArray(t.steps) ? t.steps : [];
-          if (!steps.length) return;
-          const last = steps[steps.length - 1];
-          progressBubble.textContent = stepText(last);
+
+          // 流式：task.text 是服务端边生成边写的半成品。
+          // 有文字就优先显示文字（比「正在想…」有信息量），
+          // 没文字时才退回工具进度 —— 工具执行期间本来就没有文字可显示。
+          const hasText = Boolean(t.text && t.text.trim());
+          if (hasText && (t.status === 'running' || t.status === 'queued')) {
+            progressBubble.textContent = t.text;
+            progressBubble.classList.add('streaming');
+          } else {
+            const steps = Array.isArray(t.steps) ? t.steps : [];
+            if (steps.length) {
+              const last = steps[steps.length - 1];
+              progressBubble.textContent = stepText(last);
+              progressBubble.classList.remove('streaming');
+            }
+          }
+
           if (list) list.scrollTop = list.scrollHeight;
           if (opt.onProgress) opt.onProgress(t);
         },
@@ -746,6 +765,7 @@
       // 任务完成：把进度气泡换成真正的回复
       progressRow.classList.remove('pending');
       progressBubble.classList.remove('stepping');
+      progressBubble.classList.remove('streaming');
       progressBubble.textContent = task.text || '（没有输出）';
       // 被停止的任务单独标一下，用户一眼能看出「这轮是我停的」
       if (task.status === 'cancelled') {
