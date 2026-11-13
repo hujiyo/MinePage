@@ -860,9 +860,10 @@ async function sendMessage(text, extraAttachIds) {
         if (data.model && data.model.id) {
           modelPickLabel.textContent = data.model.label || data.model.id;
         }
-        // 服务端说这个模型看不了图：提醒一句，但不要拦（用户可能就是想试试）
+        // 服务端说这个模型看不了图：提醒一句，但不要拦（用户可能就是想试试）。
+        // 现在 8 个模型都能看图，这段是给以后新增的模型兜底。
         if (attachIds.length && data.vision === false) {
-          MP.toast('当前模型看不了图片，换 Claude Haiku 5.5 / GPT-6 Luna / GLM 试试');
+          MP.toast('当前模型看不了图片，换一个能看图的模型');
         }
       },
       onReply: () => {
@@ -974,10 +975,10 @@ function renderAttachBar() {
     attachList.appendChild(box);
   });
 
-  // 模型看不了图时提前提醒，别等它回一句「我看不到图片」
+  // 模型看不了图时提前提醒（当前 8 个模型都能看，这段是给以后新增的模型兜底）
   const m = MODELS.find((x) => x.id === currentModelId());
   if (m && !m.supportsVision) {
-    attachHint.textContent = `${m.label} 看不了图片，换 Claude Haiku 5.5 / GPT-6 Luna / GLM 选一个`;
+    attachHint.textContent = `${m.label} 看不了图片，换一个能看图的模型`;
     attachHint.classList.add('warn');
   } else {
     // 有压缩的就把省下的空间说出来，比只显示张数有信息量

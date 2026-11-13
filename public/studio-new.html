@@ -245,7 +245,7 @@ function renderAttachBar() {
 
   const m = MODELS.find((x) => x.id === pickedModel);
   if (m && !m.supportsVision) {
-    attachHint.textContent = `${m.label} 看不了图片，换成 Claude Haiku 5.5 / GPT-6 Luna / GLM`;
+    attachHint.textContent = `${m.label} 看不了图片，换一个能看图的模型`;
     attachHint.classList.add('warn');
   } else {
     const total = PENDING_IMAGES.reduce((s, x) => s + (x.size || 0), 0);
