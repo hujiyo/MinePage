@@ -343,71 +343,119 @@ async function boot() {
 // 模型清单只在进页面时拿一次；切换会话时按会话上记的 model 同步显示
 let MODELS = [];
 let DEFAULT_MODEL = '';
+let MODES = [];
 
 async function loadModels() {
   try {
     const data = await MP.api('/api/agent/tools');
     MODELS = data.models || [];
     DEFAULT_MODEL = data.defaultModel || '';
+    MODES = data.modes || [];
   } catch {
     MODELS = [];
     DEFAULT_MODEL = '';
+    MODES = [];
   }
   syncModelLabel();
 }
 
-/** 底部那行显示当前会话用哪个模型；没配 key 就显示「未接模型」。 */
-function syncModelLabel() {
+/** 当前会话的模型 id（没设就用默认的可用模型）。 */
+function currentModelId() {
   const t = THREADS.find((x) => x.id === threadId);
   const wanted = (t && t.model) || DEFAULT_MODEL;
   const m = MODELS.find((x) => x.id === wanted) || MODELS.find((x) => x.ready);
+  return m ? m.id : '';
+}
+
+/** 当前会话的模式（chat / code）。 */
+function currentMode() {
+  const t = THREADS.find((x) => x.id === threadId);
+  return (t && t.mode) || 'code';
+}
+
+/**
+ * 底部那行：显示「模型 · 模式」，点一下能改。
+ * 没配 key 就显示「未接模型」并置灰。
+ */
+function syncModelLabel() {
+  const id = currentModelId();
+  const m = MODELS.find((x) => x.id === id);
+  const mode = currentMode();
+  const modeLabel = (MODES.find((x) => x.id === mode) || {}).label || '编码';
 
   if (!m) {
     threadModel.textContent = '未接模型';
     threadModel.title = '服务器还没配置模型，先在环境变量里加 LLM_API_KEY';
     threadModel.classList.add('off');
+    threadModel.onclick = null;
     return;
   }
 
-  const id = m.id;
   threadModel.classList.remove('off');
-  threadModel.textContent = m.label;
-  threadModel.title = `${m.provider} / ${m.model}`;
-
-  // 点一下换模型：把选择记到当前会话上，下次这轮就用它
-  threadModel.onclick = () => pickModel(id);
+  threadModel.textContent = `${m.label} · ${modeLabel}`;
+  threadModel.title = `${m.provider} / ${m.model}　（点一下换模型或模式）`;
+  threadModel.onclick = () => openAgentSettings();
 }
 
-async function pickModel(currentId) {
+/**
+ * 一次改两样：模型 + 模式。
+ * 分两步弹窗而不是塞一个复杂表单 —— 每步只有一个选择，点两下就完事。
+ */
+async function openAgentSettings() {
   if (!MODELS.length) {
     MP.alert('还没有可用的模型，先在服务器上配 LLM_API_KEY 再重启');
     return;
   }
+  const t = THREADS.find((x) => x.id === threadId);
+  if (!t) {
+    MP.toast('先建一个会话');
+    return;
+  }
+
+  // 第一步：选模型
   const usable = MODELS.filter((m) => m.ready && m.supportsTools);
   if (!usable.length) {
     MP.alert('清单里的模型都缺 Key 或不支持工具调用');
     return;
   }
-
-  const choice = await MP.pick({
+  const curModel = currentModelId();
+  const model = await MP.pick({
     text: '这个对话用哪个模型？',
     options: usable.map((m) => ({
       value: m.id,
       label: m.label,
       hint: `${m.hint} · ${m.provider}`,
-      active: m.id === currentId,
+      active: m.id === curModel,
     })),
   });
-  if (!choice || choice === currentId) return;
+  if (!model) return;   // 取消
+
+  // 第二步：选模式
+  const curMode = currentMode();
+  const mode = await MP.pick({
+    text: '这个对话什么模式？',
+    options: MODES.map((m) => ({
+      value: m.id,
+      label: m.label,
+      hint: m.hint,
+      active: m.id === curMode,
+    })),
+  });
+  if (!mode) return;
+
+  if (model === curModel && mode === curMode) return;
 
   try {
-    await MP.api(api('/threads/' + threadId), { method: 'PUT', body: { model: choice } });
-    const t = THREADS.find((x) => x.id === threadId);
-    if (t) t.model = choice;
+    await MP.api(api('/threads/' + threadId), { method: 'PUT', body: { model, mode } });
+    t.model = model;
+    t.mode = mode;
     syncModelLabel();
-    MP.toast('已切到 ' + (MODELS.find((m) => m.id === choice)?.label ?? choice));
+    syncChatTitle();
+    const label = (MODELS.find((m) => m.id === model) || {}).label || model;
+    const ml = (MODES.find((m) => m.id === mode) || {}).label || mode;
+    MP.toast(`已切到 ${label} · ${ml}`);
   } catch (e) {
-    MP.toast(e.message || '切换模型失败');
+    MP.toast(e.message || '切换失败');
   }
 }
 
@@ -554,12 +602,17 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeThrea
 document.addEventListener('scroll', closeThreadMenu, true);
 window.addEventListener('resize', closeThreadMenu);
 
-/** 对话栏顶部的标题跟着当前会话说：显示会话名，没会话时显示「对话」。 */
+/** 对话栏顶部的标题跟着当前会话说：显示会话名，没会话时显示「对话」。
+ *  对话模式的会话名后面挂个「对话」小标，和编码会话区分开。 */
 function syncChatTitle() {
   const t = THREADS.find((x) => x.id === threadId);
   const title = (t && t.title) || '对话';
-  chatTitle.textContent = title;
-  chatTitle.title = t ? (title + '（' + Number(t.msg_count ?? t.msgCount ?? 0) + ' 条消息）') : '当前对话';
+  const isChat = t && t.mode === 'chat';
+  chatTitle.textContent = isChat ? `${title} · 对话` : title;
+  chatTitle.title = t
+    ? `${title}（${Number(t.msg_count ?? t.msgCount ?? 0)} 条消息，${isChat ? '只聊天不改文件' : '可改文件'}）`
+    : '当前对话';
+  syncModelLabel();
 }
 
 /** 顶部「⋯」：对当前会话开菜单。没有会话时按钮置灰。 */

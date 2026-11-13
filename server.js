@@ -129,9 +129,13 @@ import {
   AGENT_DEFAULT_MODEL,
 } from './lib/config.js';
 import {
+  MODES,
+  canonicalMode,
+  canonicalModelId,
   modelApiKey,
   pickUsableModel,
   probeModel,
+  publicModeList,
   publicModelList,
   resolveModel,
 } from './lib/agent/models.js';
@@ -1879,7 +1883,15 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
 
   // 后台跑，不阻塞响应
   setImmediate(() => {
-    runAgentTask({ taskId, cfg, site, userId: user.id, threadId: thread.id, userText: content })
+    runAgentTask({
+      taskId,
+      cfg,
+      site,
+      userId: user.id,
+      threadId: thread.id,
+      mode: canonicalMode(thread.mode),
+      userText: content,
+    })
       .catch((err) => console.error('[agent-task]', err));
   });
 
@@ -1898,7 +1910,7 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
  * 这里要把所有异常都兜住 —— 它在 setImmediate 里跑，抛出去没人接，
  * 任务会永远卡在 running，前端就一直转圈。
  */
-async function runAgentTask({ taskId, cfg, site, userId, threadId, userText }) {
+async function runAgentTask({ taskId, cfg, site, userId, threadId, mode = 'code', userText }) {
   const progress = [];
   // 登记取消句柄：用户点「停止」时由 /cancel 接口触发这个 signal
   const signal = registerRunningTask(taskId);
@@ -1934,6 +1946,7 @@ async function runAgentTask({ taskId, cfg, site, userId, threadId, userText }) {
       userId,
       history,
       userText,
+      mode,
       snapshot,
       signal,
       // 流式：每段文字追加到缓冲并节流落库，前端轮询就能看到「正在生成」
@@ -2087,13 +2100,15 @@ async function handleThreadCreate(req, res, [username, name]) {
   if (!body) return;
 
   const title = String(body.title ?? '').trim().slice(0, 120);
-  const model = String(body.model ?? '').trim().slice(0, 40);
-  const thread = await createThread(site.id, { title, model });
+  // 模型 id 归一化：老前端可能传 'fast' 这类别名，统一存成真实 id
+  const model = canonicalModelId(String(body.model ?? '').trim()) ?? '';
+  const mode = canonicalMode(String(body.mode ?? '').trim());
+  const thread = await createThread(site.id, { title, model, mode });
 
   sendJson(res, 201, { ok: true, thread });
 }
 
-/** PUT /api/sites/:u/:n/threads/:id：改标题 / 换模型。 */
+/** PUT /api/sites/:u/:n/threads/:id：改标题 / 换模型 / 换模式。 */
 async function handleThreadUpdate(req, res, [username, name, id]) {
   const user = await requireLogin(req, res);
   if (!user) return;
@@ -2116,7 +2131,22 @@ async function handleThreadUpdate(req, res, [username, name, id]) {
     }
     patch.title = title;
   }
-  if (body.model !== undefined) patch.model = String(body.model).trim().slice(0, 40);
+  if (body.model !== undefined) {
+    const model = canonicalModelId(String(body.model).trim());
+    if (!model) {
+      sendJson(res, 400, { ok: false, message: '没有这个模型' });
+      return;
+    }
+    patch.model = model;
+  }
+  if (body.mode !== undefined) {
+    const raw = String(body.mode).trim();
+    if (!MODES[raw]) {
+      sendJson(res, 400, { ok: false, message: '模式只能是 chat 或 code' });
+      return;
+    }
+    patch.mode = raw;
+  }
 
   await updateThread(thread.id, patch);
   sendJson(res, 200, { ok: true, thread: await findThread(site.id, thread.id) });
@@ -2274,6 +2304,8 @@ async function handleAgentTools(req, res) {
     // 模型清单只给 id / 名字 / 能力，**绝不带 key 和 baseURL**
     models,
     defaultModel,
+    // 模式清单：chat（只回答） / code（能改文件）
+    modes: publicModeList(),
     // 一个都没有说明还没配 key，前端据此把输入框改成「未接模型」状态
     ready: Boolean(defaultModel),
   });
