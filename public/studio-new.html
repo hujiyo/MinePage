@@ -248,14 +248,8 @@ function renderAttachBar() {
     attachHint.textContent = `${m.label} 看不了图片，换一个能看图的模型`;
     attachHint.classList.add('warn');
   } else {
-    const total = PENDING_IMAGES.reduce((s, x) => s + (x.size || 0), 0);
-    const saved = PENDING_IMAGES.reduce(
-      (s, x) => s + (x.compressed ? (x.originalBytes - x.size) : 0),
-      0,
-    );
-    attachHint.textContent = saved > 0
-      ? `${n}/${MAX_IMAGES} 张 · 共 ${MP.formatBytes(total)}（压缩省了 ${MP.formatBytes(saved)}）`
-      : `${n}/${MAX_IMAGES} 张 · ${MP.formatBytes(total)}`;
+    // 只显示张数；体积/压缩信息在缩略图的悬停提示里
+    attachHint.textContent = `${n}/${MAX_IMAGES} 张`;
     attachHint.classList.remove('warn');
   }
 }
