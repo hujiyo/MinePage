@@ -3319,10 +3319,69 @@ body.dragging .wsFrame { pointer-events: none; }
 }
 .wsCodeWrap textarea#code:focus { border: 0; }
 
-/* 历史面板：列出每次改动前的快照，可逐条还原 */
-.historyModal { width: 560px; padding: 22px 24px 18px; }
+/* 历史面板：顶部「当前版本」栏 + 带编号的版本列表 */
+.historyModal { width: 620px; padding: 22px 24px 18px; }
+.histHint { margin: 0 0 14px; line-height: 1.6; }
+
+/* 当前版本栏：整块高亮，和下面的列表视觉上分开 */
+.histCurrent {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 11px 14px;
+  margin-bottom: 12px;
+  border-radius: 10px;
+  border: 1px solid #f4c6d5;
+  background: var(--pink-soft);
+}
+.histCurLabel {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--pink);
+  color: #fff;
+  font-size: 10.5px;
+  line-height: 16px;
+}
+.histCurMain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.histCurNum {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--pink);
+  font-variant-numeric: tabular-nums;
+}
+.histCurMain b { font-size: 13px; }
+.histCurText {
+  font-size: 12.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+}
+/* 「已修改」：当前文件已经不等于这一版了 */
+.histDirty {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 5px;
+  border: 1px dashed #c98a3a;
+  color: #c98a3a;
+  font-size: 10.5px;
+  font-style: normal;
+  line-height: 15px;
+}
+.histBack { flex: none; }
+
 .historyList {
-  max-height: 52vh;
+  max-height: 46vh;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -3336,22 +3395,66 @@ body.dragging .wsFrame { pointer-events: none; }
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel2);
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
 }
-.historyInfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.historyInfo b {
+.historyRow:hover { border-color: var(--pink); background: var(--panel); }
+/* 正在预览的那一版 */
+.historyRow.on { border-color: var(--pink); background: var(--panel); box-shadow: inset 0 0 0 1px var(--pink); }
+/* 当前版本额外用左侧色条标一下 */
+.historyRow.current { border-left: 3px solid var(--pink); }
+
+.historyInfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.histRowHead { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.histNum {
+  flex: none;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--pink);
+  font-variant-numeric: tabular-nums;
+}
+.histRowTitle {
   font-size: 13px;
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.historyInfo span { font-size: 11px; }
+.histTag {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid var(--pink);
+  color: var(--pink);
+  font-size: 10px;
+  font-style: normal;
+  line-height: 14px;
+}
+.histMeta { font-size: 11px; }
+
 .historyEmpty {
   padding: 30px 10px;
   text-align: center;
   color: var(--muted);
   font-size: 12px;
 }
+
+/* 预览区角标：正在看历史版本时出现 */
+.wsPreviewBadge {
+  flex: none;
+  max-width: 260px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--pink-soft);
+  border: 1px solid #f4c6d5;
+  color: var(--pink);
+  font-size: 11px;
+  line-height: 17px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wsPreviewBadge[hidden] { display: none; }
 
 /* 窄屏：三栏改成上下堆叠，拖条这时候没有意义，藏掉 */
 @media (max-width: 880px) {

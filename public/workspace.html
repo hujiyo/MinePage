@@ -82,6 +82,8 @@
           <button type="button" class="wsTab on" data-tab="preview">预览</button>
           <button type="button" class="wsTab" data-tab="code">代码</button>
         </div>
+        <!-- 正在预览历史版本时亮起来，提醒「你看到的不是现在的文件」 -->
+        <span class="wsPreviewBadge" id="previewBadge" hidden></span>
         <button type="button" class="wsReload" id="reload" title="刷新预览">↻</button>
       </div>
 
@@ -1106,7 +1108,12 @@ document.querySelectorAll('.wsTab').forEach((tab) => {
 });
 
 document.getElementById('reload').addEventListener('click', () => {
-  reload();
+  // 刷新就是回到当前版本（正在看旧版本时，刷新不该还停在旧版本）
+  if (previewSeq) {
+    previewVersion(0);
+  } else {
+    reload();
+  }
   if (!document.getElementById('viewCode').hidden) loadFile(currentPath);
 });
 
@@ -1279,16 +1286,51 @@ window.addEventListener('beforeunload', (e) => {
   e.returnValue = '';
 });
 
-/* ---------------------------------------------------------------- 历史与回滚 */
+/* ---------------------------------------------------------------- 版本与预览 */
 
-let snapshots = [];
+// 当前在预览哪一版：0 表示「最新状态」（就是 site_current 指向的那版）
+let previewSeq = 0;
+// 最近一次拉到的版本数据
+let VERSIONS = { current: { seq: 0, dirty: 0 }, versions: [] };
+
+/**
+ * 预览某一版：把右侧 iframe 切到 /@<seq>/ 地址。
+ * seq=0 表示回到「当前版本」。
+ */
+function previewVersion(seq) {
+  previewSeq = seq || 0;
+  const base = MP.draftUrl(USERNAME, NAME);
+  frame.src = previewSeq
+    ? `${base}@${previewSeq}/?t=${Date.now()}`
+    : `${base}?t=${Date.now()}`;
+  syncPreviewBadge();
+}
+
+/** 预览区的角标：预览的是旧版本时明确标出来，别让人以为改坏了。 */
+function syncPreviewBadge() {
+  const badge = document.getElementById('previewBadge');
+  if (!badge) return;
+  if (previewSeq) {
+    const v = VERSIONS.versions.find((x) => x.seq === previewSeq);
+    badge.hidden = false;
+    badge.textContent = `预览 #${previewSeq}${v ? ' · ' + v.label : ''}`;
+    badge.title = '你现在看的是历史版本，文件没有被改动。点回「当前版本」恢复实时预览。';
+  } else {
+    badge.hidden = true;
+  }
+}
+
+/* ---------------------------------------------------------------- 历史（版本列表） */
 
 async function openHistory() {
   try {
-    const data = await MP.api(api('/snapshots'));
-    snapshots = data.snapshots || [];
+    const data = await MP.api(api('/versions'));
+    VERSIONS = {
+      current: data.current || { seq: 0, dirty: 0 },
+      versions: data.versions || [],
+    };
   } catch (e) {
-    MP.alert(e.message || '读不到历史');
+    MP.alert(e.message || '读不到版本记录');
     return;
   }
 
@@ -1299,22 +1341,154 @@ async function openHistory() {
   card.innerHTML = ''
     + '<button type="button" class="modal-x" aria-label="关闭">×</button>'
     + '<h2 class="modal-title">改动历史</h2>'
-    + '<p class="hint" style="margin:0 0 12px">'
-    +   '每次改动前会自动存一份快照，点「还原」就能退回去。只记录被改动的那几个文件。'
-    + '</p>'
+    + '<p class="hint histHint">每次改动存一个带编号的版本。点一行可以在右侧预览那一版，'
+    +   '文件不会被改动；确认要退回去再点「恢复到此版本」。</p>'
+    + '<div class="histCurrent"></div>'
     + '<div class="historyList"></div>';
 
   const list = card.querySelector('.historyList');
-  if (!snapshots.length) {
-    const empty = document.createElement('div');
-    empty.className = 'historyEmpty';
-    empty.textContent = '还没有改动记录。';
-    list.appendChild(empty);
-  } else {
-    snapshots.forEach((s) => list.appendChild(historyRow(s, card)));
+  const curBox = card.querySelector('.histCurrent');
+
+  /** 顶部「当前版本」栏 + 列表，一起重画（切预览时两者都要变）。 */
+  function render() {
+    curBox.textContent = '';
+    list.textContent = '';
+
+    const cur = VERSIONS.current;
+    const shown = previewSeq || cur.seq;
+    const row = VERSIONS.versions.find((v) => v.seq === shown);
+
+    // ---- 当前版本栏 ----
+    const label = document.createElement('div');
+    label.className = 'histCurLabel';
+    label.textContent = previewSeq ? '正在预览' : '当前版本';
+    curBox.appendChild(label);
+
+    const main = document.createElement('div');
+    main.className = 'histCurMain';
+
+    if (!cur.seq && !VERSIONS.versions.length) {
+      const none = document.createElement('b');
+      none.textContent = '还没有任何版本';
+      main.appendChild(none);
+      const tip = document.createElement('span');
+      tip.className = 'muted';
+      tip.textContent = '让 agent 改一次，或手动保存一次，就会生成 #1';
+      main.appendChild(tip);
+    } else {
+      const num = document.createElement('b');
+      num.className = 'histCurNum';
+      num.textContent = shown ? '#' + shown : '无';
+      main.appendChild(num);
+
+      if (row) {
+        const txt = document.createElement('span');
+        txt.className = 'histCurText';
+        txt.textContent = row.label || '改动';
+        main.appendChild(txt);
+
+        const when = document.createElement('span');
+        when.className = 'muted';
+        when.textContent = fmtTime(row.createdAt) + ' · ' + fmtSize(row.size);
+        main.appendChild(when);
+      }
+
+      // 文件已不等于任何版本（手动改过 / 版本超限没存成）
+      if (!previewSeq && cur.dirty) {
+        const dirty = document.createElement('i');
+        dirty.className = 'histDirty';
+        dirty.textContent = '已修改';
+        dirty.title = '当前文件和这个版本已经不一致了（手动编辑过，或上次改动没能存成版本）';
+        main.appendChild(dirty);
+      }
+    }
+    curBox.appendChild(main);
+
+    // 预览旧版本时给一个回到当前的操作
+    if (previewSeq) {
+      const back = document.createElement('button');
+      back.type = 'button';
+      back.className = 'tiny ghost histBack';
+      back.textContent = '回到当前版本';
+      back.addEventListener('click', () => {
+        previewVersion(0);
+        render();
+      });
+      curBox.appendChild(back);
+    }
+
+    // ---- 版本列表 ----
+    if (!VERSIONS.versions.length) {
+      const empty = document.createElement('div');
+      empty.className = 'historyEmpty';
+      empty.textContent = '还没有改动记录。';
+      list.appendChild(empty);
+      return;
+    }
+
+    VERSIONS.versions.forEach((v) => list.appendChild(versionRow(v, render)));
   }
 
-  const close = () => mask.remove();
+  function versionRow(v, rerender) {
+    const row = document.createElement('div');
+    row.className = 'historyRow';
+    if (v.seq === (previewSeq || VERSIONS.current.seq)) row.classList.add('on');
+    if (v.seq === VERSIONS.current.seq) row.classList.add('current');
+
+    const info = document.createElement('div');
+    info.className = 'historyInfo';
+
+    const head = document.createElement('div');
+    head.className = 'histRowHead';
+
+    const num = document.createElement('b');
+    num.className = 'histNum';
+    num.textContent = '#' + v.seq;
+    head.appendChild(num);
+
+    const title = document.createElement('span');
+    title.className = 'histRowTitle';
+    title.textContent = v.label || '改动';
+    head.appendChild(title);
+
+    if (v.seq === VERSIONS.current.seq) {
+      const tag = document.createElement('i');
+      tag.className = 'histTag';
+      tag.textContent = '当前';
+      head.appendChild(tag);
+    }
+    info.appendChild(head);
+
+    const meta = document.createElement('span');
+    meta.className = 'muted histMeta';
+    meta.textContent = fmtTime(v.createdAt) + ' · ' + fmtSize(v.size);
+    info.appendChild(meta);
+
+    // 点整行 = 预览，不改文件
+    row.addEventListener('click', () => {
+      previewVersion(v.seq);
+      rerender();
+    });
+    row.appendChild(info);
+
+    // 恢复按钮单独一个，避免误点
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tiny ghost';
+    btn.textContent = '恢复到此版本';
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      restoreVersionTo(v, btn, rerender);
+    });
+    row.appendChild(btn);
+
+    return row;
+  }
+
+  const close = () => {
+    mask.remove();
+    // 关掉面板时如果还在预览旧版本，保持现状（用户可能正在看），不自动跳回
+  };
   card.querySelector('.modal-x').addEventListener('click', close);
   mask.addEventListener('click', (e) => { if (e.target === mask) close(); });
   document.addEventListener('keydown', function onEsc(e) {
@@ -1323,33 +1497,9 @@ async function openHistory() {
     close();
   });
 
+  render();
   mask.appendChild(card);
   document.body.appendChild(mask);
-}
-
-function historyRow(s, card) {
-  const row = document.createElement('div');
-  row.className = 'historyRow';
-
-  const info = document.createElement('div');
-  info.className = 'historyInfo';
-  const title = document.createElement('b');
-  title.textContent = s.label || '改动';
-  const meta = document.createElement('span');
-  meta.className = 'muted';
-  meta.textContent = fmtTime(s.created_at) + ' · ' + fmtSize(s.size);
-  info.appendChild(title);
-  info.appendChild(meta);
-  row.appendChild(info);
-
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'tiny ghost';
-  btn.textContent = '还原';
-  btn.addEventListener('click', () => restore(s, btn, card));
-  row.appendChild(btn);
-
-  return row;
 }
 
 function fmtTime(iso) {
@@ -1359,30 +1509,44 @@ function fmtTime(iso) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-async function restore(snap, btn, card) {
+/**
+ * 真正恢复到某一版（会写文件）。
+ *
+ * 注意：这一步**不产生新版本号**，只是把当前指针指回去；
+ * 列表里其它版本原样保留，当前版本栏变成目标版本。
+ */
+async function restoreVersionTo(v, btn, rerender) {
   const ok = await MP.ask({
-    text: '还原到「' + (snap.label || '这次改动') + '」之前的状态？\n'
-      + '当前状态会先自动存一份，点错了还能退回来。',
+    text: `把文件恢复到 #${v.seq}（${v.label || '这次改动'}）？\n`
+      + '当前文件会被这一版的内容替换。其它版本记录都还在，随时可以再切回来。',
     buttons: [
       { key: 'cancel', label: '取消' },
-      { key: 'restore', label: '还原', primary: true },
+      { key: 'restore', label: '恢复', primary: true },
     ],
   });
   if (ok !== 'restore') return;
 
   btn.disabled = true;
-  btn.textContent = '还原中…';
+  btn.textContent = '恢复中…';
   try {
-    const data = await MP.api(api('/snapshots/' + snap.id + '/restore'), { method: 'POST' });
-    card.remove();
-    document.querySelector('.modal-mask')?.remove();
-    MP.toast('已还原，刷新预览看看');
+    await MP.api(api('/versions/' + v.seq + '/restore'), { method: 'POST' });
+
+    // 重新拉一次列表（当前指针变了）
+    const data = await MP.api(api('/versions'));
+    VERSIONS = {
+      current: data.current || { seq: v.seq, dirty: 0 },
+      versions: data.versions || [],
+    };
+    previewSeq = 0;   // 恢复后看的就是当前版本
+    syncPreviewBadge();
     reload();
     loadFiles();
+    if (rerender) rerender();
+    MP.toast(`已恢复到 #${v.seq}`);
   } catch (e) {
     btn.disabled = false;
-    btn.textContent = '还原';
-    MP.alert(e.message || '还原失败');
+    btn.textContent = '恢复到此版本';
+    MP.alert(e.message || '恢复失败');
   }
 }
 

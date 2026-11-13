@@ -112,11 +112,11 @@ import {
 import { parseZip } from './lib/zip.js';
 import { buildZip, withDirs } from './lib/zip-writer.js';
 import {
-  createSnapshotCollector,
-  getSnapshot,
-  listSnapshots,
-  restoreSnapshot,
-  snapshotBeforeRestore,
+  commitVersion,
+  listVersions,
+  markDirty,
+  resolveVersion,
+  restoreVersion,
 } from './lib/agent/snapshot.js';
 import {
   AGENT_TOOL_NAMES,
@@ -1162,24 +1162,23 @@ async function handleSiteFileUpload(req, res, [username, name]) {
     throw err;
   }
 
-  // 手动保存也留一份快照。
+  // 手动保存也记一个版本。
   //
-  // 为什么必须做：agent 的快照只记录「agent 改动前」的状态。如果用户先在代码面板
-  // 手动改了一版、再让 agent 改同一处，那 agent 的快照里存的就是「用户改后」的版本，
-  // 用户点「还原」只会回到自己手动改的那版，而不是更早的原始版 —— 与直觉不符。
-  const manualSnapshot = createSnapshotCollector({ siteId: site.id });
-  await manualSnapshot.beforeWrite(filePath).catch(() => {});
-
+  // 语义变了（2026-11）：现在快照存的是「改完之后的状态点」，
+  // 所以必须**先写文件再记版本**，否则记下来的还是旧内容。
   const saved = await upsertSiteFile(site.id, filePath, content);
 
-  // 快照落库失败不影响保存本身（保存是主操作，快照是附加保障）
-  const snap = await manualSnapshot.commit(`手动编辑 ${filePath}`).catch(() => null);
+  // 版本记录失败不影响保存本身（保存是主操作，版本是附加保障）
+  const ver = await commitVersion({
+    siteId: site.id,
+    label: `手动编辑 ${filePath}`,
+  }).catch(() => null);
 
   sendJson(res, isNew ? 201 : 200, {
     ok: true,
     path: saved.path,
     size: saved.size,
-    snapshot: snap ? { id: snap.id ?? null, skipped: Boolean(snap.skipped) } : null,
+    version: ver ? { seq: ver.seq ?? null, kind: ver.kind, skipped: Boolean(ver.skipped), reason: ver.reason } : null,
   });
 }
 
@@ -1561,17 +1560,14 @@ async function handleSiteFileDelete(req, res, [username, name]) {
     return;
   }
 
-  // 手动删除也留一份快照，理由同上面的手动保存
-  const manualSnapshot = createSnapshotCollector({ siteId: site.id });
-  await manualSnapshot.beforeDelete(filePath).catch(() => {});
-
+  // 手动删除也记一个版本（先删再记，记的是删完的状态）
   const changes = await removeSiteFile(site.id, filePath);
   if (changes === 0) {
     sendJson(res, 404, { ok: false, message: '站点里没有这个文件' });
     return;
   }
 
-  await manualSnapshot.commit(`手动删除 ${filePath}`).catch(() => {});
+  await commitVersion({ siteId: site.id, label: `手动删除 ${filePath}` }).catch(() => {});
 
   sendJson(res, 200, { ok: true });
 }
@@ -1970,8 +1966,6 @@ async function runAgentTask({
       .filter((m) => m.content !== userText || m.role !== 'user')
       .slice(-40);
 
-    const snapshot = createSnapshotCollector({ siteId: site.id, threadId });
-
     const result = await runAgent({
       cfg,
       site,
@@ -1980,7 +1974,6 @@ async function runAgentTask({
       userText,
       mode,
       attachments,
-      snapshot,
       signal,
       // 流式：每段文字追加到缓冲并节流落库，前端轮询就能看到「正在生成」
       onDelta: (text) => {
@@ -2002,17 +1995,19 @@ async function runAgentTask({
       },
     });
 
-    // 改动落快照：标签里带上模型名，历史面板能看出是哪次改的。
-    // 被用户中断时也要存 —— 中断前已经改的文件必须能回滚，
-    // 这是「停止」这个功能不让人心慌的前提。
+    // 记一个版本（状态点）。语义是「改完之后的样子」，所以必须在循环结束后记。
+    // 被用户中断时也要记 —— 中断前已经改的文件必须能回滚/能再看到。
     const changed = result.toolCalls.filter((t) => t.ok).length;
-    const saved = snapshot
-      ? await snapshot.commit(
-        result.abortedByUser
-          ? `已停止 · 已改 ${changed} 处`
+    let saved = null;
+    if (changed > 0) {
+      saved = await commitVersion({
+        siteId: site.id,
+        threadId,
+        label: result.abortedByUser
+          ? `已停止 · 改了 ${changed} 处`
           : `${cfg.label} · 改了 ${changed} 处`,
-      ).catch(() => null)
-      : null;
+      }).catch(() => null);
+    }
 
     const replyText = result.text;
 
@@ -2024,12 +2019,14 @@ async function runAgentTask({
       await finishTask(taskId, { text: replyText, steps: progress, usage: result.usage });
     }
 
-    // 快照被跳过时，得让用户知道「这次改不可回滚」
+    // 版本没存成（超上限）时，得让用户知道「这次改没有版本可回退」，
+    // 同时把当前状态标成「已修改」，界面上不会假装它还等于某个版本。
     if (saved && saved.skipped) {
+      await markDirty(site.id).catch(() => {});
       await addSiteMessage(
         site.id,
         'agent',
-        `提醒：这次改动${saved.reason}，所以没能存快照，回滚不了。`,
+        `提醒：这次改动${saved.reason}，所以没能存成一个版本，这次改动回退不了。`,
         threadId,
       );
     }
@@ -2312,45 +2309,46 @@ async function handleAttachmentGet(req, res, [username, name, id]) {
   res.end(buf);
 }
 
-// ---------------------------------------------------------------- 快照与回滚
+// ---------------------------------------------------------------- 版本与回滚
 
-/** GET /api/sites/:u/:n/snapshots：改动历史（新的在前，不含文件内容）。 */
-async function handleSnapshotsList(req, res, [username, name]) {
+/**
+ * GET /api/sites/:u/:n/versions：版本列表 + 当前指针。
+ * 返回 { current: {seq, dirty}, versions: [{seq, label, kind, size, createdAt}] }
+ */
+async function handleVersionsList(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
   const site = await ownDraftOrRespond(req, res, user, username, name);
   if (!site) return;
 
-  sendJson(res, 200, { ok: true, snapshots: await listSnapshots(site.id) });
+  const { current, versions } = await listVersions(site.id);
+  sendJson(res, 200, { ok: true, current, versions });
 }
 
-/** POST /api/sites/:u/:n/snapshots/:id/restore：回滚到某个快照。 */
-async function handleSnapshotRestore(req, res, [username, name, id]) {
+/**
+ * POST /api/sites/:u/:n/versions/:seq/restore：把文件恢复到某一版。
+ *
+ * 语义（用户确认过）：回滚**不产生新编号**，只是把当前指针指回去。
+ * 列表里 1/2/3/4 原样保留，当前版本栏变成 2。
+ */
+async function handleVersionRestore(req, res, [username, name, seq]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
   const site = await ownDraftOrRespond(req, res, user, username, name);
   if (!site) return;
 
-  const snap = await getSnapshot(site.id, Number(id));
-  if (!snap) {
-    sendJson(res, 404, { ok: false, message: '没有这个快照' });
-    return;
-  }
-
   try {
-    // 回滚前先把「即将被覆盖的当前状态」也存一份，点错了还能再退回来
-    const safety = await snapshotBeforeRestore(site.id, snap.threadId, snap);
-    const result = await restoreSnapshot(site.id, snap.id);
-    sendJson(res, 200, {
-      ok: true,
-      ...result,
-      safetySnapshotId: safety && safety.id ? safety.id : null,
-    });
+    const result = await restoreVersion(site.id, Number(seq));
+    sendJson(res, 200, { ok: true, ...result });
   } catch (err) {
-    console.error('[snapshot-restore]', err);
-    sendJson(res, 500, { ok: false, message: err.message || '回滚失败' });
+    if (err.code === 'NOT_FOUND') {
+      sendJson(res, 404, { ok: false, message: '没有这个版本' });
+      return;
+    }
+    console.error('[version-restore]', err);
+    sendJson(res, 500, { ok: false, message: err.message || '恢复失败' });
   }
 }
 
@@ -2487,19 +2485,20 @@ async function handleAgentToolRun(req, res, [username, name]) {
 
   const threadId = body.threadId ? Number(body.threadId) : null;
   const thread = threadId ? await findThread(site.id, threadId) : null;
-  const snapshot = createSnapshotCollector({ siteId: site.id, threadId: thread ? thread.id : null });
 
   try {
     const result = await runAgentTool(toolName, args, {
       siteId: site.id,
       userId: user.id,
-      snapshot,
     });
-    const saved = await snapshot.commit(`手动执行 ${toolName}`);
-    sendJson(res, 200, { ok: true, tool: toolName, result, snapshot: saved });
+    // 手工执行工具也是「一次改动」：记一个版本，历史里能看到
+    const version = await commitVersion({
+      siteId: site.id,
+      threadId: thread ? thread.id : null,
+      label: `手动执行 ${toolName}`,
+    }).catch(() => null);
+    sendJson(res, 200, { ok: true, tool: toolName, result, version });
   } catch (err) {
-    // 失败也要落快照：前面可能已经成功写了别的文件
-    await snapshot.commit(`手动执行 ${toolName}（失败）`).catch(() => {});
     if (err instanceof AgentToolError) {
       sendJson(res, 400, { ok: false, message: err.message });
       return;
@@ -3684,6 +3683,78 @@ async function pickEntryPath(siteId) {
   return best ? best.path : 'index.html';
 }
 
+/**
+ * 版本预览：把「第 N 版」当作一个静态站来服务。
+ *
+ * 路径形如 /<前缀>/<用户名>/<站名>/@<seq>/<文件>。
+ * 用路径段而不是查询参数，是因为站内相对链接会自动继承 @<seq> 前缀 ——
+ * 否则预览第 2 版时，里面的 css/style.css 仍会取到最新版，样式对不上。
+ *
+ * 只对作者开放（草稿更是如此），其余一律 404。
+ */
+async function serveVersionFile(req, res, site, seq, rest, isDraft) {
+  if ((await isSiteOwner(req, site)) === false) {
+    sendHtml(res, 404, messagePage('404', '没有找到这个页面。'));
+    return;
+  }
+  // 已下线的站连作者也不给看版本预览
+  if (site.status !== 'active' && !isDraft) {
+    sendHtml(res, 451, messagePage('已下线', '这个页面已被管理员下线。'));
+    return;
+  }
+
+  const isRoot = !rest || rest === '/';
+  const rel = isRoot ? '' : rest.slice(1).replace(/^\/+/, '');
+
+  let files;
+  try {
+    files = await resolveVersion(site.id, seq);
+  } catch {
+    sendHtml(res, 404, messagePage('404', `没有第 ${seq} 版这个版本。`));
+    return;
+  }
+
+  // 根路径要落位到那一版的入口页（和实时预览同一套规则）
+  if (isRoot) {
+    const entry = pickEntryFromList([...files.keys()]);
+    if (entry !== 'index.html' || !files.has(entry)) {
+      // 入口在子目录时跳过去，保持相对路径正确
+      sendRedirect(res, `/@${seq}/${entry}`);
+      return;
+    }
+    const body = files.get('index.html');
+    serveSiteFile(req, res, 'index.html', body);
+    return;
+  }
+
+  const body = files.get(rel);
+  if (!body) {
+    sendHtml(res, 404, messagePage('404', `第 ${seq} 版里没有这个文件：${rel}`));
+    return;
+  }
+  serveSiteFile(req, res, rel, body);
+}
+
+/**
+ * 入口页挑选（只在给定文件列表上算，不查库）。
+ * 规则和 pickEntryPath 一致：index.html → index.htm → default.html → 最浅的 html。
+ */
+function pickEntryFromList(paths) {
+  const lower = new Map(paths.map((p) => [p.toLowerCase(), p]));
+  for (const name of ['index.html', 'index.htm', 'default.html']) {
+    if (lower.has(name)) return lower.get(name);
+  }
+  let best = null;
+  for (const p of paths) {
+    if (!/\.html?$/i.test(p)) continue;
+    const depth = p.split('/').length;
+    if (!best || depth < best.depth || (depth === best.depth && p < best.path)) {
+      best = { path: p, depth };
+    }
+  }
+  return best ? best.path : 'index.html';
+}
+
 async function handleSite(req, res, [username, name, rest = '']) {
   const site = await findSiteHeaderByUsername(username, name);
 
@@ -3692,6 +3763,15 @@ async function handleSite(req, res, [username, name, rest = '']) {
     return;
   }
   const isDraft = site.status === 'draft';
+
+  // 版本预览：/qwq/<用户名>/<站名>/@<seq>/... 用路径而不是 ?v=N，
+  // 这样站内的相对链接（css/style.css、../about.html）会自然带上 @<seq> 前缀，
+  // 预览任意一版时它的样式和图片也都能正确取到。
+  const versionMatch = /^\/@(\d+)(\/.*)?$/.exec(rest);
+  if (versionMatch) {
+    await serveVersionFile(req, res, site, Number(versionMatch[1]), versionMatch[2] || '/', isDraft);
+    return;
+  }
 
   if (site.status !== 'active') {
     // 451 只留给被管理员下线的站；草稿对外「根本不存在」
@@ -3843,8 +3923,8 @@ const ROUTES = [
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/attachments$`), handleAttachmentUpload],
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/attachments\\/(\\d+)$`), handleAttachmentGet],
   // 改动快照与回滚
-  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/snapshots$`), handleSnapshotsList],
-  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/snapshots\\/(\\d+)\\/restore$`), handleSnapshotRestore],
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/versions$`), handleVersionsList],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/versions\\/(\\d+)\\/restore$`), handleVersionRestore],
   // 整站导出
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/export$`), handleSiteExport],
   // agent 工具集：接模型之前也能手动验证工具是否好用
