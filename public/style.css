@@ -2847,12 +2847,92 @@ body.dragging .wsFrame { pointer-events: none; }
   to { transform: rotate(360deg); }
 }
 
-/* 模型标签：没接模型时置灰 + 不可点，接了之后是个可点的按钮 */
-.wsModel.off { color: var(--muted); cursor: default; }
-.wsModel:not(.off) { cursor: pointer; }
-.wsModel:not(.off):hover { color: var(--pink); }
+/* 模型 / 模式两个上拉框：各自独立的胶囊按钮，点开往上弹选项面板 */
+.wsPick {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 190px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel2);
+  color: var(--muted2);
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.wsPick:hover { border-color: var(--pink); color: var(--pink); background: var(--panel); }
+.wsPick[aria-expanded="true"] { border-color: var(--pink); color: var(--pink); background: var(--panel); }
+/* 没接模型：置灰、不可点 */
+.wsPick.off { color: var(--muted); cursor: default; opacity: .7; }
+.wsPick.off:hover { border-color: var(--border); color: var(--muted); background: var(--panel2); }
+/* 对话模式：用蓝色暗示「这条只会聊，不改文件」 */
+.wsPick.isChat { color: var(--blue); border-color: #cdeaf7; background: var(--blue-soft); }
+.wsPick.isChat:hover { color: var(--blue); border-color: var(--blue); }
 
-/* 选项列表弹窗（选模型用） */
+.wsPickLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 朝上的小箭头：提示「点开往上翻」 */
+.wsPickCaret { flex: none; font-size: 9px; line-height: 1; opacity: .75; }
+
+/* 上拉面板：贴着按钮上方弹出 */
+.wsSheet {
+  position: fixed;
+  z-index: 420;
+  min-width: 200px;
+  max-width: 300px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  box-shadow: var(--shadow-lift);
+  animation: sheetUp .13s ease-out;
+}
+@keyframes sheetUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.wsSheetItem {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 26px 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.wsSheetItem:hover { background: var(--panel2); }
+.wsSheetItem.on { background: var(--panel2); }
+.wsSheetItem b { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.wsSheetItem span { font-size: 11px; color: var(--muted); }
+.wsSheetItem.on b { color: var(--pink); }
+/* 选中项右侧的勾 */
+.wsSheetTick {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--pink);
+  font-size: 12px;
+  font-style: normal;
+}
+
+/* 选项列表弹窗（MP.pick，仍用于别处的单选场景） */
 .pickCard { width: 340px; padding-bottom: 14px; }
 .pickList { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
 .pickItem {

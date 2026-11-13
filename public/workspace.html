@@ -50,7 +50,15 @@
         <textarea id="input" rows="1" placeholder="说说要改什么…"></textarea>
         <div class="wsBar">
           <button type="button" class="iconBtn" id="plus" title="附加内容">＋</button>
-          <span class="wsModel" id="threadModel">未接模型</span>
+          <!-- 模型与模式是两个独立的上拉框，各自管各自的，不掺在一个弹窗里 -->
+          <button type="button" class="wsPick" id="modelPick" title="选择模型" aria-haspopup="listbox">
+            <span class="wsPickLabel" id="modelPickLabel">未接模型</span>
+            <span class="wsPickCaret" aria-hidden="true">⌃</span>
+          </button>
+          <button type="button" class="wsPick" id="modePick" title="选择模式" aria-haspopup="listbox">
+            <span class="wsPickLabel" id="modePickLabel">编码</span>
+            <span class="wsPickCaret" aria-hidden="true">⌃</span>
+          </button>
           <button type="button" class="miniChip" id="skill">技能</button>
           <span class="spacer"></span>
           <button type="button" class="sendBtn" id="send" title="发送（Enter）">↑</button>
@@ -131,7 +139,10 @@ const saveFile = document.getElementById('saveFile');
 const codeWrap = document.getElementById('codeWrap');
 const editEmpty = document.getElementById('editEmpty');
 const threadList = document.getElementById('threadList');
-const threadModel = document.getElementById('threadModel');
+const modelPick = document.getElementById('modelPick');
+const modelPickLabel = document.getElementById('modelPickLabel');
+const modePick = document.getElementById('modePick');
+const modePickLabel = document.getElementById('modePickLabel');
 const wsSide = document.getElementById('wsSide');
 const wsChat = document.getElementById('wsChat');
 const gripSide = document.getElementById('gripSide');
@@ -374,90 +385,208 @@ function currentMode() {
 }
 
 /**
- * 底部那行：显示「模型 · 模式」，点一下能改。
- * 没配 key 就显示「未接模型」并置灰。
+ * 底部两个上拉框：各自独立显示和选择。
+ * 没配 key 时模型框置灰不可点，模式框照常可用。
  */
 function syncModelLabel() {
   const id = currentModelId();
   const m = MODELS.find((x) => x.id === id);
   const mode = currentMode();
-  const modeLabel = (MODES.find((x) => x.id === mode) || {}).label || '编码';
+  const modeInfo = MODES.find((x) => x.id === mode);
 
+  // 模型框
   if (!m) {
-    threadModel.textContent = '未接模型';
-    threadModel.title = '服务器还没配置模型，先在环境变量里加 LLM_API_KEY';
-    threadModel.classList.add('off');
-    threadModel.onclick = null;
-    return;
+    modelPickLabel.textContent = '未接模型';
+    modelPick.title = '服务器还没配置模型，先在环境变量里加 LLM_API_KEY';
+    modelPick.classList.add('off');
+    modelPick.disabled = true;
+  } else {
+    modelPickLabel.textContent = m.label;
+    modelPick.title = `${m.provider} / ${m.model}`;
+    modelPick.classList.remove('off');
+    modelPick.disabled = false;
   }
 
-  threadModel.classList.remove('off');
-  threadModel.textContent = `${m.label} · ${modeLabel}`;
-  threadModel.title = `${m.provider} / ${m.model}　（点一下换模型或模式）`;
-  threadModel.onclick = () => openAgentSettings();
+  // 模式框
+  modePickLabel.textContent = modeInfo ? modeInfo.label : '编码';
+  modePick.title = modeInfo ? modeInfo.hint : '可以读写文件';
+  modePick.classList.toggle('isChat', mode === 'chat');
 }
 
-/**
- * 一次改两样：模型 + 模式。
- * 分两步弹窗而不是塞一个复杂表单 —— 每步只有一个选择，点两下就完事。
- */
-async function openAgentSettings() {
-  if (!MODELS.length) {
-    MP.alert('还没有可用的模型，先在服务器上配 LLM_API_KEY 再重启');
-    return;
-  }
+/** 把改动落到当前会话上。 */
+async function patchThread(patch) {
   const t = THREADS.find((x) => x.id === threadId);
   if (!t) {
     MP.toast('先建一个会话');
+    return false;
+  }
+  try {
+    await MP.api(api('/threads/' + threadId), { method: 'PUT', body: patch });
+    Object.assign(t, patch);
+    syncModelLabel();
+    syncChatTitle();
+    return true;
+  } catch (e) {
+    MP.toast(e.message || '切换失败');
+    return false;
+  }
+}
+
+/* ---------------------------------------------------------------- 上拉框（下拉面板） */
+
+// 当前打开的面板；同一时间只允许一个
+let openSheet = null;
+
+/** 关掉当前面板。 */
+function closeSheet() {
+  if (!openSheet) return;
+  openSheet.remove();
+  openSheet = null;
+  document.removeEventListener('click', onDocClick, true);
+  document.removeEventListener('keydown', onDocKey);
+}
+
+function onDocClick(e) {
+  if (openSheet && !openSheet.contains(e.target)) closeSheet();
+}
+function onDocKey(e) {
+  if (e.key === 'Escape') closeSheet();
+}
+
+/**
+ * 在某个按钮上方弹一个上拉面板（就是图 3 / 图 4 那种）。
+ *
+ * 为什么不用 `<select>`：原生 select 没法显示副标题、没法做主题样式；
+ * 这里自己画一个 fixed 面板，行为对得上（点外面关、Esc 关、选中即关）。
+ *
+ * @param {HTMLElement} anchor 触发按钮
+ * @param {object} opt
+ *   items: [{ value, label, hint, active }]
+ *   onPick(value)
+ */
+function openListSheet(anchor, { items, onPick }) {
+  // 再点同一个按钮就是收起
+  if (openSheet && openSheet.dataset.for === anchor.id) {
+    closeSheet();
     return;
   }
+  closeSheet();
 
-  // 第一步：选模型
+  const sheet = document.createElement('div');
+  sheet.className = 'wsSheet';
+  sheet.dataset.for = anchor.id;
+  sheet.setAttribute('role', 'listbox');
+
+  items.forEach((item) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'wsSheetItem' + (item.active ? ' on' : '');
+    btn.setAttribute('role', 'option');
+    btn.setAttribute('aria-selected', item.active ? 'true' : 'false');
+
+    const title = document.createElement('b');
+    title.textContent = item.label;
+    btn.appendChild(title);
+
+    if (item.hint) {
+      const hint = document.createElement('span');
+      hint.textContent = item.hint;
+      btn.appendChild(hint);
+    }
+
+    // 当前选中项右侧打勾
+    if (item.active) {
+      const tick = document.createElement('i');
+      tick.className = 'wsSheetTick';
+      tick.textContent = '✓';
+      btn.appendChild(tick);
+    }
+
+    btn.addEventListener('click', () => {
+      closeSheet();
+      onPick(item.value);
+    });
+    sheet.appendChild(btn);
+  });
+
+  document.body.appendChild(sheet);
+
+  // 贴着按钮**上方**弹出（底部输入区，往上翻才不会挡输入框）
+  const r = anchor.getBoundingClientRect();
+  const w = sheet.offsetWidth;
+  const h = sheet.offsetHeight;
+  let left = r.left;
+  if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+  if (left < 8) left = 8;
+  let top = r.top - h - 6;
+  if (top < 8) top = r.bottom + 6;   // 上面放不下就翻到下面
+  sheet.style.left = Math.round(left) + 'px';
+  sheet.style.top = Math.round(top) + 'px';
+
+  openSheet = sheet;
+  // 用捕获阶段：按钮自己的 click 先跑完再判断，避免刚开就被关掉
+  setTimeout(() => {
+    document.addEventListener('click', onDocClick, true);
+    document.addEventListener('keydown', onDocKey);
+  }, 0);
+}
+
+// 模型框：只列真正可用的（有 key + 支持工具）
+modelPick.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (modelPick.disabled) return;
+
   const usable = MODELS.filter((m) => m.ready && m.supportsTools);
   if (!usable.length) {
     MP.alert('清单里的模型都缺 Key 或不支持工具调用');
     return;
   }
-  const curModel = currentModelId();
-  const model = await MP.pick({
-    text: '这个对话用哪个模型？',
-    options: usable.map((m) => ({
-      value: m.id,
-      label: m.label,
-      hint: `${m.hint} · ${m.provider}`,
-      active: m.id === curModel,
-    })),
-  });
-  if (!model) return;   // 取消
+  const cur = currentModelId();
 
-  // 第二步：选模式
-  const curMode = currentMode();
-  const mode = await MP.pick({
-    text: '这个对话什么模式？',
-    options: MODES.map((m) => ({
+  openListSheet(modelPick, {
+    items: usable.map((m) => ({
       value: m.id,
       label: m.label,
       hint: m.hint,
-      active: m.id === curMode,
+      active: m.id === cur,
     })),
+    onPick: async (id) => {
+      if (id === cur) return;
+      const ok = await patchThread({ model: id });
+      if (ok) {
+        const label = (MODELS.find((m) => m.id === id) || {}).label || id;
+        MP.toast('已切到 ' + label);
+      }
+    },
   });
-  if (!mode) return;
+});
 
-  if (model === curModel && mode === curMode) return;
+// 模式框
+modePick.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const cur = currentMode();
 
-  try {
-    await MP.api(api('/threads/' + threadId), { method: 'PUT', body: { model, mode } });
-    t.model = model;
-    t.mode = mode;
-    syncModelLabel();
-    syncChatTitle();
-    const label = (MODELS.find((m) => m.id === model) || {}).label || model;
-    const ml = (MODES.find((m) => m.id === mode) || {}).label || mode;
-    MP.toast(`已切到 ${label} · ${ml}`);
-  } catch (e) {
-    MP.toast(e.message || '切换失败');
-  }
-}
+  openListSheet(modePick, {
+    items: MODES.map((m) => ({
+      value: m.id,
+      label: m.label,
+      hint: m.hint,
+      active: m.id === cur,
+    })),
+    onPick: async (id) => {
+      if (id === cur) return;
+      const ok = await patchThread({ mode: id });
+      if (ok) {
+        const label = (MODES.find((m) => m.id === id) || {}).label || id;
+        MP.toast('已切到「' + label + '」模式');
+      }
+    },
+  });
+});
+
+// 滚动 / 改窗口大小时面板位置就失效了，直接收起
+document.addEventListener('scroll', closeSheet, true);
+window.addEventListener('resize', closeSheet);
 
 /* ---------------------------------------------------------------- 会话列表 */
 
@@ -753,12 +882,13 @@ async function sendMessage(text) {
       name: NAME,
       content,
       threadId,
-      // 任务开跑：按钮切成停止态，把模型名放进底部那行
+      // 任务开跑：按钮切成停止态；模型框同步成实际用的那个
+      //（服务端可能因为原模型连不上而降级到别的，这里要跟上）
       onStarted: (data, ctl) => {
         activeCancel = ctl;
         enterRunning();
-        if (data.model && data.model.label) {
-          threadModel.textContent = data.model.label;
+        if (data.model && data.model.id) {
+          modelPickLabel.textContent = data.model.label || data.model.id;
         }
       },
       onReply: () => {
