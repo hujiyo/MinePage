@@ -919,11 +919,17 @@ input.addEventListener('keydown', (e) => {
 });
 /* ---------------------------------------------------------------- 图片附件 */
 
-// 待发送的图片。{ id, mime, size, url }
+// 待发送的图片。{ id, mime, size, url, originalBytes, compressed }
 // id 是服务端返回的附件 id，url 是本地 blob 预览（发送成功后释放）
 let PENDING_IMAGES = [];
-const MAX_IMAGES = 4;
-const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+// 准入上限：与 lib/config.js 的 ATTACH_MAX_BYTES / ATTACH_MAX_PER_MESSAGE 对齐。
+// 20 MB 能覆盖手机原图和 4K 截图；超过基本是误传。
+const MAX_IMAGES = 6;
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+// 只收这三种。GIF 故意不支持：canvas 会把它变成静态第一帧，
+// 与其让用户发出去发现不动了，不如在入口就说清楚。
+const OK_IMAGE_TYPES = /^image\/(png|jpeg|webp)$/;
 
 /** 刷新图片条：有条就显示、把对话区往上顶；没有就收起。 */
 function renderAttachBar() {
@@ -939,12 +945,23 @@ function renderAttachBar() {
   PENDING_IMAGES.forEach((img, i) => {
     const box = document.createElement('div');
     box.className = 'wsAttach';
-    box.title = `${img.mime} · ${formatSize(img.size)}`;
+    // 悬停提示压缩前后的对比，用户能知道「我传的 18MB 变成 300KB 了」
+    box.title = img.compressed
+      ? `${MP.formatBytes(img.originalBytes)} → ${MP.formatBytes(img.size)}（已自动压缩）`
+      : `${img.mime} · ${MP.formatBytes(img.size)}`;
 
     const el = document.createElement('img');
     el.src = img.url;
     el.alt = '待发送图片';
     box.appendChild(el);
+
+    // 压缩过的角标，让用户知道发生了什么（但不打扰）
+    if (img.compressed) {
+      const flag = document.createElement('span');
+      flag.className = 'wsAttachFlag';
+      flag.textContent = '压';
+      box.appendChild(flag);
+    }
 
     const del = document.createElement('button');
     del.type = 'button';
@@ -963,15 +980,21 @@ function renderAttachBar() {
     attachHint.textContent = `${m.label} 看不了图片，换 Claude Haiku 5.5 / GPT-6 Luna / GLM 选一个`;
     attachHint.classList.add('warn');
   } else {
-    attachHint.textContent = `${n}/${MAX_IMAGES} 张`;
+    // 有压缩的就把省下的空间说出来，比只显示张数有信息量
+    const total = PENDING_IMAGES.reduce((s, x) => s + (x.size || 0), 0);
+    const saved = PENDING_IMAGES.reduce(
+      (s, x) => s + (x.compressed ? (x.originalBytes - x.size) : 0),
+      0,
+    );
+    attachHint.textContent = saved > 0
+      ? `${n}/${MAX_IMAGES} 张 · 共 ${MP.formatBytes(total)}（压缩省了 ${MP.formatBytes(saved)}）`
+      : `${n}/${MAX_IMAGES} 张 · ${MP.formatBytes(total)}`;
     attachHint.classList.remove('warn');
   }
 }
 
 function formatSize(n) {
-  if (n < 1024) return n + ' B';
-  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
-  return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return MP.formatBytes(n);
 }
 
 function removeImage(index) {
@@ -987,8 +1010,10 @@ function clearImages() {
 }
 
 /**
- * 加一张图：先本地预览（立刻可见），再传到服务端拿 id。
- * 上传失败就把这张撤掉，别留一个「看着在但其实发不出去」的图。
+ * 加一张图：先归一化（浏览器里压缩）→ 本地预览 → 传到服务端拿 id。
+ *
+ * 顺序很重要：**先压缩再上传**。原图 20 MB 直接传上去，服务端要完整收下
+ * 20 MB 才能判断，白费流量；压到 300 KB 再传，快 10 倍还不占库。
  */
 async function addImage(file) {
   if (!file) return;
@@ -996,8 +1021,8 @@ async function addImage(file) {
     MP.toast(`最多 ${MAX_IMAGES} 张图`);
     return;
   }
-  if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) {
-    MP.toast('只支持 PNG / JPEG / WEBP / GIF');
+  if (!OK_IMAGE_TYPES.test(file.type)) {
+    MP.toast('只支持 PNG / JPEG / WEBP（不支持 GIF）');
     return;
   }
   if (file.size > MAX_IMAGE_BYTES) {
@@ -1009,21 +1034,35 @@ async function addImage(file) {
     return;
   }
 
+  // 先占位：用户在压缩期间也能看到「正在处理」的格子
   const entry = {
     id: null,
     mime: file.type,
     size: file.size,
-    url: URL.createObjectURL(file),
+    originalBytes: file.size,
+    compressed: false,
+    url: null,
     uploading: true,
   };
   PENDING_IMAGES.push(entry);
   renderAttachBar();
 
   try {
-    const buf = await file.arrayBuffer();
+    // ① 归一化：长边 2048、JPEG 0.9，超过 1 MB 再按阶梯压
+    const norm = await MP.normalizeImage(file);
+    entry.originalBytes = norm.originalBytes;
+    entry.size = norm.bytes;
+    entry.compressed = norm.changed;
+    entry.mime = norm.changed ? 'image/jpeg' : file.type;
+    entry.url = URL.createObjectURL(norm.blob);
+    renderAttachBar();
+
+    // ② 上传压缩后的那份
+    const buf = await norm.blob.arrayBuffer();
+    const type = norm.changed ? 'image/jpeg' : file.type;
     const res = await fetch(api('/attachments?threadId=' + threadId), {
       method: 'POST',
-      headers: { 'content-type': file.type },
+      headers: { 'content-type': type },
       body: buf,
       credentials: 'same-origin',
     });
@@ -1032,6 +1071,7 @@ async function addImage(file) {
     entry.id = data.attachment.id;
     entry.mime = data.attachment.mime;
     entry.size = data.attachment.size;
+    entry.deduped = Boolean(data.attachment.deduped);
     entry.uploading = false;
     renderAttachBar();
   } catch (e) {

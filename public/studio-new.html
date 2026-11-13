@@ -195,13 +195,12 @@ modePick.addEventListener('click', (e) => {
 // 这一页还没建草稿，图片先留在内存里（File 对象没法进 sessionStorage）。
 // 点发送时：建草稿 → 传图拿 id → 把 id 塞 sessionStorage → 跳工作区。
 let PENDING_IMAGES = [];
-const MAX_IMAGES = 4;
-const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+const MAX_IMAGES = 6;
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const OK_IMAGE_TYPES = /^image\/(png|jpeg|webp)$/;
 
 function formatSize(n) {
-  if (n < 1024) return n + ' B';
-  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
-  return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return MP.formatBytes(n);
 }
 
 function renderAttachBar() {
@@ -217,12 +216,21 @@ function renderAttachBar() {
   PENDING_IMAGES.forEach((img, i) => {
     const box = document.createElement('div');
     box.className = 'wsAttach';
-    box.title = `${img.file.type} · ${formatSize(img.file.size)}`;
+    box.title = img.compressed
+      ? `${MP.formatBytes(img.originalBytes)} → ${MP.formatBytes(img.size)}（已自动压缩）`
+      : `${img.file.type} · ${MP.formatBytes(img.file.size)}`;
 
     const el = document.createElement('img');
     el.src = img.url;
     el.alt = '待发送图片';
     box.appendChild(el);
+
+    if (img.compressed) {
+      const flag = document.createElement('span');
+      flag.className = 'wsAttachFlag';
+      flag.textContent = '压';
+      box.appendChild(flag);
+    }
 
     const del = document.createElement('button');
     del.type = 'button';
@@ -240,7 +248,14 @@ function renderAttachBar() {
     attachHint.textContent = `${m.label} 看不了图片，换成 Claude Haiku 5.5 / GPT-6 Luna / GLM`;
     attachHint.classList.add('warn');
   } else {
-    attachHint.textContent = `${n}/${MAX_IMAGES} 张`;
+    const total = PENDING_IMAGES.reduce((s, x) => s + (x.size || 0), 0);
+    const saved = PENDING_IMAGES.reduce(
+      (s, x) => s + (x.compressed ? (x.originalBytes - x.size) : 0),
+      0,
+    );
+    attachHint.textContent = saved > 0
+      ? `${n}/${MAX_IMAGES} 张 · 共 ${MP.formatBytes(total)}（压缩省了 ${MP.formatBytes(saved)}）`
+      : `${n}/${MAX_IMAGES} 张 · ${MP.formatBytes(total)}`;
     attachHint.classList.remove('warn');
   }
 }
@@ -257,14 +272,18 @@ function clearImages() {
   renderAttachBar();
 }
 
-function addImage(file) {
+/**
+ * 加一张图：先在浏览器里归一化（长边 2048 / JPEG 0.9），再挂着等提交时上传。
+ * 这一页还没建草稿，所以只压不上传 —— 附件要挂在站点上，得先有草稿。
+ */
+async function addImage(file) {
   if (!file) return;
   if (PENDING_IMAGES.length >= MAX_IMAGES) {
     showErr(`最多 ${MAX_IMAGES} 张图`);
     return;
   }
-  if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) {
-    showErr('只支持 PNG / JPEG / WEBP / GIF');
+  if (!OK_IMAGE_TYPES.test(file.type)) {
+    showErr('只支持 PNG / JPEG / WEBP（不支持 GIF）');
     return;
   }
   if (file.size > MAX_IMAGE_BYTES) {
@@ -272,8 +291,20 @@ function addImage(file) {
     return;
   }
   clearErr();
-  PENDING_IMAGES.push({ file, url: URL.createObjectURL(file) });
-  renderAttachBar();
+
+  try {
+    const norm = await MP.normalizeImage(file);
+    PENDING_IMAGES.push({
+      file: norm.blob,
+      originalBytes: norm.originalBytes,
+      size: norm.bytes,
+      compressed: norm.changed,
+      url: URL.createObjectURL(norm.blob),
+    });
+    renderAttachBar();
+  } catch (e) {
+    showErr(e.message || '这张图打不开，换一张试试');
+  }
 }
 
 function addImageFiles(files) {
@@ -371,13 +402,14 @@ async function submit() {
     const site = data.site;
     const sitePath = MP.siteApiOf(USERNAME, site.name, '');
 
-    // 传图：一张失败就整条不发，避免发出一条「少一张图」的消息
+    // 传图：一张失败就整条不发，避免发出一条「少一张图」的消息。
+    // 这里传的已经是归一化后的小图（长边 2048 / JPEG 0.9），不是原图。
     const ids = [];
     for (const img of PENDING_IMAGES) {
       const buf = await img.file.arrayBuffer();
       const res = await fetch(sitePath + '/attachments', {
         method: 'POST',
-        headers: { 'content-type': img.file.type },
+        headers: { 'content-type': img.file.type || 'image/jpeg' },
         body: buf,
         credentials: 'same-origin',
       });

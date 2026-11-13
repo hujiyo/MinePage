@@ -775,6 +775,144 @@
   window.addEventListener('resize', () => MP.closeSheet());
 
   /* ----------------------------------------------------------
+     4.8 图片归一化（浏览器里压缩，服务端零依赖）
+     ----------------------------------------------------------
+     为什么放在前端：
+       - 服务端是零依赖的，没有 sharp；手写缩放器不现实
+       - 浏览器天生能解码 / 缩放 / 重编码
+       - 顺带省掉 10 倍上传流量和服务器 CPU
+
+     两步：
+       ① normalize：长边缩到 2048、JPEG 0.9 —— 通常落到 150–400 KB
+       ② project  ：超过 1 MB 就按质量阶梯再压（0.9 → 0.8 → 0.65）
+
+     实测依据（当前网关）：
+       - 字节上限 9.6–10 MB，像素几乎不限（48 MP 也能收）
+       - 但 8.8 MB 的图要 11.3 秒才回，300 KB 只要 5 秒
+     ---------------------------------------------------------- */
+
+  // 与 lib/config.js 的 ATTACH_TARGET_DIMENSION / ATTACH_REQUEST_BYTES 保持一致
+  const NORMALIZE_MAX_DIM = 2048;
+  const REQUEST_TARGET_BYTES = 1024 * 1024;
+  const QUALITY_LADDER = [0.9, 0.8, 0.65];
+
+  /** canvas 对某种类型编码，返回 Blob；不支持就返回 null。 */
+  async function encodeCanvas(canvas, type, quality) {
+    if (typeof canvas.convertToBlob === 'function') {
+      try {
+        return await canvas.convertToBlob({ type, quality });
+      } catch {
+        return null;
+      }
+    }
+    // 老浏览器没有 OffscreenCanvas.convertToBlob，退回普通 canvas
+    const el = document.createElement('canvas');
+    el.width = canvas.width;
+    el.height = canvas.height;
+    el.getContext('2d').drawImage(canvas, 0, 0);
+    return new Promise((resolve) => {
+      el.toBlob((blob) => resolve(blob), type, quality);
+    });
+  }
+
+  /**
+   * 把用户选的图片压到「能看清、又不大」的尺寸。
+   *
+   * @param {File|Blob} file
+   * @param {{maxDim?:number, targetBytes?:number}} [opt]
+   * @returns {Promise<{blob: Blob, originalBytes: number, bytes: number, width: number, height: number, changed: boolean}>}
+   */
+  MP.normalizeImage = async function (file, opt = {}) {
+    const maxDim = opt.maxDim ?? NORMALIZE_MAX_DIM;
+    const targetBytes = opt.targetBytes ?? REQUEST_TARGET_BYTES;
+    const originalBytes = file.size;
+
+    // 解码。失败说明不是浏览器认得的图片（或者文件坏了）
+    let bitmap;
+    try {
+      bitmap = await createImageBitmap(file);
+    } catch {
+      throw Object.assign(new Error('这个图片打不开，换一张试试'), { code: 'DECODE_FAILED' });
+    }
+
+    const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+
+    const canvas = typeof OffscreenCanvas === 'function'
+      ? new OffscreenCanvas(width, height)
+      : Object.assign(document.createElement('canvas'), { width, height });
+
+    const ctx = canvas.getContext('2d');
+    // 白底：PNG 透明区域转成 JPEG 后默认会变黑，先铺一层白
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(bitmap, 0, 0, width, height);
+    if (typeof bitmap.close === 'function') bitmap.close();
+
+    // 小图且本来就小：不折腾，原样返回
+    if (scale === 1 && originalBytes <= targetBytes) {
+      return { blob: file, originalBytes, bytes: originalBytes, width, height, changed: false };
+    }
+
+    // 质量阶梯：先 0.9，不够就 0.8、0.65
+    let best = null;
+    for (const q of QUALITY_LADDER) {
+      const blob = await encodeCanvas(canvas, 'image/jpeg', q);
+      if (!blob) break;
+      if (!best || blob.size < best.size) best = blob;
+      if (blob.size <= targetBytes) { best = blob; break; }
+    }
+    if (!best) {
+      // 编码全失败（极老的浏览器）：退回原图，让服务端的字节闸去判断
+      return { blob: file, originalBytes, bytes: originalBytes, width, height, changed: false };
+    }
+
+    // 阶梯跑到底还超重（高细节图会这样）：改成继续缩尺寸。
+    // 之前只降质量，一张满屏噪点的 2048×2048 压到 0.65 还有 1.2 MB，
+    // 所以得再来一轮「尺寸减半 + 中质量」，最多两轮。
+    let finalBlob = best;
+    let finalW = width;
+    let finalH = height;
+    if (finalBlob.size > targetBytes) {
+      for (let round = 0; round < 2 && finalBlob.size > targetBytes; round += 1) {
+        finalW = Math.max(1, Math.round(finalW / 1.5));
+        finalH = Math.max(1, Math.round(finalH / 1.5));
+        const small = typeof OffscreenCanvas === 'function'
+          ? new OffscreenCanvas(finalW, finalH)
+          : Object.assign(document.createElement('canvas'), { width: finalW, height: finalH });
+        const sctx = small.getContext('2d');
+        sctx.fillStyle = '#fff';
+        sctx.fillRect(0, 0, finalW, finalH);
+        sctx.drawImage(canvas, 0, 0, finalW, finalH);
+        const blob = await encodeCanvas(small, 'image/jpeg', 0.82);
+        if (blob && blob.size < finalBlob.size) finalBlob = blob;
+      }
+    }
+
+    // 压完反而更大（原图本来就是高压缩 WebP）：那还是用原图
+    if (finalBlob.size >= originalBytes && scale === 1) {
+      return { blob: file, originalBytes, bytes: originalBytes, width, height, changed: false };
+    }
+
+    return {
+      blob: finalBlob,
+      originalBytes,
+      bytes: finalBlob.size,
+      width: finalW,
+      height: finalH,
+      changed: true,
+    };
+  };
+
+  /** 人类可读的体积。 */
+  MP.formatBytes = function (n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return Math.round(n / 1024) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MB';
+  };
+
+  /* ----------------------------------------------------------
      5. 发送一条消息：异步任务 + 轮询进度
      ---------------------------------------------------------- */
 

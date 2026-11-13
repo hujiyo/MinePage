@@ -144,6 +144,7 @@ import { runAgent } from './lib/agent/loop.js';
 import {
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_ATTACHMENT_BYTES,
+  attachmentUsage,
   getAttachment,
   listAttachmentMeta,
   loadAttachmentBytes,
@@ -1390,6 +1391,9 @@ function uploadLimits() {
     siteTotalBytes: MAX_SITE_TOTAL_BYTES,
     userTotalBytes: MAX_USER_TOTAL_BYTES,
     zipBytes: MAX_ZIP_BYTES,
+    // 对话图片：前端靠这几个数决定提示文案和归一化目标，不再各写一份
+    attachBytes: MAX_ATTACHMENT_BYTES,
+    attachPerMessage: MAX_ATTACHMENTS_PER_MESSAGE,
   };
 }
 
@@ -2257,7 +2261,9 @@ async function handleAttachmentUpload(req, res, [username, name]) {
     threadId = thread.id;
   }
 
-  // 图片比文本大，单独放宽上限（单张 4 MB，见 attachments.js）
+  // 图片比文本大，单独放宽上限（单张 20 MB，见 lib/config.js）。
+  // 前端会先归一化到长边 2048（约 300 KB）再传，所以走不到这个上限；
+  // 放宽到 20 MB 是为了「用户从手机直接拖原图」时不至于被一句 4 MB 挡在门外。
   const bytes = await readFileBody(req, res, MAX_ATTACHMENT_BYTES);
   if (!bytes) return;
   if (!bytes.length) {
@@ -2274,8 +2280,19 @@ async function handleAttachmentUpload(req, res, [username, name]) {
     });
     sendJson(res, 201, { ok: true, attachment: saved });
   } catch (err) {
-    if (err.code === 'BAD_IMAGE' || err.code === 'IMAGE_TOO_LARGE') {
-      sendJson(res, 400, { ok: false, message: err.message });
+    if (err.code === 'BAD_IMAGE' || err.code === 'IMAGE_TOO_LARGE'
+        || err.code === 'IMAGE_TOO_MANY_PIXELS') {
+      sendJson(res, 400, { ok: false, message: err.message, code: err.code });
+      return;
+    }
+    if (err.code === 'ATTACH_QUOTA_EXCEEDED') {
+      sendJson(res, 413, {
+        ok: false,
+        message: err.message,
+        code: err.code,
+        used: err.used,
+        limit: err.limit,
+      });
       return;
     }
     throw err;
