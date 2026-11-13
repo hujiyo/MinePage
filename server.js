@@ -141,6 +141,15 @@ import {
 } from './lib/agent/models.js';
 import { LlmError } from './lib/agent/llm.js';
 import { runAgent } from './lib/agent/loop.js';
+import {
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  MAX_ATTACHMENT_BYTES,
+  getAttachment,
+  listAttachmentMeta,
+  loadAttachmentBytes,
+  pruneAttachments,
+  saveAttachment,
+} from './lib/agent/attachments.js';
 import { cancel as cancelRunningTask, register as registerRunningTask, unregister as unregisterRunningTask } from './lib/agent/running.js';
 import {
   assertDailyQuota,
@@ -1787,12 +1796,24 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
   if (!body) return;
 
   const content = String(body.content ?? '').trim();
-  if (!content) {
+  // 只有图没文字是合法的（「看看这个图，照它改」），所以空文字+有图也放行
+  const attachIds = Array.isArray(body.attachments)
+    ? body.attachments.map(Number).filter((n) => Number.isInteger(n) && n > 0)
+    : [];
+
+  if (!content && !attachIds.length) {
     sendJson(res, 400, { ok: false, message: '说点什么再发送' });
     return;
   }
   if (content.length > SITE_MESSAGE_MAX) {
     sendJson(res, 413, { ok: false, message: `一条消息最多 ${SITE_MESSAGE_MAX} 字` });
+    return;
+  }
+  if (attachIds.length > MAX_ATTACHMENTS_PER_MESSAGE) {
+    sendJson(res, 413, {
+      ok: false,
+      message: `一条消息最多带 ${MAX_ATTACHMENTS_PER_MESSAGE} 张图`,
+    });
     return;
   }
 
@@ -1872,7 +1893,12 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
   }
 
   // 用户消息先落库：即便任务失败，用户说的这句话也不能丢
-  const mine = await addSiteMessage(site.id, 'user', content, thread.id);
+  const mine = await addSiteMessage(site.id, 'user', content, thread.id, attachIds);
+
+  // 图片本体在后台任务里再读（这里少一次大 BLOB 查询）
+  const attachments = attachIds.length
+    ? await loadAttachmentBytes(site.id, attachIds)
+    : [];
 
   const taskId = await createTask({
     siteId: site.id,
@@ -1891,6 +1917,7 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
       threadId: thread.id,
       mode: canonicalMode(thread.mode),
       userText: content,
+      attachments,
     })
       .catch((err) => console.error('[agent-task]', err));
   });
@@ -1901,6 +1928,9 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
     threadId: thread.id,
     user: mine,
     model: { id: modelId, label: cfg.label, model: cfg.model },
+    // 当前模型看不了图时提早提示，别等模型说「我看不到」
+    vision: Boolean(cfg.supportsVision),
+    imageCount: attachments.length,
   });
 }
 
@@ -1910,7 +1940,9 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
  * 这里要把所有异常都兜住 —— 它在 setImmediate 里跑，抛出去没人接，
  * 任务会永远卡在 running，前端就一直转圈。
  */
-async function runAgentTask({ taskId, cfg, site, userId, threadId, mode = 'code', userText }) {
+async function runAgentTask({
+  taskId, cfg, site, userId, threadId, mode = 'code', userText, attachments = [],
+}) {
   const progress = [];
   // 登记取消句柄：用户点「停止」时由 /cancel 接口触发这个 signal
   const signal = registerRunningTask(taskId);
@@ -1947,6 +1979,7 @@ async function runAgentTask({ taskId, cfg, site, userId, threadId, mode = 'code'
       history,
       userText,
       mode,
+      attachments,
       snapshot,
       signal,
       // 流式：每段文字追加到缓冲并节流落库，前端轮询就能看到「正在生成」
@@ -2178,11 +2211,105 @@ async function handleThreadMessages(req, res, [username, name, id]) {
   const thread = await threadOrRespond(res, site, id);
   if (!thread) return;
 
+  const messages = await listThreadMessages(thread.id, SITE_MESSAGES_KEEP);
+
+  // 把 attach_ids 拆成数组并补上图片元信息（不含字节，前端按 id 单独取图）。
+  // 一次批量查，避免每条消息一个查询。
+  const allIds = [...new Set(
+    messages.flatMap((m) => String(m.attach_ids || '').split(',').filter(Boolean).map(Number)),
+  )];
+  const metas = allIds.length ? await listAttachmentMeta(site.id, allIds) : [];
+  const metaById = new Map(metas.map((m) => [Number(m.id), m]));
+
   sendJson(res, 200, {
     ok: true,
     thread,
-    messages: await listThreadMessages(thread.id, SITE_MESSAGES_KEEP),
+    messages: messages.map((m) => {
+      const ids = String(m.attach_ids || '').split(',').filter(Boolean).map(Number);
+      return {
+        ...m,
+        attachIds: ids,
+        attachments: ids.map((id) => metaById.get(id)).filter(Boolean),
+      };
+    }),
   });
+}
+
+/**
+ * POST /api/sites/:u/:n/attachments?threadId=
+ * 上传一张图（原始二进制），返回 attachment id。
+ *
+ * 用原始字节而不是 multipart：前端用 File.arrayBuffer() 直接发，
+ * 不需要引 multipart 解析库（本项目零依赖）。
+ */
+async function handleAttachmentUpload(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const threadIdRaw = new URL(req.url, 'http://internal').searchParams.get('threadId');
+  let threadId = null;
+  if (threadIdRaw) {
+    const thread = await findThread(site.id, Number(threadIdRaw));
+    if (!thread) {
+      sendJson(res, 404, { ok: false, message: '这个会话不存在' });
+      return;
+    }
+    threadId = thread.id;
+  }
+
+  // 图片比文本大，单独放宽上限（单张 4 MB，见 attachments.js）
+  const bytes = await readFileBody(req, res, MAX_ATTACHMENT_BYTES);
+  if (!bytes) return;
+  if (!bytes.length) {
+    sendJson(res, 400, { ok: false, message: '图片是空的' });
+    return;
+  }
+
+  try {
+    const saved = await saveAttachment({
+      siteId: site.id,
+      threadId,
+      userId: user.id,
+      bytes,
+    });
+    sendJson(res, 201, { ok: true, attachment: saved });
+  } catch (err) {
+    if (err.code === 'BAD_IMAGE' || err.code === 'IMAGE_TOO_LARGE') {
+      sendJson(res, 400, { ok: false, message: err.message });
+      return;
+    }
+    throw err;
+  }
+}
+
+/** GET /api/sites/:u/:n/attachments/:id：取图片本体（前端 <img src> 用）。 */
+async function handleAttachmentGet(req, res, [username, name, id]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const row = await getAttachment(site.id, Number(id));
+  if (!row) {
+    sendJson(res, 404, { ok: false, message: '没有这张图' });
+    return;
+  }
+
+  const buf = Buffer.from(row.bytes);
+  res.writeHead(200, {
+    'Content-Type': row.mime,
+    'Content-Length': buf.length,
+    // 图片是不可变的（id 唯一），可以长缓存
+    'Cache-Control': 'private, max-age=86400, immutable',
+    'X-Content-Type-Options': 'nosniff',
+    // 用户的图，别让 CDN / 代理缓存
+    'Content-Disposition': 'inline',
+  });
+  res.end(buf);
 }
 
 // ---------------------------------------------------------------- 快照与回滚
@@ -3713,6 +3840,8 @@ const ROUTES = [
   ['PUT', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)$`), handleThreadUpdate],
   ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)$`), handleThreadDelete],
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)\\/messages$`), handleThreadMessages],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/attachments$`), handleAttachmentUpload],
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/attachments\\/(\\d+)$`), handleAttachmentGet],
   // 改动快照与回滚
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/snapshots$`), handleSnapshotsList],
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/snapshots\\/(\\d+)\\/restore$`), handleSnapshotRestore],

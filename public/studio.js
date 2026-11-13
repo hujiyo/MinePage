@@ -42,13 +42,14 @@
     return data.messages || [];
   };
 
-  /** 发一条消息；服务端同时落库用户消息与 agent 占位回复，一起返回。
-   *  threadId 给了就挂到那个会话上，不给就落到最近一个会话。 */
-  MP.sendSiteMessage = function (username, name, content, threadId) {
-    return MP.api(MP.siteApiOf(username, name, '/messages'), {
-      method: 'POST',
-      body: threadId ? { content, threadId } : { content },
-    });
+  /** 发一条消息；服务端立刻返回 taskId，agent 在后台跑。
+   *  threadId 给了就挂到那个会话上，不给就落到最近一个会话。
+   *  attachIds 是已经上传的图片 id。 */
+  MP.sendSiteMessage = function (username, name, content, threadId, attachIds) {
+    const body = { content };
+    if (threadId) body.threadId = threadId;
+    if (Array.isArray(attachIds) && attachIds.length) body.attachments = attachIds;
+    return MP.api(MP.siteApiOf(username, name, '/messages'), { method: 'POST', body });
   };
 
   /* ----------------------------------------------------------
@@ -571,15 +572,57 @@
      4. 对话栏
      ---------------------------------------------------------- */
 
-  /** 一条消息气泡（返回 DOM，调用方自己 append）。 */
-  MP.bubble = function (role, content, pending) {
+  // 附件图片的取图地址。由工作区注入（它知道 username/name），
+  // 这里不写死路由，避免 studio.js 依赖站点上下文。
+  MP.attachmentUrl = null;
+
+  /** 一条消息气泡（返回 DOM，调用方自己 append）。
+   *  带图片时气泡里额外挂一行缩略图（点开看大图）。 */
+  MP.bubble = function (role, content, pending, attachments) {
     const row = document.createElement('div');
     row.className = 'chatRow ' + (role === 'user' ? 'me' : 'agent') + (pending ? ' pending' : '');
+
     const b = document.createElement('div');
     b.className = 'chatBubble';
     b.textContent = content;
     row.appendChild(b);
+
+    if (Array.isArray(attachments) && attachments.length) {
+      const strip = document.createElement('div');
+      strip.className = 'chatImgs';
+      attachments.forEach((a) => {
+        const img = document.createElement('img');
+        img.className = 'chatImg';
+        img.loading = 'lazy';
+        img.src = a.url;
+        img.alt = '图片';
+        img.title = '点击看大图';
+        img.addEventListener('click', () => MP.viewImage(a.url));
+        strip.appendChild(img);
+      });
+      row.appendChild(strip);
+
+      // 纯图片消息：气泡本身是空的，别留一个空壳占位
+      if (!String(content || '').trim()) b.remove();
+    }
+
     return row;
+  };
+
+  /** 点缩略图看大图（居中浮层，点任意处关掉）。 */
+  MP.viewImage = function (url) {
+    const mask = document.createElement('div');
+    mask.className = 'imgMask';
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = '图片';
+    mask.appendChild(img);
+    const close = () => mask.remove();
+    mask.addEventListener('click', close);
+    document.addEventListener('keydown', function onKey(e) {
+      if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+    });
+    document.body.appendChild(mask);
   };
 
   /** 用一串服务端消息重绘对话流。 */
@@ -594,7 +637,13 @@
       }
       return;
     }
-    messages.forEach((m) => list.appendChild(MP.bubble(m.role, m.content)));
+    messages.forEach((m) => {
+      // 服务端只给元信息（id/mime/size），真正取图走 GET /attachments/:id
+      const imgs = Array.isArray(m.attachments) && m.attachments.length && MP.attachmentUrl
+        ? m.attachments.map((a) => ({ url: MP.attachmentUrl(a.id) }))
+        : null;
+      list.appendChild(MP.bubble(m.role, m.content, false, imgs));
+    });
     list.scrollTop = list.scrollHeight;
   };
 
@@ -687,14 +736,21 @@
    * @param {object} opt
    *   list       消息容器
    *   username / name / content / threadId
+   *   attachIds  附件 id 数组（已上传的图片）
    *   onProgress(task) 每次轮询回调
    *   onStarted(data)  拿到 taskId 后回调（返回 { cancel } 让调用方接停止按钮）
    *   onReply(task)    完成回调
    */
   MP.pushMessage = async function (opt) {
     const { list, username, name, content, threadId } = opt;
+    const attachIds = Array.isArray(opt.attachIds) ? opt.attachIds : [];
 
-    const mine = MP.bubble('user', content, true);
+    // 乐观气泡直接带上本地预览图，用户立刻能看到自己贴了什么；
+    // 发送成功后由 clearImages 释放 blob，历史消息走服务端的图。
+    const previews = attachIds.length && MP.attachmentUrl
+      ? attachIds.map((id) => ({ url: MP.attachmentUrl(id) }))
+      : null;
+    const mine = MP.bubble('user', content, true, previews);
     if (list) {
       const empty = list.querySelector('.chatEmpty');
       if (empty) empty.remove();
@@ -716,7 +772,7 @@
     let stopped = false;
 
     try {
-      const data = await MP.sendSiteMessage(username, name, content, threadId);
+      const data = await MP.sendSiteMessage(username, name, content, threadId, attachIds);
       mine.classList.remove('pending');
       taskId = data.taskId;
 

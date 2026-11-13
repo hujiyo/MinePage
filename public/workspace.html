@@ -47,9 +47,16 @@
       </div>
       <div class="wsMsgs" id="msgs"></div>
       <div class="wsComposer">
-        <textarea id="input" rows="1" placeholder="说说要改什么…"></textarea>
+        <!-- 待发送的图片：粘进来 / 选进来就挂在这条里，对话区被往上顶 -->
+        <div class="wsAttachBar" id="attachBar" hidden>
+          <div class="wsAttachList" id="attachList"></div>
+          <div class="wsAttachHint" id="attachHint"></div>
+        </div>
+        <textarea id="input" rows="1" placeholder="说说要改什么…（可以直接粘贴图片）"></textarea>
         <div class="wsBar">
-          <button type="button" class="iconBtn" id="plus" title="附加内容">＋</button>
+          <button type="button" class="iconBtn" id="plus" title="添加图片（也可以直接粘贴）">＋</button>
+          <input type="file" id="filePick" accept="image/png,image/jpeg,image/webp,image/gif"
+                 multiple hidden>
           <!-- 模型与模式是两个独立的上拉框，各自管各自的，不掺在一个弹窗里 -->
           <button type="button" class="wsPick" id="modelPick" title="选择模型" aria-haspopup="listbox">
             <span class="wsPickLabel" id="modelPickLabel">未接模型</span>
@@ -143,6 +150,11 @@ const modelPick = document.getElementById('modelPick');
 const modelPickLabel = document.getElementById('modelPickLabel');
 const modePick = document.getElementById('modePick');
 const modePickLabel = document.getElementById('modePickLabel');
+const attachBar = document.getElementById('attachBar');
+const attachList = document.getElementById('attachList');
+const attachHint = document.getElementById('attachHint');
+const plus = document.getElementById('plus');
+const filePick = document.getElementById('filePick');
 const wsSide = document.getElementById('wsSide');
 const wsChat = document.getElementById('wsChat');
 const gripSide = document.getElementById('gripSide');
@@ -592,6 +604,9 @@ window.addEventListener('resize', closeSheet);
 
 const api = (tail) => MP.siteApiOf(USERNAME, NAME, tail);
 
+// studio.js 不知道站点上下文，把「取图地址」注入给它
+MP.attachmentUrl = (id) => api('/attachments/' + id);
+
 async function loadThreads() {
   try {
     const data = await MP.api(api('/threads'));
@@ -849,15 +864,26 @@ let activeCancel = null;
 async function sendMessage(text) {
   if (sending) return;
   const content = String(text == null ? input.value : text).trim();
-  if (!content) return;
+  // 只有图没有文字也算合法：「照这个图改」经常懒得打字
+  const readyImages = PENDING_IMAGES.filter((img) => img.id);
+  if (!content && !readyImages.length) return;
   if (!threadId) {
     MP.toast('先建一个会话');
     return;
   }
+  // 还有图在上传：等它传完，不然会发出一条「少一张图」的消息
+  if (PENDING_IMAGES.some((img) => img.uploading)) {
+    MP.toast('图片还在上传，稍等一下');
+    return;
+  }
+
   sending = true;
   send.disabled = true;
   if (text == null) input.value = '';
   MP.autoGrow(input)();
+
+  // 发送前把图片 id 抓下来：发完要清空待发送区
+  const attachIds = readyImages.map((img) => img.id);
 
   // 跑的过程中发送按钮变成「停止」：同一个按钮两种状态，
   // 用户不用去找另一个停的地方（这也是 ChatGPT / Cursor 的做法）
@@ -882,13 +908,21 @@ async function sendMessage(text) {
       name: NAME,
       content,
       threadId,
+      attachIds,
       // 任务开跑：按钮切成停止态；模型框同步成实际用的那个
       //（服务端可能因为原模型连不上而降级到别的，这里要跟上）
       onStarted: (data, ctl) => {
         activeCancel = ctl;
         enterRunning();
+        // 消息已经发出去了：立刻清空待发送区。
+        // 不能等整轮跑完再清 —— 生成要几十秒，图一直挂在那儿会让人以为没发出去。
+        clearImages();
         if (data.model && data.model.id) {
           modelPickLabel.textContent = data.model.label || data.model.id;
+        }
+        // 服务端说这个模型看不了图：提醒一句，但不要拦（用户可能就是想试试）
+        if (attachIds.length && data.vision === false) {
+          MP.toast('当前模型看不了图片，换 Claude Haiku 5.5 / GPT-6 Luna / GLM 试试');
         }
       },
       onReply: () => {
@@ -898,14 +932,17 @@ async function sendMessage(text) {
         const t = THREADS.find((x) => x.id === threadId);
         const count = t ? Number(t.msg_count ?? t.msgCount ?? 0) : 0;
         if (t && (!t.title || t.title === '新对话') && count === 0) {
-          const title = content.slice(0, 20);
-          MP.api(api('/threads/' + threadId), { method: 'PUT', body: { title } })
-            .then(() => {
-              t.title = title;
-              t.msg_count = 2;
-              renderThreads();
-            })
-            .catch(() => {});
+          // 只有图没文字时，用「[图片]」当标题，别留空
+          const title = content.slice(0, 20) || (attachIds.length ? '[图片]' : '');
+          if (title) {
+            MP.api(api('/threads/' + threadId), { method: 'PUT', body: { title } })
+              .then(() => {
+                t.title = title;
+                t.msg_count = 2;
+                renderThreads();
+              })
+              .catch(() => {});
+          }
         }
         // agent 改了文件，预览要跟着刷新
         reload();
@@ -940,9 +977,180 @@ input.addEventListener('keydown', (e) => {
     sendMessage(null);
   }
 });
-document.getElementById('plus').addEventListener('click', () => {
-  MP.toast('这一版还不支持附加文件');
+/* ---------------------------------------------------------------- 图片附件 */
+
+// 待发送的图片。{ id, mime, size, url }
+// id 是服务端返回的附件 id，url 是本地 blob 预览（发送成功后释放）
+let PENDING_IMAGES = [];
+const MAX_IMAGES = 4;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+/** 刷新图片条：有条就显示、把对话区往上顶；没有就收起。 */
+function renderAttachBar() {
+  attachList.textContent = '';
+  const n = PENDING_IMAGES.length;
+  if (!n) {
+    attachBar.hidden = true;
+    attachHint.textContent = '';
+    return;
+  }
+  attachBar.hidden = false;
+
+  PENDING_IMAGES.forEach((img, i) => {
+    const box = document.createElement('div');
+    box.className = 'wsAttach';
+    box.title = `${img.mime} · ${formatSize(img.size)}`;
+
+    const el = document.createElement('img');
+    el.src = img.url;
+    el.alt = '待发送图片';
+    box.appendChild(el);
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'wsAttachDel';
+    del.textContent = '×';
+    del.title = '移除这张图';
+    del.addEventListener('click', () => removeImage(i));
+    box.appendChild(del);
+
+    attachList.appendChild(box);
+  });
+
+  // 模型看不了图时提前提醒，别等它回一句「我看不到图片」
+  const m = MODELS.find((x) => x.id === currentModelId());
+  if (m && !m.supportsVision) {
+    attachHint.textContent = `${m.label} 看不了图片，换 Claude Haiku 5.5 / GPT-6 Luna / GLM 选一个`;
+    attachHint.classList.add('warn');
+  } else {
+    attachHint.textContent = `${n}/${MAX_IMAGES} 张`;
+    attachHint.classList.remove('warn');
+  }
+}
+
+function formatSize(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
+  return (n / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+function removeImage(index) {
+  const [gone] = PENDING_IMAGES.splice(index, 1);
+  if (gone && gone.url) URL.revokeObjectURL(gone.url);
+  renderAttachBar();
+}
+
+function clearImages() {
+  PENDING_IMAGES.forEach((img) => { if (img.url) URL.revokeObjectURL(img.url); });
+  PENDING_IMAGES = [];
+  renderAttachBar();
+}
+
+/**
+ * 加一张图：先本地预览（立刻可见），再传到服务端拿 id。
+ * 上传失败就把这张撤掉，别留一个「看着在但其实发不出去」的图。
+ */
+async function addImage(file) {
+  if (!file) return;
+  if (PENDING_IMAGES.length >= MAX_IMAGES) {
+    MP.toast(`最多 ${MAX_IMAGES} 张图`);
+    return;
+  }
+  if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) {
+    MP.toast('只支持 PNG / JPEG / WEBP / GIF');
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    MP.toast(`图片太大，单张上限 ${MAX_IMAGE_BYTES / 1024 / 1024} MB`);
+    return;
+  }
+  if (!threadId) {
+    MP.toast('先建一个会话');
+    return;
+  }
+
+  const entry = {
+    id: null,
+    mime: file.type,
+    size: file.size,
+    url: URL.createObjectURL(file),
+    uploading: true,
+  };
+  PENDING_IMAGES.push(entry);
+  renderAttachBar();
+
+  try {
+    const buf = await file.arrayBuffer();
+    const res = await fetch(api('/attachments?threadId=' + threadId), {
+      method: 'POST',
+      headers: { 'content-type': file.type },
+      body: buf,
+      credentials: 'same-origin',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.message || '上传失败');
+    entry.id = data.attachment.id;
+    entry.mime = data.attachment.mime;
+    entry.size = data.attachment.size;
+    entry.uploading = false;
+    renderAttachBar();
+  } catch (e) {
+    const i = PENDING_IMAGES.indexOf(entry);
+    if (i >= 0) removeImage(i);
+    MP.toast(e.message || '图片上传失败');
+  }
+}
+
+/** 从剪贴板 / 拖拽里的 File 列表批量加图。 */
+function addImageFiles(files) {
+  const list = [...(files || [])].filter((f) => f && /^image\//.test(f.type));
+  if (!list.length) return false;
+  list.slice(0, MAX_IMAGES - PENDING_IMAGES.length).forEach((f) => addImage(f));
+  return true;
+}
+
+// ＋ 按钮：打开系统文件选择
+plus.addEventListener('click', () => filePick.click());
+filePick.addEventListener('change', () => {
+  addImageFiles(filePick.files);
+  filePick.value = '';   // 清空，同一张图能再选一次
 });
+
+// 直接粘贴：Ctrl+V 把截图贴进对话栏
+input.addEventListener('paste', (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  const files = [];
+  for (const item of items) {
+    if (item.kind === 'file' && /^image\//.test(item.type)) {
+      const f = item.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (files.length) {
+    e.preventDefault();    // 别把剪贴板里的二进制当文本塞进输入框
+    addImageFiles(files);
+  }
+});
+
+// 拖拽进来也能加
+const composer = input.closest('.wsComposer');
+composer.addEventListener('dragover', (e) => {
+  if (![...(e.dataTransfer?.types || [])].includes('Files')) return;
+  e.preventDefault();
+  composer.classList.add('dragOver');
+});
+composer.addEventListener('dragleave', (e) => {
+  if (e.relatedTarget && composer.contains(e.relatedTarget)) return;
+  composer.classList.remove('dragOver');
+});
+composer.addEventListener('drop', (e) => {
+  composer.classList.remove('dragOver');
+  if (!e.dataTransfer?.files?.length) return;
+  e.preventDefault();
+  addImageFiles(e.dataTransfer.files);
+});
+
 document.getElementById('skill').addEventListener('click', () => {
   MP.alert('技能还没接上，先把要改的说清楚就行');
 });
