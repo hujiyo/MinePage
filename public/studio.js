@@ -42,13 +42,14 @@
     return data.messages || [];
   };
 
-  /** 发一条消息；服务端同时落库用户消息与 agent 占位回复，一起返回。
-   *  threadId 给了就挂到那个会话上，不给就落到最近一个会话。 */
-  MP.sendSiteMessage = function (username, name, content, threadId) {
-    return MP.api(MP.siteApiOf(username, name, '/messages'), {
-      method: 'POST',
-      body: threadId ? { content, threadId } : { content },
-    });
+  /** 发一条消息；服务端立刻返回 taskId，agent 在后台跑。
+   *  threadId 给了就挂到那个会话上，不给就落到最近一个会话。
+   *  attachIds 是已经上传的图片 id。 */
+  MP.sendSiteMessage = function (username, name, content, threadId, attachIds) {
+    const body = { content };
+    if (threadId) body.threadId = threadId;
+    if (Array.isArray(attachIds) && attachIds.length) body.attachments = attachIds;
+    return MP.api(MP.siteApiOf(username, name, '/messages'), { method: 'POST', body });
   };
 
   /* ----------------------------------------------------------
@@ -519,15 +520,57 @@
      4. 对话栏
      ---------------------------------------------------------- */
 
-  /** 一条消息气泡（返回 DOM，调用方自己 append）。 */
-  MP.bubble = function (role, content, pending) {
+  // 附件图片的取图地址。由工作区注入（它知道 username/name），
+  // 这里不写死路由，避免 studio.js 依赖站点上下文。
+  MP.attachmentUrl = null;
+
+  /** 一条消息气泡（返回 DOM，调用方自己 append）。
+   *  带图片时气泡里额外挂一行缩略图（点开看大图）。 */
+  MP.bubble = function (role, content, pending, attachments) {
     const row = document.createElement('div');
     row.className = 'chatRow ' + (role === 'user' ? 'me' : 'agent') + (pending ? ' pending' : '');
+
     const b = document.createElement('div');
     b.className = 'chatBubble';
     b.textContent = content;
     row.appendChild(b);
+
+    if (Array.isArray(attachments) && attachments.length) {
+      const strip = document.createElement('div');
+      strip.className = 'chatImgs';
+      attachments.forEach((a) => {
+        const img = document.createElement('img');
+        img.className = 'chatImg';
+        img.loading = 'lazy';
+        img.src = a.url;
+        img.alt = '图片';
+        img.title = '点击看大图';
+        img.addEventListener('click', () => MP.viewImage(a.url));
+        strip.appendChild(img);
+      });
+      row.appendChild(strip);
+
+      // 纯图片消息：气泡本身是空的，别留一个空壳占位
+      if (!String(content || '').trim()) b.remove();
+    }
+
     return row;
+  };
+
+  /** 点缩略图看大图（居中浮层，点任意处关掉）。 */
+  MP.viewImage = function (url) {
+    const mask = document.createElement('div');
+    mask.className = 'imgMask';
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = '图片';
+    mask.appendChild(img);
+    const close = () => mask.remove();
+    mask.addEventListener('click', close);
+    document.addEventListener('keydown', function onKey(e) {
+      if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+    });
+    document.body.appendChild(mask);
   };
 
   /** 用一串服务端消息重绘对话流。 */
@@ -542,7 +585,13 @@
       }
       return;
     }
-    messages.forEach((m) => list.appendChild(MP.bubble(m.role, m.content)));
+    messages.forEach((m) => {
+      // 服务端只给元信息（id/mime/size），真正取图走 GET /attachments/:id
+      const imgs = Array.isArray(m.attachments) && m.attachments.length && MP.attachmentUrl
+        ? m.attachments.map((a) => ({ url: MP.attachmentUrl(a.id) }))
+        : null;
+      list.appendChild(MP.bubble(m.role, m.content, false, imgs));
+    });
     list.scrollTop = list.scrollHeight;
   };
 
@@ -558,37 +607,501 @@
   };
 
   /* ----------------------------------------------------------
-     5. 发送一条消息（乐观插入 + 服务端回执）
+     4.5 上拉面板（模型 / 模式选择）
+     ----------------------------------------------------------
+     工作区和新建对话页都要用，所以放这里共用一份。
+     自己画而不用 <select>：原生 select 没法显示副标题、没法做主题样式。
      ---------------------------------------------------------- */
 
+  // 当前打开的面板；同一时间只允许一个
+  let sheetEl = null;
+  // 面板刚滚过之后的短时间内，忽略页面滚动（防滚动链误关）
+  let sheetScrollGuardUntil = 0;
+
+  function sheetOnDocClick(e) {
+    if (!sheetEl) return;
+    if (sheetEl.contains(e.target)) return;
+
+    // 点在「打开它的那个按钮」上时不要在这里关：
+    // 捕获阶段会比按钮自己的 click 先跑，这里关了、按钮处理器又立刻重新打开，
+    // 结果就是「再点一次同一按钮关不掉」。toggle 交给按钮自己处理。
+    const holder = document.getElementById(sheetEl.dataset.for);
+    if (holder && (holder === e.target || holder.contains(e.target))) return;
+
+    MP.closeSheet();
+  }
+
+  function sheetOnDocKey(e) {
+    if (e.key === 'Escape') MP.closeSheet();
+  }
+
   /**
-   * 往工作区发一条消息：先插自己的气泡，再等接口返回把 agent 占位回复补上。
-   * 失败时把乐观气泡标红并给出原因（保留输入内容，用户不用重打）。
+   * 页面滚动时收起面板（它用 fixed 定位，页面一滚就贴不住）。
+   * 但**面板自己内部的滚动不算**：拖滑条、滚轮翻选项都会产生 scroll 事件，
+   * 一律关闭的话就会「一滚鼠标菜单就消失」。
+   */
+  function sheetOnDocScroll(e) {
+    if (!sheetEl) return;
+    if (e.target === sheetEl || sheetEl.contains(e.target)) return;
+    if (Date.now() < sheetScrollGuardUntil) return;
+    MP.closeSheet();
+  }
+
+  /** 关掉当前上拉面板。 */
+  MP.closeSheet = function () {
+    if (!sheetEl) return;
+    sheetEl.remove();
+    sheetEl = null;
+    document.removeEventListener('click', sheetOnDocClick, true);
+    document.removeEventListener('keydown', sheetOnDocKey);
+    document.removeEventListener('scroll', sheetOnDocScroll, true);
+  };
+
+  /** 当前有没有面板开着（调试 / 测试用）。 */
+  MP.sheetOpen = function () {
+    return Boolean(sheetEl);
+  };
+
+  /**
+   * 在某个按钮上方弹一个上拉面板。
+   *
+   * @param {HTMLElement} anchor 触发按钮（id 用于 toggle 判断）
+   * @param {object} opt
+   *   items: [{ value, label, hint, active }]
+   *   onPick(value)
+   *   up: 是否强制往上弹（默认自动判断）
+   */
+  MP.openListSheet = function (anchor, { items, onPick, up }) {
+    // 再点同一个按钮就是收起
+    if (sheetEl && sheetEl.dataset.for === anchor.id) {
+      MP.closeSheet();
+      return;
+    }
+    MP.closeSheet();
+
+    const sheet = document.createElement('div');
+    sheet.className = 'wsSheet';
+    sheet.dataset.for = anchor.id;
+    sheet.setAttribute('role', 'listbox');
+
+    items.forEach((item) => {
+      const row = document.createElement('button');
+      row.type = 'button';
+
+      // 换成可换行的容器：名字一行、说明一行、短标签跟在名字后面
+      row.className = 'pickRow' + (item.active ? ' on' : '');
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', item.active ? 'true' : 'false');
+
+      const head = document.createElement('span');
+      head.className = 'pickHead';
+
+      const title = document.createElement('b');
+      title.textContent = item.label;
+      head.appendChild(title);
+
+      // 标签（如「能看图」）：单独一个浅色小胶囊，不抢名字的视觉权重
+      (item.tags || []).forEach((text) => {
+        const tag = document.createElement('i');
+        tag.className = 'pickTag';
+        tag.textContent = text;
+        head.appendChild(tag);
+      });
+
+      if (item.active) {
+        const tick = document.createElement('em');
+        tick.className = 'pickTick';
+        tick.textContent = '✓';
+        head.appendChild(tick);
+      }
+      row.appendChild(head);
+
+      if (item.hint) {
+        const hint = document.createElement('span');
+        hint.className = 'pickHint';
+        hint.textContent = item.hint;
+        row.appendChild(hint);
+      }
+
+      row.addEventListener('click', () => {
+        MP.closeSheet();
+        onPick(item.value);
+      });
+      sheet.appendChild(row);
+    });
+
+    document.body.appendChild(sheet);
+
+    // 定位：优先往上弹（在底部输入区，往上翻才不会挡输入框）
+    const r = anchor.getBoundingClientRect();
+    const w = sheet.offsetWidth;
+    const h = sheet.offsetHeight;
+    let left = r.left;
+    if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+    if (left < 8) left = 8;
+    let top = r.top - h - 6;
+    const canUp = top >= 8;
+    if (up === false || !canUp) top = r.bottom + 6;   // 上面放不下就翻到下面
+    sheet.style.left = Math.round(left) + 'px';
+    sheet.style.top = Math.round(top) + 'px';
+    if (!canUp && up !== false) sheet.classList.add('below');
+
+    sheetEl = sheet;
+
+    // 面板内部滚动时刷新时间窗，让随后可能发生的「滚动链到页面」不被误判
+    sheet.addEventListener('scroll', () => {
+      sheetScrollGuardUntil = Date.now() + 260;
+    }, { passive: true });
+
+    // 滚轮滚到头时浏览器会把滚动传给页面（滚动链）。
+    // 面板开着的时候拦掉，既不让背景页面滚，也不会把面板关掉。
+    sheet.addEventListener('wheel', (e) => {
+      const atTop = sheet.scrollTop <= 0;
+      const atBottom = sheet.scrollTop + sheet.clientHeight >= sheet.scrollHeight - 1;
+      const scrollingUp = e.deltaY < 0;
+      if ((scrollingUp && atTop) || (!scrollingUp && atBottom)) e.preventDefault();
+      sheetScrollGuardUntil = Date.now() + 260;
+    }, { passive: false });
+
+    // 用捕获阶段：按钮自己的 click 先跑完再判断，避免刚开就被关掉
+    setTimeout(() => {
+      document.addEventListener('click', sheetOnDocClick, true);
+      document.addEventListener('keydown', sheetOnDocKey);
+      document.addEventListener('scroll', sheetOnDocScroll, true);
+    }, 0);
+  };
+
+  // 窗口尺寸变了，面板位置就失效了
+  window.addEventListener('resize', () => MP.closeSheet());
+
+  /* ----------------------------------------------------------
+     4.8 图片归一化（浏览器里压缩，服务端零依赖）
+     ----------------------------------------------------------
+     为什么放在前端：
+       - 服务端是零依赖的，没有 sharp；手写缩放器不现实
+       - 浏览器天生能解码 / 缩放 / 重编码
+       - 顺带省掉 10 倍上传流量和服务器 CPU
+
+     两步：
+       ① normalize：长边缩到 2048、JPEG 0.9 —— 通常落到 150–400 KB
+       ② project  ：超过 1 MB 就按质量阶梯再压（0.9 → 0.8 → 0.65）
+
+     实测依据（当前网关）：
+       - 字节上限 9.6–10 MB，像素几乎不限（48 MP 也能收）
+       - 但 8.8 MB 的图要 11.3 秒才回，300 KB 只要 5 秒
+     ---------------------------------------------------------- */
+
+  // 与 lib/config.js 的 ATTACH_TARGET_DIMENSION / ATTACH_REQUEST_BYTES 保持一致
+  const NORMALIZE_MAX_DIM = 2048;
+  const REQUEST_TARGET_BYTES = 1024 * 1024;
+  const QUALITY_LADDER = [0.9, 0.8, 0.65];
+
+  /** canvas 对某种类型编码，返回 Blob；不支持就返回 null。 */
+  async function encodeCanvas(canvas, type, quality) {
+    if (typeof canvas.convertToBlob === 'function') {
+      try {
+        return await canvas.convertToBlob({ type, quality });
+      } catch {
+        return null;
+      }
+    }
+    // 老浏览器没有 OffscreenCanvas.convertToBlob，退回普通 canvas
+    const el = document.createElement('canvas');
+    el.width = canvas.width;
+    el.height = canvas.height;
+    el.getContext('2d').drawImage(canvas, 0, 0);
+    return new Promise((resolve) => {
+      el.toBlob((blob) => resolve(blob), type, quality);
+    });
+  }
+
+  /**
+   * 把用户选的图片压到「能看清、又不大」的尺寸。
+   *
+   * @param {File|Blob} file
+   * @param {{maxDim?:number, targetBytes?:number}} [opt]
+   * @returns {Promise<{blob: Blob, originalBytes: number, bytes: number, width: number, height: number, changed: boolean}>}
+   */
+  MP.normalizeImage = async function (file, opt = {}) {
+    const maxDim = opt.maxDim ?? NORMALIZE_MAX_DIM;
+    const targetBytes = opt.targetBytes ?? REQUEST_TARGET_BYTES;
+    const originalBytes = file.size;
+
+    // 解码。失败说明不是浏览器认得的图片（或者文件坏了）
+    let bitmap;
+    try {
+      bitmap = await createImageBitmap(file);
+    } catch {
+      throw Object.assign(new Error('这个图片打不开，换一张试试'), { code: 'DECODE_FAILED' });
+    }
+
+    const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+
+    const canvas = typeof OffscreenCanvas === 'function'
+      ? new OffscreenCanvas(width, height)
+      : Object.assign(document.createElement('canvas'), { width, height });
+
+    const ctx = canvas.getContext('2d');
+    // 白底：PNG 透明区域转成 JPEG 后默认会变黑，先铺一层白
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(bitmap, 0, 0, width, height);
+    if (typeof bitmap.close === 'function') bitmap.close();
+
+    // 小图且本来就小：不折腾，原样返回
+    if (scale === 1 && originalBytes <= targetBytes) {
+      return { blob: file, originalBytes, bytes: originalBytes, width, height, changed: false };
+    }
+
+    // 质量阶梯：先 0.9，不够就 0.8、0.65
+    let best = null;
+    for (const q of QUALITY_LADDER) {
+      const blob = await encodeCanvas(canvas, 'image/jpeg', q);
+      if (!blob) break;
+      if (!best || blob.size < best.size) best = blob;
+      if (blob.size <= targetBytes) { best = blob; break; }
+    }
+    if (!best) {
+      // 编码全失败（极老的浏览器）：退回原图，让服务端的字节闸去判断
+      return { blob: file, originalBytes, bytes: originalBytes, width, height, changed: false };
+    }
+
+    // 阶梯跑到底还超重（高细节图会这样）：改成继续缩尺寸。
+    // 之前只降质量，一张满屏噪点的 2048×2048 压到 0.65 还有 1.2 MB，
+    // 所以得再来一轮「尺寸减半 + 中质量」，最多两轮。
+    let finalBlob = best;
+    let finalW = width;
+    let finalH = height;
+    if (finalBlob.size > targetBytes) {
+      for (let round = 0; round < 2 && finalBlob.size > targetBytes; round += 1) {
+        finalW = Math.max(1, Math.round(finalW / 1.5));
+        finalH = Math.max(1, Math.round(finalH / 1.5));
+        const small = typeof OffscreenCanvas === 'function'
+          ? new OffscreenCanvas(finalW, finalH)
+          : Object.assign(document.createElement('canvas'), { width: finalW, height: finalH });
+        const sctx = small.getContext('2d');
+        sctx.fillStyle = '#fff';
+        sctx.fillRect(0, 0, finalW, finalH);
+        sctx.drawImage(canvas, 0, 0, finalW, finalH);
+        const blob = await encodeCanvas(small, 'image/jpeg', 0.82);
+        if (blob && blob.size < finalBlob.size) finalBlob = blob;
+      }
+    }
+
+    // 压完反而更大（原图本来就是高压缩 WebP）：那还是用原图
+    if (finalBlob.size >= originalBytes && scale === 1) {
+      return { blob: file, originalBytes, bytes: originalBytes, width, height, changed: false };
+    }
+
+    return {
+      blob: finalBlob,
+      originalBytes,
+      bytes: finalBlob.size,
+      width: finalW,
+      height: finalH,
+      changed: true,
+    };
+  };
+
+  /** 人类可读的体积。 */
+  MP.formatBytes = function (n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return Math.round(n / 1024) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MB';
+  };
+
+  /* ----------------------------------------------------------
+     5. 发送一条消息：异步任务 + 轮询进度
+     ---------------------------------------------------------- */
+
+  // 工具名 → 给用户看的动作短语。技术词对用户没意义，翻译成人话。
+  const STEP_LABELS = {
+    list_files: '看看有哪些文件',
+    read_file: '读文件',
+    write_file: '改文件',
+    delete_file: '删文件',
+    update_meta: '改页面信息',
+  };
+
+  /** 把一步工具调用渲染成一行进度文案。 */
+  function stepText(step) {
+    const label = STEP_LABELS[step.name] ?? step.name;
+    const tail = step.path ? ` ${step.path}` : '';
+    return step.ok === false ? `${label}${tail} 失败` : `${label}${tail}`;
+  }
+
+  /**
+   * 轮询一个任务直到结束。返回任务对象；失败抛错。
+   *
+   * interval 默认 300ms：服务端每 250ms 落一次流式文本，
+   * 轮询太慢会让「逐字出现」变成「一段一段跳」，看起来反而更卡。
+   * 300ms 一个轻量 GET，对本地/内网完全不是负担。
+   */
+  async function waitTask(taskId, { onProgress, interval = 300, timeoutMs = 150000 } = {}) {
+    const startedAt = Date.now();
+    for (;;) {
+      if (Date.now() - startedAt > timeoutMs) {
+        throw new Error('等太久了，刷新页面看看进度');
+      }
+      await new Promise((r) => setTimeout(r, interval));
+
+      let task;
+      try {
+        const data = await MP.api('/api/agent/tasks/' + encodeURIComponent(taskId));
+        task = data.task;
+      } catch (err) {
+        // 任务过期（24 小时后清掉）就别再轮询了
+        if (err.status === 404) throw new Error('这个任务已经过期了，刷新页面看看结果');
+        throw err;
+      }
+
+      if (onProgress) onProgress(task);
+      if (task.status === 'done') return task;
+      if (task.status === 'cancelled') {
+        throw Object.assign(new Error(task.text || '已停止'), { task });
+      }
+      if (task.status === 'failed') throw Object.assign(new Error(task.error || '生成失败'), { task });
+    }
+  }
+
+  /**
+   * 取消一个正在跑的任务。
+   * 只置信号，真正收尾（存快照、写回复、改状态）由服务端在循环跳出后做，
+   * 所以这里成功返回不代表已经停了，还得继续轮询等 status 变。
+   * @returns {Promise<'cancelling'|'cancelled'>}
+   */
+  MP.cancelTask = async function (taskId) {
+    const data = await MP.api('/api/agent/tasks/' + encodeURIComponent(taskId) + '/cancel', {
+      method: 'POST',
+      body: {},
+    });
+    return data.status === 'cancelled' ? 'cancelled' : 'cancelling';
+  };
+
+  /**
+   * 往工作区发一条消息：
+   *   1. 乐观插入用户气泡
+   *   2. POST 拿到 taskId（服务端立刻返回，不在请求里等 agent）
+   *   3. 轮询任务，实时把「正在读 xxx」写进一个进度气泡
+   *   4. 任务完成 → 进度气泡换成最终回复；失败 → 标红并给原因
+   *
+   * @param {object} opt
+   *   list       消息容器
+   *   username / name / content / threadId
+   *   attachIds  附件 id 数组（已上传的图片）
+   *   onProgress(task) 每次轮询回调
+   *   onStarted(data)  拿到 taskId 后回调（返回 { cancel } 让调用方接停止按钮）
+   *   onReply(task)    完成回调
    */
   MP.pushMessage = async function (opt) {
     const { list, username, name, content, threadId } = opt;
-    const pending = MP.bubble('user', content, true);
+    const attachIds = Array.isArray(opt.attachIds) ? opt.attachIds : [];
+
+    // 乐观气泡直接带上本地预览图，用户立刻能看到自己贴了什么；
+    // 发送成功后由 clearImages 释放 blob，历史消息走服务端的图。
+    const previews = attachIds.length && MP.attachmentUrl
+      ? attachIds.map((id) => ({ url: MP.attachmentUrl(id) }))
+      : null;
+    const mine = MP.bubble('user', content, true, previews);
     if (list) {
       const empty = list.querySelector('.chatEmpty');
       if (empty) empty.remove();
-      list.appendChild(pending);
+      list.appendChild(mine);
       list.scrollTop = list.scrollHeight;
     }
+
+    // 进度气泡：先显示「正在想…」，随后被工具进度替换
+    const progressRow = MP.bubble('agent', '正在想…', true);
+    const progressBubble = progressRow.querySelector('.chatBubble');
+    progressBubble.classList.add('stepping');
+    if (list) {
+      list.appendChild(progressRow);
+      list.scrollTop = list.scrollHeight;
+    }
+
+    let taskId = null;
+    /** 用户点过停止以后，把最终气泡的样式换成「已停止」而不是普通回复 */
+    let stopped = false;
+
     try {
-      const data = await MP.sendSiteMessage(username, name, content, threadId);
-      pending.classList.remove('pending');
-      if (list && data.agent) {
-        list.appendChild(MP.bubble('agent', data.agent.content));
-        list.scrollTop = list.scrollHeight;
+      const data = await MP.sendSiteMessage(username, name, content, threadId, attachIds);
+      mine.classList.remove('pending');
+      taskId = data.taskId;
+
+      if (opt.onStarted) {
+        // 把「停止」能力交给调用方（工作区会把它绑到发送按钮上）
+        opt.onStarted(data, {
+          cancel: async () => {
+            if (!taskId || stopped) return;
+            stopped = true;
+            progressBubble.textContent = '正在停止…';
+            try {
+              await MP.cancelTask(taskId);
+            } catch (err) {
+              stopped = false;
+              progressBubble.textContent = err.message || '停止失败';
+            }
+          },
+        });
       }
-      if (opt.onReply) opt.onReply(data);
-      return data;
+
+      const task = await waitTask(taskId, {
+        onProgress: (t) => {
+          if (stopped) return;   // 正在停，别让进度把「正在停止…」覆盖掉
+
+          // 流式：task.text 是服务端边生成边写的半成品。
+          // 有文字就优先显示文字（比「正在想…」有信息量），
+          // 没文字时才退回工具进度 —— 工具执行期间本来就没有文字可显示。
+          const hasText = Boolean(t.text && t.text.trim());
+          if (hasText && (t.status === 'running' || t.status === 'queued')) {
+            progressBubble.textContent = t.text;
+            progressBubble.classList.add('streaming');
+          } else {
+            const steps = Array.isArray(t.steps) ? t.steps : [];
+            if (steps.length) {
+              const last = steps[steps.length - 1];
+              progressBubble.textContent = stepText(last);
+              progressBubble.classList.remove('streaming');
+            }
+          }
+
+          if (list) list.scrollTop = list.scrollHeight;
+          if (opt.onProgress) opt.onProgress(t);
+        },
+      });
+
+      // 任务完成：把进度气泡换成真正的回复
+      progressRow.classList.remove('pending');
+      progressBubble.classList.remove('stepping');
+      progressBubble.classList.remove('streaming');
+      progressBubble.textContent = task.text || '（没有输出）';
+      // 被停止的任务单独标一下，用户一眼能看出「这轮是我停的」
+      if (task.status === 'cancelled') {
+        progressBubble.classList.add('stopped');
+        stopped = true;
+      }
+      if (list) list.scrollTop = list.scrollHeight;
+
+      if (opt.onReply) opt.onReply(task);
+      return task;
     } catch (err) {
-      pending.classList.remove('pending');
-      pending.classList.add('failed');
-      const tip = MP.bubble('agent', err.message || '发送失败');
-      tip.querySelector('.chatBubble').classList.add('errtip');
-      if (list) list.appendChild(tip);
+      mine.classList.remove('pending');
+      progressRow.classList.remove('pending');
+      progressBubble.classList.remove('stepping');
+      progressRow.classList.add('failed');
+      // 用户主动停止也被 waitTask 当成异常抛出（status=cancelled），
+      // 但这不是错误，别标红吓人 —— 服务端已经在 project.text 里给了人话。
+      if (err.task && err.task.status === 'cancelled') {
+        progressBubble.classList.add('stopped');
+        progressBubble.textContent = err.task.text || '已停止';
+        if (list) list.scrollTop = list.scrollHeight;
+        if (opt.onReply) opt.onReply(err.task);
+        return err.task;
+      }
+      progressBubble.classList.add('errtip');
+      progressBubble.textContent = err.message || '发送失败';
       throw err;
     }
   };

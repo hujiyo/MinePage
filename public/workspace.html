@@ -47,10 +47,25 @@
       </div>
       <div class="wsMsgs" id="msgs"></div>
       <div class="wsComposer">
-        <textarea id="input" rows="1" placeholder="说说要改什么…"></textarea>
+        <!-- 待发送的图片：粘进来 / 选进来就挂在这条里，对话区被往上顶 -->
+        <div class="wsAttachBar" id="attachBar" hidden>
+          <div class="wsAttachList" id="attachList"></div>
+          <div class="wsAttachHint" id="attachHint"></div>
+        </div>
+        <textarea id="input" rows="1" placeholder="说说要改什么…（可以直接粘贴图片）"></textarea>
         <div class="wsBar">
-          <button type="button" class="iconBtn" id="plus" title="附加内容">＋</button>
-          <span class="wsModel" id="threadModel">未接模型</span>
+          <button type="button" class="iconBtn" id="plus" title="添加图片（也可以直接粘贴）">＋</button>
+          <input type="file" id="filePick" accept="image/png,image/jpeg,image/webp,image/gif"
+                 multiple hidden>
+          <!-- 模型与模式是两个独立的上拉框，各自管各自的，不掺在一个弹窗里 -->
+          <button type="button" class="wsPick" id="modelPick" title="选择模型" aria-haspopup="listbox">
+            <span class="wsPickLabel" id="modelPickLabel">未接模型</span>
+            <span class="wsPickCaret" aria-hidden="true">⌃</span>
+          </button>
+          <button type="button" class="wsPick" id="modePick" title="选择模式" aria-haspopup="listbox">
+            <span class="wsPickLabel" id="modePickLabel">编码</span>
+            <span class="wsPickCaret" aria-hidden="true">⌃</span>
+          </button>
           <button type="button" class="miniChip" id="skill">技能</button>
           <span class="spacer"></span>
           <button type="button" class="sendBtn" id="send" title="发送（Enter）">↑</button>
@@ -67,6 +82,8 @@
           <button type="button" class="wsTab on" data-tab="preview">预览</button>
           <button type="button" class="wsTab" data-tab="code">代码</button>
         </div>
+        <!-- 正在预览历史版本时亮起来，提醒「你看到的不是现在的文件」 -->
+        <span class="wsPreviewBadge" id="previewBadge" hidden></span>
         <button type="button" class="wsReload" id="reload" title="刷新预览">↻</button>
       </div>
 
@@ -131,7 +148,15 @@ const saveFile = document.getElementById('saveFile');
 const codeWrap = document.getElementById('codeWrap');
 const editEmpty = document.getElementById('editEmpty');
 const threadList = document.getElementById('threadList');
-const threadModel = document.getElementById('threadModel');
+const modelPick = document.getElementById('modelPick');
+const modelPickLabel = document.getElementById('modelPickLabel');
+const modePick = document.getElementById('modePick');
+const modePickLabel = document.getElementById('modePickLabel');
+const attachBar = document.getElementById('attachBar');
+const attachList = document.getElementById('attachList');
+const attachHint = document.getElementById('attachHint');
+const plus = document.getElementById('plus');
+const filePick = document.getElementById('filePick');
 const wsSide = document.getElementById('wsSide');
 const wsChat = document.getElementById('wsChat');
 const gripSide = document.getElementById('gripSide');
@@ -328,18 +353,192 @@ async function boot() {
   reload();
   loadFiles();
   await loadThreads();
+  await loadModels();
+
+  // 从 /new 带过来的偏好：把模型和模式套到当前会话上，再补发第一条消息
+  const prefsRaw = sessionStorage.getItem('mp:firstPrefs:' + NAME);
+  if (prefsRaw) {
+    sessionStorage.removeItem('mp:firstPrefs:' + NAME);
+    try {
+      const prefs = JSON.parse(prefsRaw);
+      const patch = {};
+      if (prefs.model) patch.model = prefs.model;
+      if (prefs.mode) patch.mode = prefs.mode;
+      if (Object.keys(patch).length) {
+        await patchThread(patch);
+        // loadThreads 已经跑过了，本地会话对象要同步一份，否则 UI 还是旧的
+        const t = THREADS.find((x) => x.id === threadId);
+        if (t) Object.assign(t, patch);
+        syncModelLabel();
+        syncChatTitle();
+      }
+    } catch { /* 偏好存坏了就当没有 */ }
+  }
 
   // 从 /new 带过来的第一条消息：草稿已经建好，这里补发一次
   const first = sessionStorage.getItem('mp:firstMessage:' + NAME);
-  if (first) {
+  const firstAttach = sessionStorage.getItem('mp:firstAttach:' + NAME);
+  if (first !== null || firstAttach) {
     sessionStorage.removeItem('mp:firstMessage:' + NAME);
-    sendMessage(first);
+    sessionStorage.removeItem('mp:firstAttach:' + NAME);
+    let attachIds = [];
+    try { attachIds = firstAttach ? JSON.parse(firstAttach) : []; } catch { attachIds = []; }
+    // 直接把附件 id 交给 sendMessage，不用再走一遍上传
+    sendMessage(first || '', attachIds);
   }
 }
+
+/* ---------------------------------------------------------------- 模型 */
+
+// 模型清单只在进页面时拿一次；切换会话时按会话上记的 model 同步显示
+let MODELS = [];
+let DEFAULT_MODEL = '';
+let MODES = [];
+
+async function loadModels() {
+  try {
+    const data = await MP.api('/api/agent/tools');
+    MODELS = data.models || [];
+    DEFAULT_MODEL = data.defaultModel || '';
+    MODES = data.modes || [];
+  } catch {
+    MODELS = [];
+    DEFAULT_MODEL = '';
+    MODES = [];
+  }
+  syncModelLabel();
+}
+
+/** 当前会话的模型 id（没设就用默认的可用模型）。 */
+function currentModelId() {
+  const t = THREADS.find((x) => x.id === threadId);
+  const wanted = (t && t.model) || DEFAULT_MODEL;
+  const m = MODELS.find((x) => x.id === wanted) || MODELS.find((x) => x.ready);
+  return m ? m.id : '';
+}
+
+/** 当前会话的模式（chat / code）。 */
+function currentMode() {
+  const t = THREADS.find((x) => x.id === threadId);
+  return (t && t.mode) || 'code';
+}
+
+/**
+ * 底部两个上拉框：各自独立显示和选择。
+ * 没配 key 时模型框置灰不可点，模式框照常可用。
+ */
+function syncModelLabel() {
+  const id = currentModelId();
+  const m = MODELS.find((x) => x.id === id);
+  const mode = currentMode();
+  const modeInfo = MODES.find((x) => x.id === mode);
+
+  // 模型框
+  if (!m) {
+    modelPickLabel.textContent = '未接模型';
+    modelPick.title = '服务器还没配置模型，先在环境变量里加 LLM_API_KEY';
+    modelPick.classList.add('off');
+    modelPick.disabled = true;
+  } else {
+    modelPickLabel.textContent = m.label;
+    modelPick.title = `${m.provider} / ${m.model}`;
+    modelPick.classList.remove('off');
+    modelPick.disabled = false;
+  }
+
+  // 模式框
+  modePickLabel.textContent = modeInfo ? modeInfo.label : '编码';
+  modePick.title = modeInfo ? modeInfo.hint : '可以读写文件';
+  modePick.classList.toggle('isChat', mode === 'chat');
+}
+
+/** 把改动落到当前会话上。 */
+async function patchThread(patch) {
+  const t = THREADS.find((x) => x.id === threadId);
+  if (!t) {
+    MP.toast('先建一个会话');
+    return false;
+  }
+  try {
+    await MP.api(api('/threads/' + threadId), { method: 'PUT', body: patch });
+    Object.assign(t, patch);
+    syncModelLabel();
+    syncChatTitle();
+    return true;
+  } catch (e) {
+    MP.toast(e.message || '切换失败');
+    return false;
+  }
+}
+
+/* ---------------------------------------------------------------- 上拉框（下拉面板） */
+// 面板实现放在 studio.js（MP.openListSheet）—— 新建对话页也要用同一份，
+// 两处各写一遍必然走样。这里只负责「点哪个按钮弹什么内容」。
+
+// 模型框：只列真正可用的（有 key + 支持工具）
+modelPick.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (modelPick.disabled) return;
+
+  const usable = MODELS.filter((m) => m.ready && m.supportsTools);
+  if (!usable.length) {
+    MP.alert('清单里的模型都缺 Key 或不支持工具调用');
+    return;
+  }
+  const cur = currentModelId();
+
+  MP.openListSheet(modelPick, {
+    items: usable.map((m) => ({
+      value: m.id,
+      label: m.label,
+      hint: m.hint,
+      tags: m.supportsVision ? ['能看图'] : [],
+      active: m.id === cur,
+    })),
+    onPick: async (id) => {
+      if (id === cur) return;
+      const ok = await patchThread({ model: id });
+      if (ok) {
+        const label = (MODELS.find((m) => m.id === id) || {}).label || id;
+        MP.toast('已切到 ' + label);
+      }
+    },
+  });
+});
+
+// 模式框
+modePick.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const cur = currentMode();
+
+  MP.openListSheet(modePick, {
+    items: MODES.map((m) => ({
+      value: m.id,
+      label: m.label,
+      hint: m.hint,
+      active: m.id === cur,
+    })),
+    onPick: async (id) => {
+      if (id === cur) return;
+      const ok = await patchThread({ mode: id });
+      if (ok) {
+        const label = (MODES.find((m) => m.id === id) || {}).label || id;
+        MP.toast('已切到「' + label + '」模式');
+      }
+    },
+  });
+});
+
+// 滚动 / 改窗口大小时面板位置就失效了，直接收起。
+// 注意：滚动监听是在 MP.openListSheet 里按需注册的
+//（要区分「滚面板」和「滚页面」），studio.js 里也挂了 resize。
 
 /* ---------------------------------------------------------------- 会话列表 */
 
 const api = (tail) => MP.siteApiOf(USERNAME, NAME, tail);
+
+// studio.js 不知道站点上下文，把「取图地址」注入给它
+MP.attachmentUrl = (id) => api('/attachments/' + id);
 
 async function loadThreads() {
   try {
@@ -480,12 +679,17 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeThrea
 document.addEventListener('scroll', closeThreadMenu, true);
 window.addEventListener('resize', closeThreadMenu);
 
-/** 对话栏顶部的标题跟着当前会话说：显示会话名，没会话时显示「对话」。 */
+/** 对话栏顶部的标题跟着当前会话说：显示会话名，没会话时显示「对话」。
+ *  对话模式的会话名后面挂个「对话」小标，和编码会话区分开。 */
 function syncChatTitle() {
   const t = THREADS.find((x) => x.id === threadId);
   const title = (t && t.title) || '对话';
-  chatTitle.textContent = title;
-  chatTitle.title = t ? (title + '（' + Number(t.msg_count ?? t.msgCount ?? 0) + ' 条消息）') : '当前对话';
+  const isChat = t && t.mode === 'chat';
+  chatTitle.textContent = isChat ? `${title} · 对话` : title;
+  chatTitle.title = t
+    ? `${title}（${Number(t.msg_count ?? t.msgCount ?? 0)} 条消息，${isChat ? '只聊天不改文件' : '可改文件'}）`
+    : '当前对话';
+  syncModelLabel();
 }
 
 /** 顶部「⋯」：对当前会话开菜单。没有会话时按钮置灰。 */
@@ -585,18 +789,57 @@ async function loadMessages() {
   }
 }
 
-async function sendMessage(text) {
+// 当前这轮 agent 的取消句柄。
+// 必须放在模块作用域：点击处理器和 Esc 监听都在 sendMessage 外面，
+// 早先把它写在函数里，外面读不到直接抛 ReferenceError，点发送毫无反应。
+let activeCancel = null;
+
+/**
+ * 发一条消息。
+ * @param {string|null} text  文字；null 表示取输入框里的内容
+ * @param {number[]} [extraAttachIds] 额外的附件 id（/new 带过来的图，
+ *        已经在建草稿时传好了，这里直接复用，不再上传一遍）
+ */
+async function sendMessage(text, extraAttachIds) {
   if (sending) return;
   const content = String(text == null ? input.value : text).trim();
-  if (!content) return;
+  // 只有图没有文字也算合法：「照这个图改」经常懒得打字
+  const readyImages = PENDING_IMAGES.filter((img) => img.id);
+  const preset = Array.isArray(extraAttachIds) ? extraAttachIds : [];
+  if (!content && !readyImages.length && !preset.length) return;
   if (!threadId) {
     MP.toast('先建一个会话');
     return;
   }
+  // 还有图在上传：等它传完，不然会发出一条「少一张图」的消息
+  if (PENDING_IMAGES.some((img) => img.uploading)) {
+    MP.toast('图片还在上传，稍等一下');
+    return;
+  }
+
   sending = true;
   send.disabled = true;
   if (text == null) input.value = '';
   MP.autoGrow(input)();
+
+  // 发送前把图片 id 抓下来：发完要清空待发送区
+  const attachIds = [...preset, ...readyImages.map((img) => img.id)];
+
+  // 跑的过程中发送按钮变成「停止」：同一个按钮两种状态，
+  // 用户不用去找另一个停的地方（这也是 ChatGPT / Cursor 的做法）
+  const enterRunning = () => {
+    send.disabled = false;
+    send.classList.add('stopping');
+    send.textContent = '■';
+    send.title = '停止生成（Esc）';
+  };
+  const exitRunning = () => {
+    send.classList.remove('stopping');
+    send.textContent = '↑';
+    send.title = '发送（Enter）';
+    send.disabled = false;
+    activeCancel = null;
+  };
 
   try {
     await MP.pushMessage({
@@ -605,6 +848,24 @@ async function sendMessage(text) {
       name: NAME,
       content,
       threadId,
+      attachIds,
+      // 任务开跑：按钮切成停止态；模型框同步成实际用的那个
+      //（服务端可能因为原模型连不上而降级到别的，这里要跟上）
+      onStarted: (data, ctl) => {
+        activeCancel = ctl;
+        enterRunning();
+        // 消息已经发出去了：立刻清空待发送区。
+        // 不能等整轮跑完再清 —— 生成要几十秒，图一直挂在那儿会让人以为没发出去。
+        clearImages();
+        if (data.model && data.model.id) {
+          modelPickLabel.textContent = data.model.label || data.model.id;
+        }
+        // 服务端说这个模型看不了图：提醒一句，但不要拦（用户可能就是想试试）。
+        // 现在 8 个模型都能看图，这段是给以后新增的模型兜底。
+        if (attachIds.length && data.vision === false) {
+          MP.toast('当前模型看不了图片，换一个能看图的模型');
+        }
+      },
       onReply: () => {
         // 第一条消息自动给会话起名，列表里不再全是「新对话」。
         // 注意字段来源有两处：接口列表是 msg_count（下划线），新建返回的是 msgCount，
@@ -612,36 +873,259 @@ async function sendMessage(text) {
         const t = THREADS.find((x) => x.id === threadId);
         const count = t ? Number(t.msg_count ?? t.msgCount ?? 0) : 0;
         if (t && (!t.title || t.title === '新对话') && count === 0) {
-          const title = content.slice(0, 20);
-          MP.api(api('/threads/' + threadId), { method: 'PUT', body: { title } })
-            .then(() => {
-              t.title = title;
-              t.msg_count = 2;
-              renderThreads();
-            })
-            .catch(() => {});
+          // 只有图没文字时，用「[图片]」当标题，别留空
+          const title = content.slice(0, 20) || (attachIds.length ? '[图片]' : '');
+          if (title) {
+            MP.api(api('/threads/' + threadId), { method: 'PUT', body: { title } })
+              .then(() => {
+                t.title = title;
+                t.msg_count = 2;
+                renderThreads();
+              })
+              .catch(() => {});
+          }
         }
+        // agent 改了文件，预览要跟着刷新
+        reload();
+        loadFiles();
       },
     });
   } catch (e) {
     MP.toast(e.message || '发送失败');
   } finally {
     sending = false;
-    send.disabled = false;
+    exitRunning();
     input.focus();
   }
 }
 
-send.addEventListener('click', () => sendMessage(null));
+// 发送键兼任停止键
+send.addEventListener('click', () => {
+  if (activeCancel) { activeCancel.cancel(); return; }
+  sendMessage(null);
+});
+
+// Esc 也能停：手在键盘上时不用去够按钮
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && activeCancel) {
+    e.preventDefault();
+    activeCancel.cancel();
+  }
+});
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     sendMessage(null);
   }
 });
-document.getElementById('plus').addEventListener('click', () => {
-  MP.toast('这一版还不支持附加文件');
+/* ---------------------------------------------------------------- 图片附件 */
+
+// 待发送的图片。{ id, mime, size, url, originalBytes, compressed }
+// id 是服务端返回的附件 id，url 是本地 blob 预览（发送成功后释放）
+let PENDING_IMAGES = [];
+
+// 准入上限：与 lib/config.js 的 ATTACH_MAX_BYTES / ATTACH_MAX_PER_MESSAGE 对齐。
+// 20 MB 能覆盖手机原图和 4K 截图；超过基本是误传。
+const MAX_IMAGES = 6;
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+// 只收这三种。GIF 故意不支持：canvas 会把它变成静态第一帧，
+// 与其让用户发出去发现不动了，不如在入口就说清楚。
+const OK_IMAGE_TYPES = /^image\/(png|jpeg|webp)$/;
+
+/** 刷新图片条：有条就显示、把对话区往上顶；没有就收起。 */
+function renderAttachBar() {
+  attachList.textContent = '';
+  const n = PENDING_IMAGES.length;
+  if (!n) {
+    attachBar.hidden = true;
+    attachHint.textContent = '';
+    return;
+  }
+  attachBar.hidden = false;
+
+  PENDING_IMAGES.forEach((img, i) => {
+    const box = document.createElement('div');
+    box.className = 'wsAttach';
+    // 悬停提示压缩前后的对比，用户能知道「我传的 18MB 变成 300KB 了」
+    box.title = img.compressed
+      ? `${MP.formatBytes(img.originalBytes)} → ${MP.formatBytes(img.size)}（已自动压缩）`
+      : `${img.mime} · ${MP.formatBytes(img.size)}`;
+
+    const el = document.createElement('img');
+    el.src = img.url;
+    el.alt = '待发送图片';
+    box.appendChild(el);
+
+    // 压缩过的角标，让用户知道发生了什么（但不打扰）
+    if (img.compressed) {
+      const flag = document.createElement('span');
+      flag.className = 'wsAttachFlag';
+      flag.textContent = '压';
+      box.appendChild(flag);
+    }
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'wsAttachDel';
+    del.textContent = '×';
+    del.title = '移除这张图';
+    del.addEventListener('click', () => removeImage(i));
+    box.appendChild(del);
+
+    attachList.appendChild(box);
+  });
+
+  // 模型看不了图时提前提醒（当前 8 个模型都能看，这段是给以后新增的模型兜底）
+  const m = MODELS.find((x) => x.id === currentModelId());
+  if (m && !m.supportsVision) {
+    attachHint.textContent = `${m.label} 看不了图片，换一个能看图的模型`;
+    attachHint.classList.add('warn');
+  } else {
+    // 只显示张数。体积和「压缩省了多少」不显示 ——
+    // 那是技术细节，且悬停在缩略图上就能看到具体数字（title 里有）。
+    attachHint.textContent = `${n}/${MAX_IMAGES} 张`;
+    attachHint.classList.remove('warn');
+  }
+}
+
+function formatSize(n) {
+  return MP.formatBytes(n);
+}
+
+function removeImage(index) {
+  const [gone] = PENDING_IMAGES.splice(index, 1);
+  if (gone && gone.url) URL.revokeObjectURL(gone.url);
+  renderAttachBar();
+}
+
+function clearImages() {
+  PENDING_IMAGES.forEach((img) => { if (img.url) URL.revokeObjectURL(img.url); });
+  PENDING_IMAGES = [];
+  renderAttachBar();
+}
+
+/**
+ * 加一张图：先归一化（浏览器里压缩）→ 本地预览 → 传到服务端拿 id。
+ *
+ * 顺序很重要：**先压缩再上传**。原图 20 MB 直接传上去，服务端要完整收下
+ * 20 MB 才能判断，白费流量；压到 300 KB 再传，快 10 倍还不占库。
+ */
+async function addImage(file) {
+  if (!file) return;
+  if (PENDING_IMAGES.length >= MAX_IMAGES) {
+    MP.toast(`最多 ${MAX_IMAGES} 张图`);
+    return;
+  }
+  if (!OK_IMAGE_TYPES.test(file.type)) {
+    MP.toast('只支持 PNG / JPEG / WEBP（不支持 GIF）');
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    MP.toast(`图片太大，单张上限 ${MAX_IMAGE_BYTES / 1024 / 1024} MB`);
+    return;
+  }
+  if (!threadId) {
+    MP.toast('先建一个会话');
+    return;
+  }
+
+  // 先占位：用户在压缩期间也能看到「正在处理」的格子
+  const entry = {
+    id: null,
+    mime: file.type,
+    size: file.size,
+    originalBytes: file.size,
+    compressed: false,
+    url: null,
+    uploading: true,
+  };
+  PENDING_IMAGES.push(entry);
+  renderAttachBar();
+
+  try {
+    // ① 归一化：长边 2048、JPEG 0.9，超过 1 MB 再按阶梯压
+    const norm = await MP.normalizeImage(file);
+    entry.originalBytes = norm.originalBytes;
+    entry.size = norm.bytes;
+    entry.compressed = norm.changed;
+    entry.mime = norm.changed ? 'image/jpeg' : file.type;
+    entry.url = URL.createObjectURL(norm.blob);
+    renderAttachBar();
+
+    // ② 上传压缩后的那份
+    const buf = await norm.blob.arrayBuffer();
+    const type = norm.changed ? 'image/jpeg' : file.type;
+    const res = await fetch(api('/attachments?threadId=' + threadId), {
+      method: 'POST',
+      headers: { 'content-type': type },
+      body: buf,
+      credentials: 'same-origin',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.message || '上传失败');
+    entry.id = data.attachment.id;
+    entry.mime = data.attachment.mime;
+    entry.size = data.attachment.size;
+    entry.deduped = Boolean(data.attachment.deduped);
+    entry.uploading = false;
+    renderAttachBar();
+  } catch (e) {
+    const i = PENDING_IMAGES.indexOf(entry);
+    if (i >= 0) removeImage(i);
+    MP.toast(e.message || '图片上传失败');
+  }
+}
+
+/** 从剪贴板 / 拖拽里的 File 列表批量加图。 */
+function addImageFiles(files) {
+  const list = [...(files || [])].filter((f) => f && /^image\//.test(f.type));
+  if (!list.length) return false;
+  list.slice(0, MAX_IMAGES - PENDING_IMAGES.length).forEach((f) => addImage(f));
+  return true;
+}
+
+// ＋ 按钮：打开系统文件选择
+plus.addEventListener('click', () => filePick.click());
+filePick.addEventListener('change', () => {
+  addImageFiles(filePick.files);
+  filePick.value = '';   // 清空，同一张图能再选一次
 });
+
+// 直接粘贴：Ctrl+V 把截图贴进对话栏
+input.addEventListener('paste', (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  const files = [];
+  for (const item of items) {
+    if (item.kind === 'file' && /^image\//.test(item.type)) {
+      const f = item.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (files.length) {
+    e.preventDefault();    // 别把剪贴板里的二进制当文本塞进输入框
+    addImageFiles(files);
+  }
+});
+
+// 拖拽进来也能加
+const composer = input.closest('.wsComposer');
+composer.addEventListener('dragover', (e) => {
+  if (![...(e.dataTransfer?.types || [])].includes('Files')) return;
+  e.preventDefault();
+  composer.classList.add('dragOver');
+});
+composer.addEventListener('dragleave', (e) => {
+  if (e.relatedTarget && composer.contains(e.relatedTarget)) return;
+  composer.classList.remove('dragOver');
+});
+composer.addEventListener('drop', (e) => {
+  composer.classList.remove('dragOver');
+  if (!e.dataTransfer?.files?.length) return;
+  e.preventDefault();
+  addImageFiles(e.dataTransfer.files);
+});
+
 document.getElementById('skill').addEventListener('click', () => {
   MP.alert('技能还没接上，先把要改的说清楚就行');
 });
@@ -659,7 +1143,12 @@ document.querySelectorAll('.wsTab').forEach((tab) => {
 });
 
 document.getElementById('reload').addEventListener('click', () => {
-  reload();
+  // 刷新就是回到当前版本（正在看旧版本时，刷新不该还停在旧版本）
+  if (previewSeq) {
+    previewVersion(0);
+  } else {
+    reload();
+  }
   if (!document.getElementById('viewCode').hidden) loadFile(currentPath);
 });
 
@@ -832,16 +1321,51 @@ window.addEventListener('beforeunload', (e) => {
   e.returnValue = '';
 });
 
-/* ---------------------------------------------------------------- 历史与回滚 */
+/* ---------------------------------------------------------------- 版本与预览 */
 
-let snapshots = [];
+// 当前在预览哪一版：0 表示「最新状态」（就是 site_current 指向的那版）
+let previewSeq = 0;
+// 最近一次拉到的版本数据
+let VERSIONS = { current: { seq: 0, dirty: 0 }, versions: [] };
+
+/**
+ * 预览某一版：把右侧 iframe 切到 /@<seq>/ 地址。
+ * seq=0 表示回到「当前版本」。
+ */
+function previewVersion(seq) {
+  previewSeq = seq || 0;
+  const base = MP.draftUrl(USERNAME, NAME);
+  frame.src = previewSeq
+    ? `${base}@${previewSeq}/?t=${Date.now()}`
+    : `${base}?t=${Date.now()}`;
+  syncPreviewBadge();
+}
+
+/** 预览区的角标：预览的是旧版本时明确标出来，别让人以为改坏了。 */
+function syncPreviewBadge() {
+  const badge = document.getElementById('previewBadge');
+  if (!badge) return;
+  if (previewSeq) {
+    const v = VERSIONS.versions.find((x) => x.seq === previewSeq);
+    badge.hidden = false;
+    badge.textContent = `预览 #${previewSeq}${v ? ' · ' + v.label : ''}`;
+    badge.title = '你现在看的是历史版本，文件没有被改动。点回「当前版本」恢复实时预览。';
+  } else {
+    badge.hidden = true;
+  }
+}
+
+/* ---------------------------------------------------------------- 历史（版本列表） */
 
 async function openHistory() {
   try {
-    const data = await MP.api(api('/snapshots'));
-    snapshots = data.snapshots || [];
+    const data = await MP.api(api('/versions'));
+    VERSIONS = {
+      current: data.current || { seq: 0, dirty: 0 },
+      versions: data.versions || [],
+    };
   } catch (e) {
-    MP.alert(e.message || '读不到历史');
+    MP.alert(e.message || '读不到版本记录');
     return;
   }
 
@@ -852,22 +1376,154 @@ async function openHistory() {
   card.innerHTML = ''
     + '<button type="button" class="modal-x" aria-label="关闭">×</button>'
     + '<h2 class="modal-title">改动历史</h2>'
-    + '<p class="hint" style="margin:0 0 12px">'
-    +   '每次改动前会自动存一份快照，点「还原」就能退回去。只记录被改动的那几个文件。'
-    + '</p>'
+    + '<p class="hint histHint">每次改动存一个带编号的版本。点一行可以在右侧预览那一版，'
+    +   '文件不会被改动；确认要退回去再点「恢复到此版本」。</p>'
+    + '<div class="histCurrent"></div>'
     + '<div class="historyList"></div>';
 
   const list = card.querySelector('.historyList');
-  if (!snapshots.length) {
-    const empty = document.createElement('div');
-    empty.className = 'historyEmpty';
-    empty.textContent = '还没有改动记录。';
-    list.appendChild(empty);
-  } else {
-    snapshots.forEach((s) => list.appendChild(historyRow(s, card)));
+  const curBox = card.querySelector('.histCurrent');
+
+  /** 顶部「当前版本」栏 + 列表，一起重画（切预览时两者都要变）。 */
+  function render() {
+    curBox.textContent = '';
+    list.textContent = '';
+
+    const cur = VERSIONS.current;
+    const shown = previewSeq || cur.seq;
+    const row = VERSIONS.versions.find((v) => v.seq === shown);
+
+    // ---- 当前版本栏 ----
+    const label = document.createElement('div');
+    label.className = 'histCurLabel';
+    label.textContent = previewSeq ? '正在预览' : '当前版本';
+    curBox.appendChild(label);
+
+    const main = document.createElement('div');
+    main.className = 'histCurMain';
+
+    if (!cur.seq && !VERSIONS.versions.length) {
+      const none = document.createElement('b');
+      none.textContent = '还没有任何版本';
+      main.appendChild(none);
+      const tip = document.createElement('span');
+      tip.className = 'muted';
+      tip.textContent = '让 agent 改一次，或手动保存一次，就会生成 #1';
+      main.appendChild(tip);
+    } else {
+      const num = document.createElement('b');
+      num.className = 'histCurNum';
+      num.textContent = shown ? '#' + shown : '无';
+      main.appendChild(num);
+
+      if (row) {
+        const txt = document.createElement('span');
+        txt.className = 'histCurText';
+        txt.textContent = row.label || '改动';
+        main.appendChild(txt);
+
+        const when = document.createElement('span');
+        when.className = 'muted';
+        when.textContent = fmtTime(row.createdAt) + ' · ' + fmtSize(row.size);
+        main.appendChild(when);
+      }
+
+      // 文件已不等于任何版本（手动改过 / 版本超限没存成）
+      if (!previewSeq && cur.dirty) {
+        const dirty = document.createElement('i');
+        dirty.className = 'histDirty';
+        dirty.textContent = '已修改';
+        dirty.title = '当前文件和这个版本已经不一致了（手动编辑过，或上次改动没能存成版本）';
+        main.appendChild(dirty);
+      }
+    }
+    curBox.appendChild(main);
+
+    // 预览旧版本时给一个回到当前的操作
+    if (previewSeq) {
+      const back = document.createElement('button');
+      back.type = 'button';
+      back.className = 'tiny ghost histBack';
+      back.textContent = '回到当前版本';
+      back.addEventListener('click', () => {
+        previewVersion(0);
+        render();
+      });
+      curBox.appendChild(back);
+    }
+
+    // ---- 版本列表 ----
+    if (!VERSIONS.versions.length) {
+      const empty = document.createElement('div');
+      empty.className = 'historyEmpty';
+      empty.textContent = '还没有改动记录。';
+      list.appendChild(empty);
+      return;
+    }
+
+    VERSIONS.versions.forEach((v) => list.appendChild(versionRow(v, render)));
   }
 
-  const close = () => mask.remove();
+  function versionRow(v, rerender) {
+    const row = document.createElement('div');
+    row.className = 'historyRow';
+    if (v.seq === (previewSeq || VERSIONS.current.seq)) row.classList.add('on');
+    if (v.seq === VERSIONS.current.seq) row.classList.add('current');
+
+    const info = document.createElement('div');
+    info.className = 'historyInfo';
+
+    const head = document.createElement('div');
+    head.className = 'histRowHead';
+
+    const num = document.createElement('b');
+    num.className = 'histNum';
+    num.textContent = '#' + v.seq;
+    head.appendChild(num);
+
+    const title = document.createElement('span');
+    title.className = 'histRowTitle';
+    title.textContent = v.label || '改动';
+    head.appendChild(title);
+
+    if (v.seq === VERSIONS.current.seq) {
+      const tag = document.createElement('i');
+      tag.className = 'histTag';
+      tag.textContent = '当前';
+      head.appendChild(tag);
+    }
+    info.appendChild(head);
+
+    const meta = document.createElement('span');
+    meta.className = 'muted histMeta';
+    meta.textContent = fmtTime(v.createdAt) + ' · ' + fmtSize(v.size);
+    info.appendChild(meta);
+
+    // 点整行 = 预览，不改文件
+    row.addEventListener('click', () => {
+      previewVersion(v.seq);
+      rerender();
+    });
+    row.appendChild(info);
+
+    // 恢复按钮单独一个，避免误点
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tiny ghost';
+    btn.textContent = '恢复到此版本';
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      restoreVersionTo(v, btn, rerender);
+    });
+    row.appendChild(btn);
+
+    return row;
+  }
+
+  const close = () => {
+    mask.remove();
+    // 关掉面板时如果还在预览旧版本，保持现状（用户可能正在看），不自动跳回
+  };
   card.querySelector('.modal-x').addEventListener('click', close);
   mask.addEventListener('click', (e) => { if (e.target === mask) close(); });
   document.addEventListener('keydown', function onEsc(e) {
@@ -876,33 +1532,9 @@ async function openHistory() {
     close();
   });
 
+  render();
   mask.appendChild(card);
   document.body.appendChild(mask);
-}
-
-function historyRow(s, card) {
-  const row = document.createElement('div');
-  row.className = 'historyRow';
-
-  const info = document.createElement('div');
-  info.className = 'historyInfo';
-  const title = document.createElement('b');
-  title.textContent = s.label || '改动';
-  const meta = document.createElement('span');
-  meta.className = 'muted';
-  meta.textContent = fmtTime(s.created_at) + ' · ' + fmtSize(s.size);
-  info.appendChild(title);
-  info.appendChild(meta);
-  row.appendChild(info);
-
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'tiny ghost';
-  btn.textContent = '还原';
-  btn.addEventListener('click', () => restore(s, btn, card));
-  row.appendChild(btn);
-
-  return row;
 }
 
 function fmtTime(iso) {
@@ -912,30 +1544,44 @@ function fmtTime(iso) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-async function restore(snap, btn, card) {
+/**
+ * 真正恢复到某一版（会写文件）。
+ *
+ * 注意：这一步**不产生新版本号**，只是把当前指针指回去；
+ * 列表里其它版本原样保留，当前版本栏变成目标版本。
+ */
+async function restoreVersionTo(v, btn, rerender) {
   const ok = await MP.ask({
-    text: '还原到「' + (snap.label || '这次改动') + '」之前的状态？\n'
-      + '当前状态会先自动存一份，点错了还能退回来。',
+    text: `把文件恢复到 #${v.seq}（${v.label || '这次改动'}）？\n`
+      + '当前文件会被这一版的内容替换。其它版本记录都还在，随时可以再切回来。',
     buttons: [
       { key: 'cancel', label: '取消' },
-      { key: 'restore', label: '还原', primary: true },
+      { key: 'restore', label: '恢复', primary: true },
     ],
   });
   if (ok !== 'restore') return;
 
   btn.disabled = true;
-  btn.textContent = '还原中…';
+  btn.textContent = '恢复中…';
   try {
-    const data = await MP.api(api('/snapshots/' + snap.id + '/restore'), { method: 'POST' });
-    card.remove();
-    document.querySelector('.modal-mask')?.remove();
-    MP.toast('已还原，刷新预览看看');
+    await MP.api(api('/versions/' + v.seq + '/restore'), { method: 'POST' });
+
+    // 重新拉一次列表（当前指针变了）
+    const data = await MP.api(api('/versions'));
+    VERSIONS = {
+      current: data.current || { seq: v.seq, dirty: 0 },
+      versions: data.versions || [],
+    };
+    previewSeq = 0;   // 恢复后看的就是当前版本
+    syncPreviewBadge();
     reload();
     loadFiles();
+    if (rerender) rerender();
+    MP.toast(`已恢复到 #${v.seq}`);
   } catch (e) {
     btn.disabled = false;
-    btn.textContent = '还原';
-    MP.alert(e.message || '还原失败');
+    btn.textContent = '恢复到此版本';
+    MP.alert(e.message || '恢复失败');
   }
 }
 

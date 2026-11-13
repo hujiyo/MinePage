@@ -9,3 +9,7 @@ AGENTS.md
 
 # 本地 SMTP 启动脚本，含授权码，绝不进仓库
 start.cmd
+
+# 本地环境变量：模型 Key、数据库密码都在里面，绝不进仓库
+.env
+.env.local

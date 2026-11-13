@@ -12,10 +12,28 @@
     <div class="newHintTop">描述你想要的页面，我先搭出一版草稿，再慢慢改。</div>
 
     <div class="newBox">
-      <textarea id="prompt" rows="1" placeholder="想让这个页面做点什么？"></textarea>
+      <!-- 待发送图片：跟工作区同一套交互，粘进来就挂在这里 -->
+      <div class="wsAttachBar" id="attachBar" hidden>
+        <div class="wsAttachList" id="attachList"></div>
+        <div class="wsAttachHint" id="attachHint"></div>
+      </div>
+
+      <textarea id="prompt" rows="1" placeholder="想让这个页面做点什么？（可以直接粘贴图片）"></textarea>
+
       <div class="newBar">
-        <button type="button" class="iconBtn" id="plus" title="附加内容">＋</button>
-        <span class="newModel">GLM-5.3-Flash · 适中</span>
+        <button type="button" class="iconBtn" id="plus" title="添加图片（也可以直接粘贴）">＋</button>
+        <input type="file" id="filePick" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+
+        <!-- 与工作区一致：模型、模式各一个独立上拉框 -->
+        <button type="button" class="wsPick" id="modelPick" title="选择模型" aria-haspopup="listbox">
+          <span class="wsPickLabel" id="modelPickLabel">未接模型</span>
+          <span class="wsPickCaret" aria-hidden="true">⌃</span>
+        </button>
+        <button type="button" class="wsPick" id="modePick" title="选择模式" aria-haspopup="listbox">
+          <span class="wsPickLabel" id="modePickLabel">编码</span>
+          <span class="wsPickCaret" aria-hidden="true">⌃</span>
+        </button>
+
         <span class="spacer"></span>
         <span class="newAt">或 @ 使用技能</span>
         <button type="button" class="sendBtn" id="send" title="发送">↑</button>
@@ -38,10 +56,26 @@ let DRAFTS = 0;
 let MAXD = 20;
 let sending = false;
 
+// 模型 / 模式：这一页还没有会话，选择先记在本地，进工作区后套到新会话上
+let MODELS = [];
+let MODES = [];
+let DEFAULT_MODEL = '';
+let pickedModel = '';
+let pickedMode = 'code';
+
 const prompt = document.getElementById('prompt');
 const send = document.getElementById('send');
 const err = document.getElementById('err');
 const qHint = document.getElementById('qHint');
+const modelPick = document.getElementById('modelPick');
+const modelPickLabel = document.getElementById('modelPickLabel');
+const modePick = document.getElementById('modePick');
+const modePickLabel = document.getElementById('modePickLabel');
+const attachBar = document.getElementById('attachBar');
+const attachList = document.getElementById('attachList');
+const attachHint = document.getElementById('attachHint');
+const plus = document.getElementById('plus');
+const filePick = document.getElementById('filePick');
 
 MP.topbar({ active: 'create' });
 MP.autoGrow(prompt);
@@ -51,6 +85,275 @@ function showErr(msg) {
   err.textContent = msg;
 }
 function clearErr() { err.hidden = true; err.textContent = ''; }
+
+/* ---------------------------------------------------------------- 偏好记忆 */
+
+// 模型/模式选择存在 localStorage：下次进来还是上次那个，不用每次重选
+const PREF_KEY = 'mp.agentPrefs';
+
+function loadPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem(PREF_KEY) || '{}');
+    if (p.model) pickedModel = p.model;
+    if (p.mode) pickedMode = p.mode;
+  } catch { /* 存坏了就当没存 */ }
+}
+
+function savePrefs() {
+  try {
+    localStorage.setItem(PREF_KEY, JSON.stringify({ model: pickedModel, mode: pickedMode }));
+  } catch { /* 隐私模式下写不进去，忽略 */ }
+}
+
+/* ---------------------------------------------------------------- 模型 / 模式 */
+
+async function loadAgentOptions() {
+  try {
+    const data = await MP.api('/api/agent/tools');
+    MODELS = data.models || [];
+    MODES = data.modes || [];
+    DEFAULT_MODEL = data.defaultModel || '';
+  } catch {
+    MODELS = [];
+    MODES = [];
+    DEFAULT_MODEL = '';
+  }
+  // 存的模型可能已经下架了，回退到当前可用的
+  if (!MODELS.some((m) => m.id === pickedModel && m.ready)) {
+    pickedModel = DEFAULT_MODEL || ((MODELS.find((m) => m.ready) || {}).id || '');
+  }
+  if (!MODES.some((m) => m.id === pickedMode)) pickedMode = 'code';
+  syncPicks();
+}
+
+function syncPicks() {
+  const m = MODELS.find((x) => x.id === pickedModel);
+
+  if (!m) {
+    modelPickLabel.textContent = '未接模型';
+    modelPick.title = '服务器还没配置模型，先在环境变量里加 LLM_API_KEY';
+    modelPick.classList.add('off');
+    modelPick.disabled = true;
+  } else {
+    modelPickLabel.textContent = m.label;
+    modelPick.title = `${m.provider} / ${m.model}`;
+    modelPick.classList.remove('off');
+    modelPick.disabled = false;
+  }
+
+  const modeInfo = MODES.find((x) => x.id === pickedMode);
+  modePickLabel.textContent = modeInfo ? modeInfo.label : '编码';
+  modePick.title = modeInfo ? modeInfo.hint : '可以读写文件';
+  modePick.classList.toggle('isChat', pickedMode === 'chat');
+}
+
+modelPick.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (modelPick.disabled) return;
+
+  const usable = MODELS.filter((m) => m.ready && m.supportsTools);
+  if (!usable.length) {
+    MP.alert('清单里的模型都缺 Key 或不支持工具调用');
+    return;
+  }
+
+  MP.openListSheet(modelPick, {
+    items: usable.map((m) => ({
+      value: m.id,
+      label: m.label,
+      hint: m.hint,
+      tags: m.supportsVision ? ['能看图'] : [],
+      active: m.id === pickedModel,
+    })),
+    onPick: (id) => {
+      pickedModel = id;
+      savePrefs();
+      syncPicks();
+    },
+  });
+});
+
+modePick.addEventListener('click', (e) => {
+  e.stopPropagation();
+  MP.openListSheet(modePick, {
+    items: MODES.map((m) => ({
+      value: m.id,
+      label: m.label,
+      hint: m.hint,
+      active: m.id === pickedMode,
+    })),
+    onPick: (id) => {
+      pickedMode = id;
+      savePrefs();
+      syncPicks();
+    },
+  });
+});
+
+/* ---------------------------------------------------------------- 图片附件 */
+
+// 这一页还没建草稿，图片先留在内存里（File 对象没法进 sessionStorage）。
+// 点发送时：建草稿 → 传图拿 id → 把 id 塞 sessionStorage → 跳工作区。
+let PENDING_IMAGES = [];
+const MAX_IMAGES = 6;
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const OK_IMAGE_TYPES = /^image\/(png|jpeg|webp)$/;
+
+function formatSize(n) {
+  return MP.formatBytes(n);
+}
+
+function renderAttachBar() {
+  attachList.textContent = '';
+  const n = PENDING_IMAGES.length;
+  if (!n) {
+    attachBar.hidden = true;
+    attachHint.textContent = '';
+    return;
+  }
+  attachBar.hidden = false;
+
+  PENDING_IMAGES.forEach((img, i) => {
+    const box = document.createElement('div');
+    box.className = 'wsAttach';
+    box.title = img.compressed
+      ? `${MP.formatBytes(img.originalBytes)} → ${MP.formatBytes(img.size)}（已自动压缩）`
+      : `${img.file.type} · ${MP.formatBytes(img.file.size)}`;
+
+    const el = document.createElement('img');
+    el.src = img.url;
+    el.alt = '待发送图片';
+    box.appendChild(el);
+
+    if (img.compressed) {
+      const flag = document.createElement('span');
+      flag.className = 'wsAttachFlag';
+      flag.textContent = '压';
+      box.appendChild(flag);
+    }
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'wsAttachDel';
+    del.textContent = '×';
+    del.title = '移除这张图';
+    del.addEventListener('click', () => removeImage(i));
+    box.appendChild(del);
+
+    attachList.appendChild(box);
+  });
+
+  const m = MODELS.find((x) => x.id === pickedModel);
+  if (m && !m.supportsVision) {
+    attachHint.textContent = `${m.label} 看不了图片，换一个能看图的模型`;
+    attachHint.classList.add('warn');
+  } else {
+    // 只显示张数；体积/压缩信息在缩略图的悬停提示里
+    attachHint.textContent = `${n}/${MAX_IMAGES} 张`;
+    attachHint.classList.remove('warn');
+  }
+}
+
+function removeImage(index) {
+  const [gone] = PENDING_IMAGES.splice(index, 1);
+  if (gone && gone.url) URL.revokeObjectURL(gone.url);
+  renderAttachBar();
+}
+
+function clearImages() {
+  PENDING_IMAGES.forEach((img) => { if (img.url) URL.revokeObjectURL(img.url); });
+  PENDING_IMAGES = [];
+  renderAttachBar();
+}
+
+/**
+ * 加一张图：先在浏览器里归一化（长边 2048 / JPEG 0.9），再挂着等提交时上传。
+ * 这一页还没建草稿，所以只压不上传 —— 附件要挂在站点上，得先有草稿。
+ */
+async function addImage(file) {
+  if (!file) return;
+  if (PENDING_IMAGES.length >= MAX_IMAGES) {
+    showErr(`最多 ${MAX_IMAGES} 张图`);
+    return;
+  }
+  if (!OK_IMAGE_TYPES.test(file.type)) {
+    showErr('只支持 PNG / JPEG / WEBP（不支持 GIF）');
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    showErr(`图片太大，单张上限 ${MAX_IMAGE_BYTES / 1024 / 1024} MB`);
+    return;
+  }
+  clearErr();
+
+  try {
+    const norm = await MP.normalizeImage(file);
+    PENDING_IMAGES.push({
+      file: norm.blob,
+      originalBytes: norm.originalBytes,
+      size: norm.bytes,
+      compressed: norm.changed,
+      url: URL.createObjectURL(norm.blob),
+    });
+    renderAttachBar();
+  } catch (e) {
+    showErr(e.message || '这张图打不开，换一张试试');
+  }
+}
+
+function addImageFiles(files) {
+  const list = [...(files || [])].filter((f) => f && /^image\//.test(f.type));
+  if (!list.length) return false;
+  const room = MAX_IMAGES - PENDING_IMAGES.length;
+  if (room <= 0) {
+    showErr(`最多 ${MAX_IMAGES} 张图`);
+    return true;
+  }
+  list.slice(0, room).forEach(addImage);
+  return true;
+}
+
+plus.addEventListener('click', () => filePick.click());
+filePick.addEventListener('change', () => {
+  addImageFiles(filePick.files);
+  filePick.value = '';
+});
+
+prompt.addEventListener('paste', (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  const files = [];
+  for (const item of items) {
+    if (item.kind === 'file' && /^image\//.test(item.type)) {
+      const f = item.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (files.length) {
+    e.preventDefault();
+    addImageFiles(files);
+  }
+});
+
+// 拖文件进来
+const boxEl = document.querySelector('.newBox');
+boxEl.addEventListener('dragover', (e) => {
+  if (![...(e.dataTransfer?.types || [])].includes('Files')) return;
+  e.preventDefault();
+  boxEl.classList.add('dragOver');
+});
+boxEl.addEventListener('dragleave', (e) => {
+  if (e.relatedTarget && boxEl.contains(e.relatedTarget)) return;
+  boxEl.classList.remove('dragOver');
+});
+boxEl.addEventListener('drop', (e) => {
+  boxEl.classList.remove('dragOver');
+  if (!e.dataTransfer?.files?.length) return;
+  e.preventDefault();
+  addImageFiles(e.dataTransfer.files);
+});
+
+/* ---------------------------------------------------------------- 启动 & 提交 */
 
 /** 读用户名与草稿余量；未登录直接去登录页。 */
 async function boot() {
@@ -62,7 +365,7 @@ async function boot() {
   try {
     const data = await MP.api('/api/sites');
     USERNAME = data.username || me.username;
-    DRAFTS = (data.sites || []).filter((s) => s.status === 'draft').length;
+    DRAFTS = (data.drafts || []).length;
     MAXD = data.maxDrafts || 20;
     qHint.textContent = '草稿 ' + DRAFTS + ' / ' + MAXD;
   } catch (e) {
@@ -71,14 +374,15 @@ async function boot() {
 }
 
 /**
- * 第一条消息：建草稿（空 index.html）→ 落库这条消息 → 跳工作区。
- * 草稿建好后即使发消息失败也照样跳过去，用户在工作区里能重新发。
+ * 第一条消息：建草稿 → 传图（如果有）→ 把文字和附件 id 记在 sessionStorage → 跳工作区。
+ * 图片必须在这之后传：附件是挂在某个站点上的，得先有草稿才有地方放。
  */
 async function submit() {
   if (sending) return;
   clearErr();
   const text = prompt.value.trim();
-  if (!text) { showErr('先说点什么'); prompt.focus(); return; }
+  // 只有图没有文字也算合法
+  if (!text && !PENDING_IMAGES.length) { showErr('先说点什么'); prompt.focus(); return; }
   if (!USERNAME) { showErr('还没拿到用户名，稍等一下'); await boot(); return; }
   if (DRAFTS >= MAXD) { showErr('草稿已经有 ' + MAXD + ' 个了，先去创作页发布或删掉一些'); return; }
 
@@ -87,11 +391,36 @@ async function submit() {
   prompt.readOnly = true;
   send.classList.add('busy');
 
-  let site = null;
   try {
     const data = await MP.createDraft();
-    site = data.site;
+    const site = data.site;
+    const sitePath = MP.siteApiOf(USERNAME, site.name, '');
+
+    // 传图：一张失败就整条不发，避免发出一条「少一张图」的消息。
+    // 这里传的已经是归一化后的小图（长边 2048 / JPEG 0.9），不是原图。
+    const ids = [];
+    for (const img of PENDING_IMAGES) {
+      const buf = await img.file.arrayBuffer();
+      const res = await fetch(sitePath + '/attachments', {
+        method: 'POST',
+        headers: { 'content-type': img.file.type || 'image/jpeg' },
+        body: buf,
+        credentials: 'same-origin',
+      });
+      const upload = await res.json().catch(() => ({}));
+      if (!res.ok || !upload.ok) throw new Error(upload.message || '图片上传失败');
+      ids.push(upload.attachment.id);
+    }
+
     sessionStorage.setItem('mp:firstMessage:' + site.name, text);
+    if (ids.length) sessionStorage.setItem('mp:firstAttach:' + site.name, JSON.stringify(ids));
+    // 模型/模式偏好带过去，工作区建默认会话时用
+    sessionStorage.setItem('mp:firstPrefs:' + site.name, JSON.stringify({
+      model: pickedModel,
+      mode: pickedMode,
+    }));
+
+    clearImages();
     location.href = '/workspace/' + encodeURIComponent(site.name);
   } catch (e) {
     sending = false;
@@ -110,11 +439,10 @@ prompt.addEventListener('keydown', (e) => {
   else if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); submit(); }
 });
 
-document.getElementById('plus').addEventListener('click', () => {
-  MP.toast('这一版还不支持附带文件，先把需求说清楚就行');
-});
-
-boot().then(() => prompt.focus());
+loadPrefs();
+boot()
+  .then(() => loadAgentOptions())
+  .then(() => prompt.focus());
 </script>
 </body>
 </html>

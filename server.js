@@ -1,3 +1,8 @@
+// 必须放在所有其他 import 之前：ESM 按声明顺序求值，
+// 这个模块负责把 .env 里的变量塞进 process.env，
+// 后面的 config.js 才能读到。生产环境用 systemd 的 EnvironmentFile，没有 .env 也无妨。
+import './lib/env.js';
+
 import http from 'node:http';
 import path from 'node:path';
 import zlib from 'node:zlib';
@@ -107,11 +112,11 @@ import {
 import { parseZip } from './lib/zip.js';
 import { buildZip, withDirs } from './lib/zip-writer.js';
 import {
-  createSnapshotCollector,
-  getSnapshot,
-  listSnapshots,
-  restoreSnapshot,
-  snapshotBeforeRestore,
+  commitVersion,
+  listVersions,
+  markDirty,
+  resolveVersion,
+  restoreVersion,
 } from './lib/agent/snapshot.js';
 import {
   AGENT_TOOL_NAMES,
@@ -120,6 +125,53 @@ import {
   toolCatalog,
   toolSchemas,
 } from './lib/agent/tools.js';
+import {
+  AGENT_DEFAULT_MODEL,
+} from './lib/config.js';
+import {
+  MODES,
+  canonicalMode,
+  canonicalModelId,
+  modelApiKey,
+  pickUsableModel,
+  probeModel,
+  publicModeList,
+  publicModelList,
+  resolveModel,
+} from './lib/agent/models.js';
+import { LlmError } from './lib/agent/llm.js';
+import { runAgent } from './lib/agent/loop.js';
+import {
+  clearThreadSummary,
+  compactThread,
+  getThreadSummary,
+} from './lib/agent/compact.js';
+import {
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  MAX_ATTACHMENT_BYTES,
+  attachmentUsage,
+  getAttachment,
+  listAttachmentMeta,
+  loadAttachmentBytes,
+  pruneAttachments,
+  saveAttachment,
+} from './lib/agent/attachments.js';
+import { cancel as cancelRunningTask, register as registerRunningTask, unregister as unregisterRunningTask } from './lib/agent/running.js';
+import {
+  assertDailyQuota,
+  cancelTask,
+  createTask,
+  failTask,
+  findLiveTaskByThread,
+  findTask,
+  finishTask,
+  markRunning,
+  pruneTasks,
+  publicTask,
+  reapStaleTasks,
+  updatePartial,
+  updateProgress,
+} from './lib/agent/task.js';
 import { getSiteCover, removeSiteCover, setSiteCover, siteHasCover } from './lib/covers.js';
 import {
   createBanner,
@@ -1116,8 +1168,24 @@ async function handleSiteFileUpload(req, res, [username, name]) {
     throw err;
   }
 
+  // 手动保存也记一个版本。
+  //
+  // 语义变了（2026-11）：现在快照存的是「改完之后的状态点」，
+  // 所以必须**先写文件再记版本**，否则记下来的还是旧内容。
   const saved = await upsertSiteFile(site.id, filePath, content);
-  sendJson(res, isNew ? 201 : 200, { ok: true, path: saved.path, size: saved.size });
+
+  // 版本记录失败不影响保存本身（保存是主操作，版本是附加保障）
+  const ver = await commitVersion({
+    siteId: site.id,
+    label: `手动编辑 ${filePath}`,
+  }).catch(() => null);
+
+  sendJson(res, isNew ? 201 : 200, {
+    ok: true,
+    path: saved.path,
+    size: saved.size,
+    version: ver ? { seq: ver.seq ?? null, kind: ver.kind, skipped: Boolean(ver.skipped), reason: ver.reason } : null,
+  });
 }
 
 /**
@@ -1328,6 +1396,9 @@ function uploadLimits() {
     siteTotalBytes: MAX_SITE_TOTAL_BYTES,
     userTotalBytes: MAX_USER_TOTAL_BYTES,
     zipBytes: MAX_ZIP_BYTES,
+    // 对话图片：前端靠这几个数决定提示文案和归一化目标，不再各写一份
+    attachBytes: MAX_ATTACHMENT_BYTES,
+    attachPerMessage: MAX_ATTACHMENTS_PER_MESSAGE,
   };
 }
 
@@ -1498,11 +1569,14 @@ async function handleSiteFileDelete(req, res, [username, name]) {
     return;
   }
 
+  // 手动删除也记一个版本（先删再记，记的是删完的状态）
   const changes = await removeSiteFile(site.id, filePath);
   if (changes === 0) {
     sendJson(res, 404, { ok: false, message: '站点里没有这个文件' });
     return;
   }
+
+  await commitVersion({ siteId: site.id, label: `手动删除 ${filePath}` }).catch(() => {});
 
   sendJson(res, 200, { ok: true });
 }
@@ -1708,8 +1782,12 @@ async function handleSiteMessagesList(req, res, [username, name]) {
 }
 
 /**
- * POST /api/sites/:用户名/:站名/messages：追加一条用户消息。
- * 本轮 agent 只回一句占位话（不接模型），一起入库，刷新后对话还在。
+ * POST /api/sites/:用户名/:站名/messages：发一条消息，触发一轮 agent。
+ *
+ * 关键设计：**立刻返回 taskId，agent 在后台跑**。
+ * 一轮 agent 要 5–60 秒，同步等会把 HTTP 挂住，nginx 一过 proxy_read_timeout 就是 504，
+ * 前端还完全不知道结果。改成异步之后，前端能轮询进度、刷新页面回来结果还在。
+ *
  * 带 threadId 时消息挂到那个会话上；不带就落到最近一个会话（没有就建一个）。
  */
 async function handleSiteMessageAdd(req, res, [username, name]) {
@@ -1723,12 +1801,24 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
   if (!body) return;
 
   const content = String(body.content ?? '').trim();
-  if (!content) {
+  // 只有图没文字是合法的（「看看这个图，照它改」），所以空文字+有图也放行
+  const attachIds = Array.isArray(body.attachments)
+    ? body.attachments.map(Number).filter((n) => Number.isInteger(n) && n > 0)
+    : [];
+
+  if (!content && !attachIds.length) {
     sendJson(res, 400, { ok: false, message: '说点什么再发送' });
     return;
   }
   if (content.length > SITE_MESSAGE_MAX) {
     sendJson(res, 413, { ok: false, message: `一条消息最多 ${SITE_MESSAGE_MAX} 字` });
+    return;
+  }
+  if (attachIds.length > MAX_ATTACHMENTS_PER_MESSAGE) {
+    sendJson(res, 413, {
+      ok: false,
+      message: `一条消息最多带 ${MAX_ATTACHMENTS_PER_MESSAGE} 张图`,
+    });
     return;
   }
 
@@ -1743,15 +1833,296 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
     thread = await ensureDefaultThread(site.id);
   }
 
-  const mine = await addSiteMessage(site.id, 'user', content, thread.id);
-  const reply = await addSiteMessage(
-    site.id,
-    'agent',
-    '（占位回复）已开始生成…',
-    thread.id,
-  );
+  // 同一会话不许并发：两轮 agent 同时改同一批文件会互相踩
+  const live = await findLiveTaskByThread(thread.id);
+  if (live) {
+    sendJson(res, 409, {
+      ok: false,
+      message: '这个对话还在生成中，等它跑完再发下一条',
+      taskId: live.id,
+    });
+    return;
+  }
 
-  sendJson(res, 201, { ok: true, threadId: thread.id, user: mine, agent: reply });
+  // 先看看有没有可用模型，没有就直接告诉用户怎么配，别让他等一轮空跑。
+  // 用 pickUsableModel（带探活）而不是 pickDefaultModel：本机 Ollama 没启动时
+  // 「key 不需要所以算可用」会把用户带进一轮必然失败的请求。
+  let modelId = thread.model || null;
+  if (modelId && !(await probeModel(modelId))) {
+    // 会话里记的模型现在连不上了：降级到当前可用的，并告诉用户实际用了哪个
+    const fallback = await pickUsableModel(AGENT_DEFAULT_MODEL);
+    if (!fallback) {
+      sendJson(res, 503, {
+        ok: false,
+        message: '这个对话选的模型现在连不上，也没有别的可用模型。请检查服务器上的模型配置。',
+        code: 'NO_MODEL',
+      });
+      return;
+    }
+    modelId = fallback;
+  } else if (!modelId) {
+    modelId = await pickUsableModel(AGENT_DEFAULT_MODEL);
+  }
+
+  const cfg = modelId ? resolveModel(modelId) : null;
+  if (!cfg) {
+    sendJson(res, 503, {
+      ok: false,
+      message: '还没有可用的模型。请先在服务器上配置 LLM_API_KEY 环境变量再重启服务。',
+      code: 'NO_MODEL',
+    });
+    return;
+  }
+  if (cfg.apiKeyEnv && !modelApiKey(cfg)) {
+    sendJson(res, 503, {
+      ok: false,
+      message: `模型「${cfg.label}」缺少 API Key（环境变量 ${cfg.apiKeyEnv}）`,
+      code: 'NO_KEY',
+    });
+    return;
+  }
+  if (!cfg.supportsTools) {
+    sendJson(res, 400, {
+      ok: false,
+      message: `模型「${cfg.label}」不支持工具调用，没法替你改文件`,
+      code: 'NO_TOOLS',
+    });
+    return;
+  }
+
+  try {
+    await assertDailyQuota(user.id);
+  } catch (err) {
+    sendJson(res, 429, { ok: false, message: err.message, code: err.code });
+    return;
+  }
+
+  // 用户消息先落库：即便任务失败，用户说的这句话也不能丢
+  const mine = await addSiteMessage(site.id, 'user', content, thread.id, attachIds);
+
+  // 图片本体在后台任务里再读（这里少一次大 BLOB 查询）
+  const attachments = attachIds.length
+    ? await loadAttachmentBytes(site.id, attachIds)
+    : [];
+
+  const taskId = await createTask({
+    siteId: site.id,
+    threadId: thread.id,
+    userId: user.id,
+    model: modelId,
+  });
+
+  // 后台跑，不阻塞响应
+  setImmediate(() => {
+    runAgentTask({
+      taskId,
+      cfg,
+      site,
+      userId: user.id,
+      threadId: thread.id,
+      mode: canonicalMode(thread.mode),
+      userText: content,
+      attachments,
+    })
+      .catch((err) => console.error('[agent-task]', err));
+  });
+
+  sendJson(res, 202, {
+    ok: true,
+    taskId,
+    threadId: thread.id,
+    user: mine,
+    model: { id: modelId, label: cfg.label, model: cfg.model },
+    // 当前模型看不了图时提早提示，别等模型说「我看不到」
+    vision: Boolean(cfg.supportsVision),
+    imageCount: attachments.length,
+  });
+}
+
+/**
+ * 后台跑一轮 agent：写进度 → 跑循环 → 落库结果。
+ *
+ * 这里要把所有异常都兜住 —— 它在 setImmediate 里跑，抛出去没人接，
+ * 任务会永远卡在 running，前端就一直转圈。
+ */
+async function runAgentTask({
+  taskId, cfg, site, userId, threadId, mode = 'code', userText, attachments = [],
+}) {
+  const progress = [];
+  // 登记取消句柄：用户点「停止」时由 /cancel 接口触发这个 signal
+  const signal = registerRunningTask(taskId);
+
+  // 流式文本缓冲：模型逐字吐出来时先攒在这里，节流写库。
+  // 每来一个字就写库会把 agent_tasks 表写热（一次回复上千个字 = 上千次 UPDATE）。
+  // 250ms 是折中：再快对 MySQL 不友好，再慢前端看起来就「一段一段跳」。
+  // 前端轮询间隔配成 300ms，两者错开一点，体感更接近逐字。
+  let streamed = '';
+  let lastFlush = 0;
+  const FLUSH_MS = 250;
+  const flushPartial = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastFlush < FLUSH_MS) return;
+    lastFlush = now;
+    updatePartial(taskId, streamed).catch(() => {});
+  };
+
+  try {
+    await markRunning(taskId);
+
+    // 这个会话的历史（不含刚写进去的这条用户消息，它由 userText 单独传）。
+    // 注意**不在这里 slice(-40)**：旧代码硬砍 40 条，把 480k 的窗口用成了 1.2 万 token。
+    // 真正该在哪一层裁，交给 buildHistory 按 token 预算算。
+    const rows = await listThreadMessages(threadId, SITE_MESSAGES_KEEP);
+    const history = rows.filter((m) => m.content !== userText || m.role !== 'user');
+
+    // 会话太长就先压一次（超出阈值才真的调模型，否则这行几乎零开销）
+    let summary = '';
+    try {
+      const compactResult = await compactThread({ threadId, rows: history });
+      if (compactResult.compacted) {
+        summary = compactResult.summary;
+        console.log(
+          `[compact] thread=${threadId} 压了 ${compactResult.compactedCount} 条，`
+          + `${compactResult.beforeTokens} → ${compactResult.summaryTokens} token`,
+        );
+      }
+    } catch (err) {
+      // 压缩失败不影响这一轮：buildHistory 还会按预算裁
+      console.error('[compact]', err?.message ?? err);
+    }
+    // 压缩后重新取一次摘要（compactThread 成功时已经写库了）
+    if (!summary) {
+      const st = await getThreadSummary(threadId);
+      summary = st.summary;
+    }
+
+    const result = await runAgent({
+      cfg,
+      site,
+      userId,
+      history,
+      userText,
+      mode,
+      attachments,
+      summary,
+      signal,
+      // 流式：每段文字追加到缓冲并节流落库，前端轮询就能看到「正在生成」
+      onDelta: (text) => {
+        streamed += text;
+        flushPartial();
+      },
+      onStep: (step) => {
+        progress.push({
+          name: step.name,
+          ok: step.ok,
+          path: step.path,
+          error: step.error,
+          at: Date.now(),
+        });
+        // 开始调工具了，说明这一轮的「说话」部分告一段落：立刻落一次
+        flushPartial(true);
+        // 进度写库失败不能影响主流程，吞掉
+        updateProgress(taskId, step.step, progress).catch(() => {});
+      },
+    });
+
+    // 记一个版本（状态点）。语义是「改完之后的样子」，所以必须在循环结束后记。
+    // 被用户中断时也要记 —— 中断前已经改的文件必须能回滚/能再看到。
+    const changed = result.toolCalls.filter((t) => t.ok).length;
+    let saved = null;
+    if (changed > 0) {
+      saved = await commitVersion({
+        siteId: site.id,
+        threadId,
+        label: result.abortedByUser
+          ? `已停止 · 改了 ${changed} 处`
+          : `${cfg.label} · 改了 ${changed} 处`,
+      }).catch(() => null);
+    }
+
+    const replyText = result.text;
+
+    const reply = await addSiteMessage(site.id, 'agent', replyText, threadId);
+
+    if (result.abortedByUser) {
+      await cancelTask(taskId, { text: replyText, steps: progress });
+    } else {
+      await finishTask(taskId, { text: replyText, steps: progress, usage: result.usage });
+    }
+
+    // 版本没存成（超上限）时，得让用户知道「这次改没有版本可回退」，
+    // 同时把当前状态标成「已修改」，界面上不会假装它还等于某个版本。
+    if (saved && saved.skipped) {
+      await markDirty(site.id).catch(() => {});
+      await addSiteMessage(
+        site.id,
+        'agent',
+        `提醒：这次改动${saved.reason}，所以没能存成一个版本，这次改动回退不了。`,
+        threadId,
+      );
+    }
+
+    return { reply, saved };
+  } catch (err) {
+    const message = err instanceof LlmError
+      ? `${err.message}${err.detail ? `（${String(err.detail).slice(0, 120)}）` : ''}`
+      : (err?.message || '生成失败了');
+
+    console.error('[agent-task]', taskId, err?.code ?? '', message);
+
+    // 失败也要给用户一句人话，否则前端只能显示「失败」
+    await addSiteMessage(
+      site.id,
+      'agent',
+      `这边出了点问题：${message}。可以再试一次，或者换个说法。`,
+      threadId,
+    ).catch(() => {});
+    await failTask(taskId, message, progress).catch(() => {});
+  } finally {
+    // 不管什么结局都要摘掉取消句柄，否则 Map 会一直涨
+    unregisterRunningTask(taskId);
+  }
+}
+
+/**
+ * POST /api/agent/tasks/:id/cancel：停止一轮正在跑的 agent。
+ *
+ * 只置取消信号，不直接改数据库状态 —— 真正的收尾（存快照、写回复、标状态）
+ * 由 runAgentTask 在循环跳出后完成，那样才能保证「已改的文件有快照」。
+ */
+async function handleAgentTaskCancel(req, res, [taskId]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const row = await findTask(taskId);
+  if (!row) {
+    sendJson(res, 404, { ok: false, message: '没有这个任务（可能已经过期）' });
+    return;
+  }
+  if (row.user_id !== user.id && !user.isAdmin) {
+    sendJson(res, 403, { ok: false, message: '不能操作别人的任务' });
+    return;
+  }
+
+  if (row.status !== 'queued' && row.status !== 'running') {
+    sendJson(res, 409, {
+      ok: false,
+      message: '这个任务已经结束了',
+      status: row.status,
+    });
+    return;
+  }
+
+  const outcome = cancelRunningTask(taskId);
+  if (outcome === 'not-running') {
+    // 任务在库里是 running，但内存里没有句柄：通常是进程重启后的残留。
+    // 直接标成已取消，免得前端一直轮询。
+    await cancelTask(taskId, { text: '这个任务已经中断了' }).catch(() => {});
+    sendJson(res, 200, { ok: true, status: 'cancelled', note: '任务已中断' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, status: 'cancelling' });
 }
 
 // ---------------------------------------------------------------- 会话（thread）
@@ -1790,13 +2161,15 @@ async function handleThreadCreate(req, res, [username, name]) {
   if (!body) return;
 
   const title = String(body.title ?? '').trim().slice(0, 120);
-  const model = String(body.model ?? '').trim().slice(0, 40);
-  const thread = await createThread(site.id, { title, model });
+  // 模型 id 归一化：老前端可能传 'fast' 这类别名，统一存成真实 id
+  const model = canonicalModelId(String(body.model ?? '').trim()) ?? '';
+  const mode = canonicalMode(String(body.mode ?? '').trim());
+  const thread = await createThread(site.id, { title, model, mode });
 
   sendJson(res, 201, { ok: true, thread });
 }
 
-/** PUT /api/sites/:u/:n/threads/:id：改标题 / 换模型。 */
+/** PUT /api/sites/:u/:n/threads/:id：改标题 / 换模型 / 换模式。 */
 async function handleThreadUpdate(req, res, [username, name, id]) {
   const user = await requireLogin(req, res);
   if (!user) return;
@@ -1819,10 +2192,57 @@ async function handleThreadUpdate(req, res, [username, name, id]) {
     }
     patch.title = title;
   }
-  if (body.model !== undefined) patch.model = String(body.model).trim().slice(0, 40);
+  if (body.model !== undefined) {
+    const model = canonicalModelId(String(body.model).trim());
+    if (!model) {
+      sendJson(res, 400, { ok: false, message: '没有这个模型' });
+      return;
+    }
+    patch.model = model;
+  }
+  if (body.mode !== undefined) {
+    const raw = String(body.mode).trim();
+    if (!MODES[raw]) {
+      sendJson(res, 400, { ok: false, message: '模式只能是 chat 或 code' });
+      return;
+    }
+    patch.mode = raw;
+  }
 
   await updateThread(thread.id, patch);
   sendJson(res, 200, { ok: true, thread: await findThread(site.id, thread.id) });
+}
+
+/**
+ * POST /api/sites/:u/:n/threads/:id/compact：手动重新压缩这个会话。
+ *
+ * 自动压缩是在每轮对话开始时按水位线触发的；这个接口给用户一个「立即整理」的按钮，
+ * 也可以用来在我调完 prompt 之后重新生成摘要。
+ */
+async function handleThreadCompact(req, res, [username, name, id]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const thread = await threadOrRespond(res, site, id);
+  if (!thread) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  // reset=true 表示先清掉旧摘要重新压（用户觉得摘要不准时用）
+  if (body.reset === true) await clearThreadSummary(thread.id);
+
+  try {
+    const rows = await listThreadMessages(thread.id, SITE_MESSAGES_KEEP);
+    const result = await compactThread({ threadId: thread.id, rows });
+    sendJson(res, 200, { ok: true, ...result });
+  } catch (err) {
+    console.error('[compact-manual]', err);
+    sendJson(res, 500, { ok: false, message: err.message || '压缩失败' });
+  }
 }
 
 /** DELETE /api/sites/:u/:n/threads/:id：删会话，消息跟着级联删。 */
@@ -1851,52 +2271,160 @@ async function handleThreadMessages(req, res, [username, name, id]) {
   const thread = await threadOrRespond(res, site, id);
   if (!thread) return;
 
+  const messages = await listThreadMessages(thread.id, SITE_MESSAGES_KEEP);
+
+  // 把 attach_ids 拆成数组并补上图片元信息（不含字节，前端按 id 单独取图）。
+  // 一次批量查，避免每条消息一个查询。
+  const allIds = [...new Set(
+    messages.flatMap((m) => String(m.attach_ids || '').split(',').filter(Boolean).map(Number)),
+  )];
+  const metas = allIds.length ? await listAttachmentMeta(site.id, allIds) : [];
+  const metaById = new Map(metas.map((m) => [Number(m.id), m]));
+
   sendJson(res, 200, {
     ok: true,
     thread,
-    messages: await listThreadMessages(thread.id, SITE_MESSAGES_KEEP),
+    messages: messages.map((m) => {
+      const ids = String(m.attach_ids || '').split(',').filter(Boolean).map(Number);
+      return {
+        ...m,
+        attachIds: ids,
+        attachments: ids.map((id) => metaById.get(id)).filter(Boolean),
+      };
+    }),
   });
 }
 
-// ---------------------------------------------------------------- 快照与回滚
-
-/** GET /api/sites/:u/:n/snapshots：改动历史（新的在前，不含文件内容）。 */
-async function handleSnapshotsList(req, res, [username, name]) {
+/**
+ * POST /api/sites/:u/:n/attachments?threadId=
+ * 上传一张图（原始二进制），返回 attachment id。
+ *
+ * 用原始字节而不是 multipart：前端用 File.arrayBuffer() 直接发，
+ * 不需要引 multipart 解析库（本项目零依赖）。
+ */
+async function handleAttachmentUpload(req, res, [username, name]) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
   const site = await ownDraftOrRespond(req, res, user, username, name);
   if (!site) return;
 
-  sendJson(res, 200, { ok: true, snapshots: await listSnapshots(site.id) });
-}
+  const threadIdRaw = new URL(req.url, 'http://internal').searchParams.get('threadId');
+  let threadId = null;
+  if (threadIdRaw) {
+    const thread = await findThread(site.id, Number(threadIdRaw));
+    if (!thread) {
+      sendJson(res, 404, { ok: false, message: '这个会话不存在' });
+      return;
+    }
+    threadId = thread.id;
+  }
 
-/** POST /api/sites/:u/:n/snapshots/:id/restore：回滚到某个快照。 */
-async function handleSnapshotRestore(req, res, [username, name, id]) {
-  const user = await requireLogin(req, res);
-  if (!user) return;
-
-  const site = await ownDraftOrRespond(req, res, user, username, name);
-  if (!site) return;
-
-  const snap = await getSnapshot(site.id, Number(id));
-  if (!snap) {
-    sendJson(res, 404, { ok: false, message: '没有这个快照' });
+  // 图片比文本大，单独放宽上限（单张 20 MB，见 lib/config.js）。
+  // 前端会先归一化到长边 2048（约 300 KB）再传，所以走不到这个上限；
+  // 放宽到 20 MB 是为了「用户从手机直接拖原图」时不至于被一句 4 MB 挡在门外。
+  const bytes = await readFileBody(req, res, MAX_ATTACHMENT_BYTES);
+  if (!bytes) return;
+  if (!bytes.length) {
+    sendJson(res, 400, { ok: false, message: '图片是空的' });
     return;
   }
 
   try {
-    // 回滚前先把「即将被覆盖的当前状态」也存一份，点错了还能再退回来
-    const safety = await snapshotBeforeRestore(site.id, snap.threadId, snap);
-    const result = await restoreSnapshot(site.id, snap.id);
-    sendJson(res, 200, {
-      ok: true,
-      ...result,
-      safetySnapshotId: safety && safety.id ? safety.id : null,
+    const saved = await saveAttachment({
+      siteId: site.id,
+      threadId,
+      userId: user.id,
+      bytes,
     });
+    sendJson(res, 201, { ok: true, attachment: saved });
   } catch (err) {
-    console.error('[snapshot-restore]', err);
-    sendJson(res, 500, { ok: false, message: err.message || '回滚失败' });
+    if (err.code === 'BAD_IMAGE' || err.code === 'IMAGE_TOO_LARGE'
+        || err.code === 'IMAGE_TOO_MANY_PIXELS') {
+      sendJson(res, 400, { ok: false, message: err.message, code: err.code });
+      return;
+    }
+    if (err.code === 'ATTACH_QUOTA_EXCEEDED') {
+      sendJson(res, 413, {
+        ok: false,
+        message: err.message,
+        code: err.code,
+        used: err.used,
+        limit: err.limit,
+      });
+      return;
+    }
+    throw err;
+  }
+}
+
+/** GET /api/sites/:u/:n/attachments/:id：取图片本体（前端 <img src> 用）。 */
+async function handleAttachmentGet(req, res, [username, name, id]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const row = await getAttachment(site.id, Number(id));
+  if (!row) {
+    sendJson(res, 404, { ok: false, message: '没有这张图' });
+    return;
+  }
+
+  const buf = Buffer.from(row.bytes);
+  res.writeHead(200, {
+    'Content-Type': row.mime,
+    'Content-Length': buf.length,
+    // 图片是不可变的（id 唯一），可以长缓存
+    'Cache-Control': 'private, max-age=86400, immutable',
+    'X-Content-Type-Options': 'nosniff',
+    // 用户的图，别让 CDN / 代理缓存
+    'Content-Disposition': 'inline',
+  });
+  res.end(buf);
+}
+
+// ---------------------------------------------------------------- 版本与回滚
+
+/**
+ * GET /api/sites/:u/:n/versions：版本列表 + 当前指针。
+ * 返回 { current: {seq, dirty}, versions: [{seq, label, kind, size, createdAt}] }
+ */
+async function handleVersionsList(req, res, [username, name]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const { current, versions } = await listVersions(site.id);
+  sendJson(res, 200, { ok: true, current, versions });
+}
+
+/**
+ * POST /api/sites/:u/:n/versions/:seq/restore：把文件恢复到某一版。
+ *
+ * 语义（用户确认过）：回滚**不产生新编号**，只是把当前指针指回去。
+ * 列表里 1/2/3/4 原样保留，当前版本栏变成 2。
+ */
+async function handleVersionRestore(req, res, [username, name, seq]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  try {
+    const result = await restoreVersion(site.id, Number(seq));
+    sendJson(res, 200, { ok: true, ...result });
+  } catch (err) {
+    if (err.code === 'NOT_FOUND') {
+      sendJson(res, 404, { ok: false, message: '没有这个版本' });
+      return;
+    }
+    console.error('[version-restore]', err);
+    sendJson(res, 500, { ok: false, message: err.message || '恢复失败' });
   }
 }
 
@@ -1960,10 +2488,13 @@ function sendZip(res, filename, buf) {
 
 // ---------------------------------------------------------------- 工具集（给前端/调试用）
 
-/** GET /api/agent/tools：agent 能用哪些工具。不接模型也能先看到清单。 */
+/** GET /api/agent/tools：agent 能用哪些工具 + 可用模型清单。 */
 async function handleAgentTools(req, res) {
   const user = await requireLogin(req, res);
   if (!user) return;
+
+  const defaultModel = await pickUsableModel(AGENT_DEFAULT_MODEL);
+  const models = await publicModelList(defaultModel);
 
   sendJson(res, 200, {
     ok: true,
@@ -1971,7 +2502,33 @@ async function handleAgentTools(req, res) {
     // 接入模型时直接把这个塞进请求体的 tools 字段
     schemas: toolSchemas(),
     names: AGENT_TOOL_NAMES,
+    // 模型清单只给 id / 名字 / 能力，**绝不带 key 和 baseURL**
+    models,
+    defaultModel,
+    // 模式清单：chat（只回答） / code（能改文件）
+    modes: publicModeList(),
+    // 一个都没有说明还没配 key，前端据此把输入框改成「未接模型」状态
+    ready: Boolean(defaultModel),
   });
+}
+
+/** GET /api/agent/tasks/:id：轮询一轮 agent 的进度和结果。 */
+async function handleAgentTask(req, res, [taskId]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const row = await findTask(taskId);
+  if (!row) {
+    sendJson(res, 404, { ok: false, message: '没有这个任务（可能已经过期）' });
+    return;
+  }
+  // 只能看自己的任务
+  if (row.user_id !== user.id && !user.isAdmin) {
+    sendJson(res, 403, { ok: false, message: '不能看别人的任务' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, task: publicTask(row) });
 }
 
 /**
@@ -2004,19 +2561,20 @@ async function handleAgentToolRun(req, res, [username, name]) {
 
   const threadId = body.threadId ? Number(body.threadId) : null;
   const thread = threadId ? await findThread(site.id, threadId) : null;
-  const snapshot = createSnapshotCollector({ siteId: site.id, threadId: thread ? thread.id : null });
 
   try {
     const result = await runAgentTool(toolName, args, {
       siteId: site.id,
       userId: user.id,
-      snapshot,
     });
-    const saved = await snapshot.commit(`手动执行 ${toolName}`);
-    sendJson(res, 200, { ok: true, tool: toolName, result, snapshot: saved });
+    // 手工执行工具也是「一次改动」：记一个版本，历史里能看到
+    const version = await commitVersion({
+      siteId: site.id,
+      threadId: thread ? thread.id : null,
+      label: `手动执行 ${toolName}`,
+    }).catch(() => null);
+    sendJson(res, 200, { ok: true, tool: toolName, result, version });
   } catch (err) {
-    // 失败也要落快照：前面可能已经成功写了别的文件
-    await snapshot.commit(`手动执行 ${toolName}（失败）`).catch(() => {});
     if (err instanceof AgentToolError) {
       sendJson(res, 400, { ok: false, message: err.message });
       return;
@@ -3201,6 +3759,78 @@ async function pickEntryPath(siteId) {
   return best ? best.path : 'index.html';
 }
 
+/**
+ * 版本预览：把「第 N 版」当作一个静态站来服务。
+ *
+ * 路径形如 /<前缀>/<用户名>/<站名>/@<seq>/<文件>。
+ * 用路径段而不是查询参数，是因为站内相对链接会自动继承 @<seq> 前缀 ——
+ * 否则预览第 2 版时，里面的 css/style.css 仍会取到最新版，样式对不上。
+ *
+ * 只对作者开放（草稿更是如此），其余一律 404。
+ */
+async function serveVersionFile(req, res, site, seq, rest, isDraft) {
+  if ((await isSiteOwner(req, site)) === false) {
+    sendHtml(res, 404, messagePage('404', '没有找到这个页面。'));
+    return;
+  }
+  // 已下线的站连作者也不给看版本预览
+  if (site.status !== 'active' && !isDraft) {
+    sendHtml(res, 451, messagePage('已下线', '这个页面已被管理员下线。'));
+    return;
+  }
+
+  const isRoot = !rest || rest === '/';
+  const rel = isRoot ? '' : rest.slice(1).replace(/^\/+/, '');
+
+  let files;
+  try {
+    files = await resolveVersion(site.id, seq);
+  } catch {
+    sendHtml(res, 404, messagePage('404', `没有第 ${seq} 版这个版本。`));
+    return;
+  }
+
+  // 根路径要落位到那一版的入口页（和实时预览同一套规则）
+  if (isRoot) {
+    const entry = pickEntryFromList([...files.keys()]);
+    if (entry !== 'index.html' || !files.has(entry)) {
+      // 入口在子目录时跳过去，保持相对路径正确
+      sendRedirect(res, `/@${seq}/${entry}`);
+      return;
+    }
+    const body = files.get('index.html');
+    serveSiteFile(req, res, 'index.html', body);
+    return;
+  }
+
+  const body = files.get(rel);
+  if (!body) {
+    sendHtml(res, 404, messagePage('404', `第 ${seq} 版里没有这个文件：${rel}`));
+    return;
+  }
+  serveSiteFile(req, res, rel, body);
+}
+
+/**
+ * 入口页挑选（只在给定文件列表上算，不查库）。
+ * 规则和 pickEntryPath 一致：index.html → index.htm → default.html → 最浅的 html。
+ */
+function pickEntryFromList(paths) {
+  const lower = new Map(paths.map((p) => [p.toLowerCase(), p]));
+  for (const name of ['index.html', 'index.htm', 'default.html']) {
+    if (lower.has(name)) return lower.get(name);
+  }
+  let best = null;
+  for (const p of paths) {
+    if (!/\.html?$/i.test(p)) continue;
+    const depth = p.split('/').length;
+    if (!best || depth < best.depth || (depth === best.depth && p < best.path)) {
+      best = { path: p, depth };
+    }
+  }
+  return best ? best.path : 'index.html';
+}
+
 async function handleSite(req, res, [username, name, rest = '']) {
   const site = await findSiteHeaderByUsername(username, name);
 
@@ -3209,6 +3839,15 @@ async function handleSite(req, res, [username, name, rest = '']) {
     return;
   }
   const isDraft = site.status === 'draft';
+
+  // 版本预览：/qwq/<用户名>/<站名>/@<seq>/... 用路径而不是 ?v=N，
+  // 这样站内的相对链接（css/style.css、../about.html）会自然带上 @<seq> 前缀，
+  // 预览任意一版时它的样式和图片也都能正确取到。
+  const versionMatch = /^\/@(\d+)(\/.*)?$/.exec(rest);
+  if (versionMatch) {
+    await serveVersionFile(req, res, site, Number(versionMatch[1]), versionMatch[2] || '/', isDraft);
+    return;
+  }
 
   if (site.status !== 'active') {
     // 451 只留给被管理员下线的站；草稿对外「根本不存在」
@@ -3355,16 +3994,21 @@ const ROUTES = [
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads$`), handleThreadsList],
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads$`), handleThreadCreate],
   ['PUT', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)$`), handleThreadUpdate],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)\\/compact$`), handleThreadCompact],
   ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)$`), handleThreadDelete],
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)\\/messages$`), handleThreadMessages],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/attachments$`), handleAttachmentUpload],
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/attachments\\/(\\d+)$`), handleAttachmentGet],
   // 改动快照与回滚
-  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/snapshots$`), handleSnapshotsList],
-  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/snapshots\\/(\\d+)\\/restore$`), handleSnapshotRestore],
+  ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/versions$`), handleVersionsList],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/versions\\/(\\d+)\\/restore$`), handleVersionRestore],
   // 整站导出
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/export$`), handleSiteExport],
   // agent 工具集：接模型之前也能手动验证工具是否好用
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/agent\\/tool$`), handleAgentToolRun],
   ['GET', /^\/api\/agent\/tools$/, handleAgentTools],
+  ['GET', /^\/api\/agent\/tasks\/([A-Za-z0-9]+)$/, handleAgentTask],
+  ['POST', /^\/api\/agent\/tasks\/([A-Za-z0-9]+)\/cancel$/, handleAgentTaskCancel],
   // 卡片自定义封面：GET 公开（卡片匿名可见），PUT/DELETE 走「作者或管理员」
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverImage],
   ['PUT', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/cover$`), handleSiteCoverUpload],
@@ -3537,6 +4181,25 @@ server.listen(PORT, HOST, async () => {
       pruneDraftSites(DRAFT_TTL_HOURS)
         .catch((err) => console.error('[draft] 清理上传草稿失败：', err?.message ?? err));
     }, 24 * 3600_000).unref();
+
+    // agent 任务：上次进程被杀时残留的「跑着」任务要标成失败，
+    // 否则前端轮询会一直转圈等一个永远不会结束的任务
+    const reaped = await reapStaleTasks();
+    if (reaped > 0) console.log(`回收了 ${reaped} 个中断的 agent 任务`);
+    const prunedTasks = await pruneTasks();
+    if (prunedTasks > 0) console.log(`清理了 ${prunedTasks} 条过期 agent 任务`);
+    setInterval(() => {
+      pruneTasks().catch((err) => console.error('[agent] 清理任务失败：', err?.message ?? err));
+    }, 6 * 3600_000).unref();
+
+    // 启动时把模型可用情况打出来，部署后一眼就能看出 key 配没配、本机模型起没起
+    const defaultModel = await pickUsableModel(AGENT_DEFAULT_MODEL);
+    if (defaultModel) {
+      const cfg = resolveModel(defaultModel);
+      console.log(`agent 默认模型：${cfg.label}（${cfg.model}）`);
+    } else {
+      console.log('agent 未启用：没找到可用的模型，请配置 LLM_API_KEY 后重启');
+    }
 
     const created = await ensureAdminAccount();
 
