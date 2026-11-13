@@ -142,6 +142,11 @@ import {
 import { LlmError } from './lib/agent/llm.js';
 import { runAgent } from './lib/agent/loop.js';
 import {
+  clearThreadSummary,
+  compactThread,
+  getThreadSummary,
+} from './lib/agent/compact.js';
+import {
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_ATTACHMENT_BYTES,
   attachmentUsage,
@@ -1964,11 +1969,32 @@ async function runAgentTask({
   try {
     await markRunning(taskId);
 
-    // 这个会话的历史（不含刚写进去的这条用户消息，它由 userText 单独传）
+    // 这个会话的历史（不含刚写进去的这条用户消息，它由 userText 单独传）。
+    // 注意**不在这里 slice(-40)**：旧代码硬砍 40 条，把 480k 的窗口用成了 1.2 万 token。
+    // 真正该在哪一层裁，交给 buildHistory 按 token 预算算。
     const rows = await listThreadMessages(threadId, SITE_MESSAGES_KEEP);
-    const history = rows
-      .filter((m) => m.content !== userText || m.role !== 'user')
-      .slice(-40);
+    const history = rows.filter((m) => m.content !== userText || m.role !== 'user');
+
+    // 会话太长就先压一次（超出阈值才真的调模型，否则这行几乎零开销）
+    let summary = '';
+    try {
+      const compactResult = await compactThread({ threadId, rows: history });
+      if (compactResult.compacted) {
+        summary = compactResult.summary;
+        console.log(
+          `[compact] thread=${threadId} 压了 ${compactResult.compactedCount} 条，`
+          + `${compactResult.beforeTokens} → ${compactResult.summaryTokens} token`,
+        );
+      }
+    } catch (err) {
+      // 压缩失败不影响这一轮：buildHistory 还会按预算裁
+      console.error('[compact]', err?.message ?? err);
+    }
+    // 压缩后重新取一次摘要（compactThread 成功时已经写库了）
+    if (!summary) {
+      const st = await getThreadSummary(threadId);
+      summary = st.summary;
+    }
 
     const result = await runAgent({
       cfg,
@@ -1978,6 +2004,7 @@ async function runAgentTask({
       userText,
       mode,
       attachments,
+      summary,
       signal,
       // 流式：每段文字追加到缓冲并节流落库，前端轮询就能看到「正在生成」
       onDelta: (text) => {
@@ -2184,6 +2211,38 @@ async function handleThreadUpdate(req, res, [username, name, id]) {
 
   await updateThread(thread.id, patch);
   sendJson(res, 200, { ok: true, thread: await findThread(site.id, thread.id) });
+}
+
+/**
+ * POST /api/sites/:u/:n/threads/:id/compact：手动重新压缩这个会话。
+ *
+ * 自动压缩是在每轮对话开始时按水位线触发的；这个接口给用户一个「立即整理」的按钮，
+ * 也可以用来在我调完 prompt 之后重新生成摘要。
+ */
+async function handleThreadCompact(req, res, [username, name, id]) {
+  const user = await requireLogin(req, res);
+  if (!user) return;
+
+  const site = await ownDraftOrRespond(req, res, user, username, name);
+  if (!site) return;
+
+  const thread = await threadOrRespond(res, site, id);
+  if (!thread) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  // reset=true 表示先清掉旧摘要重新压（用户觉得摘要不准时用）
+  if (body.reset === true) await clearThreadSummary(thread.id);
+
+  try {
+    const rows = await listThreadMessages(thread.id, SITE_MESSAGES_KEEP);
+    const result = await compactThread({ threadId: thread.id, rows });
+    sendJson(res, 200, { ok: true, ...result });
+  } catch (err) {
+    console.error('[compact-manual]', err);
+    sendJson(res, 500, { ok: false, message: err.message || '压缩失败' });
+  }
 }
 
 /** DELETE /api/sites/:u/:n/threads/:id：删会话，消息跟着级联删。 */
@@ -3935,6 +3994,7 @@ const ROUTES = [
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads$`), handleThreadsList],
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads$`), handleThreadCreate],
   ['PUT', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)$`), handleThreadUpdate],
+  ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)\\/compact$`), handleThreadCompact],
   ['DELETE', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)$`), handleThreadDelete],
   ['GET', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/threads\\/(\\d+)\\/messages$`), handleThreadMessages],
   ['POST', new RegExp(`^\\/api\\/sites\\/([a-z0-9-]+)\\/([a-z0-9-]+)\\/attachments$`), handleAttachmentUpload],
