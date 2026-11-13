@@ -353,11 +353,36 @@ async function boot() {
   await loadThreads();
   await loadModels();
 
+  // 从 /new 带过来的偏好：把模型和模式套到当前会话上，再补发第一条消息
+  const prefsRaw = sessionStorage.getItem('mp:firstPrefs:' + NAME);
+  if (prefsRaw) {
+    sessionStorage.removeItem('mp:firstPrefs:' + NAME);
+    try {
+      const prefs = JSON.parse(prefsRaw);
+      const patch = {};
+      if (prefs.model) patch.model = prefs.model;
+      if (prefs.mode) patch.mode = prefs.mode;
+      if (Object.keys(patch).length) {
+        await patchThread(patch);
+        // loadThreads 已经跑过了，本地会话对象要同步一份，否则 UI 还是旧的
+        const t = THREADS.find((x) => x.id === threadId);
+        if (t) Object.assign(t, patch);
+        syncModelLabel();
+        syncChatTitle();
+      }
+    } catch { /* 偏好存坏了就当没有 */ }
+  }
+
   // 从 /new 带过来的第一条消息：草稿已经建好，这里补发一次
   const first = sessionStorage.getItem('mp:firstMessage:' + NAME);
-  if (first) {
+  const firstAttach = sessionStorage.getItem('mp:firstAttach:' + NAME);
+  if (first !== null || firstAttach) {
     sessionStorage.removeItem('mp:firstMessage:' + NAME);
-    sendMessage(first);
+    sessionStorage.removeItem('mp:firstAttach:' + NAME);
+    let attachIds = [];
+    try { attachIds = firstAttach ? JSON.parse(firstAttach) : []; } catch { attachIds = []; }
+    // 直接把附件 id 交给 sendMessage，不用再走一遍上传
+    sendMessage(first || '', attachIds);
   }
 }
 
@@ -445,151 +470,8 @@ async function patchThread(patch) {
 }
 
 /* ---------------------------------------------------------------- 上拉框（下拉面板） */
-
-// 当前打开的面板；同一时间只允许一个
-let openSheet = null;
-
-/** 关掉当前面板。 */
-function closeSheet() {
-  if (!openSheet) return;
-  openSheet.remove();
-  openSheet = null;
-  document.removeEventListener('click', onDocClick, true);
-  document.removeEventListener('keydown', onDocKey);
-  document.removeEventListener('scroll', onDocScroll, true);
-}
-
-function onDocClick(e) {
-  if (!openSheet) return;
-  if (openSheet.contains(e.target)) return;
-
-  // 点在「打开它的那个按钮」上时不要在这里关：
-  // 捕获阶段会比按钮自己的 click 先跑，这里关了、按钮那个处理器又会立刻重新打开，
-  // 结果就是「再点一次同一按钮关不掉」。toggle 交给按钮自己处理。
-  const holder = document.getElementById(openSheet.dataset.for);
-  if (holder && (holder === e.target || holder.contains(e.target))) return;
-
-  closeSheet();
-}
-function onDocKey(e) {
-  if (e.key === 'Escape') closeSheet();
-}
-
-// 面板刚滚过之后的短时间内，忽略页面滚动 —— 见下面 onDocScroll 的说明
-let sheetScrollGuardUntil = 0;
-
-/**
- * 页面滚动时收起面板（它用 fixed 定位，页面一滚就贴不住了）。
- *
- * 但**面板自己内部的滚动不算**：拖滑条、滚轮翻选项都会产生 scroll 事件，
- * 早先这里一律 closeSheet，结果「一滚鼠标就关掉」——这是必须区分开的。
- */
-function onDocScroll(e) {
-  if (!openSheet) return;
-  // 滚的是面板本身（拖内部滑条）：不关
-  if (e.target === openSheet || openSheet.contains(e.target)) return;
-  // 滚轮滚到面板边界后会「滚动链」到页面，这时 target 变成 document，
-  // 但用户其实是在操作面板 —— 用一个小时间窗兜住
-  if (Date.now() < sheetScrollGuardUntil) return;
-  closeSheet();
-}
-
-/**
- * 在某个按钮上方弹一个上拉面板（就是图 3 / 图 4 那种）。
- *
- * 为什么不用 `<select>`：原生 select 没法显示副标题、没法做主题样式；
- * 这里自己画一个 fixed 面板，行为对得上（点外面关、Esc 关、选中即关）。
- *
- * @param {HTMLElement} anchor 触发按钮
- * @param {object} opt
- *   items: [{ value, label, hint, active }]
- *   onPick(value)
- */
-function openListSheet(anchor, { items, onPick }) {
-  // 再点同一个按钮就是收起
-  if (openSheet && openSheet.dataset.for === anchor.id) {
-    closeSheet();
-    return;
-  }
-  closeSheet();
-
-  const sheet = document.createElement('div');
-  sheet.className = 'wsSheet';
-  sheet.dataset.for = anchor.id;
-  sheet.setAttribute('role', 'listbox');
-
-  items.forEach((item) => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'wsSheetItem' + (item.active ? ' on' : '');
-    btn.setAttribute('role', 'option');
-    btn.setAttribute('aria-selected', item.active ? 'true' : 'false');
-
-    const title = document.createElement('b');
-    title.textContent = item.label;
-    btn.appendChild(title);
-
-    if (item.hint) {
-      const hint = document.createElement('span');
-      hint.textContent = item.hint;
-      btn.appendChild(hint);
-    }
-
-    // 当前选中项右侧打勾
-    if (item.active) {
-      const tick = document.createElement('i');
-      tick.className = 'wsSheetTick';
-      tick.textContent = '✓';
-      btn.appendChild(tick);
-    }
-
-    btn.addEventListener('click', () => {
-      closeSheet();
-      onPick(item.value);
-    });
-    sheet.appendChild(btn);
-  });
-
-  document.body.appendChild(sheet);
-
-  // 贴着按钮**上方**弹出（底部输入区，往上翻才不会挡输入框）
-  const r = anchor.getBoundingClientRect();
-  const w = sheet.offsetWidth;
-  const h = sheet.offsetHeight;
-  let left = r.left;
-  if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
-  if (left < 8) left = 8;
-  let top = r.top - h - 6;
-  if (top < 8) top = r.bottom + 6;   // 上面放不下就翻到下面
-  sheet.style.left = Math.round(left) + 'px';
-  sheet.style.top = Math.round(top) + 'px';
-
-  openSheet = sheet;
-
-  // 面板内部滚动（拖滑条 / 滚轮翻选项）时，刷新时间窗，
-  // 让随后可能发生的「滚动链到页面」不被当成「用户滚了页面」
-  sheet.addEventListener('scroll', () => {
-    sheetScrollGuardUntil = Date.now() + 260;
-  }, { passive: true });
-
-  // 滚轮在面板里滚动时，如果面板已经到头了，浏览器会把滚动传给页面（滚动链）。
-  // 这里直接拦掉：面板开着的时候，滚轮只在面板内部生效，不带动背景页面。
-  sheet.addEventListener('wheel', (e) => {
-    const atTop = sheet.scrollTop <= 0;
-    const atBottom = sheet.scrollTop + sheet.clientHeight >= sheet.scrollHeight - 1;
-    const scrollingUp = e.deltaY < 0;
-    // 还能滚就让它自己滚；滚到头了也别传给页面，否则面板会被关掉
-    if ((scrollingUp && atTop) || (!scrollingUp && atBottom)) e.preventDefault();
-    sheetScrollGuardUntil = Date.now() + 260;
-  }, { passive: false });
-
-  // 用捕获阶段：按钮自己的 click 先跑完再判断，避免刚开就被关掉
-  setTimeout(() => {
-    document.addEventListener('click', onDocClick, true);
-    document.addEventListener('keydown', onDocKey);
-    document.addEventListener('scroll', onDocScroll, true);
-  }, 0);
-}
+// 面板实现放在 studio.js（MP.openListSheet）—— 新建对话页也要用同一份，
+// 两处各写一遍必然走样。这里只负责「点哪个按钮弹什么内容」。
 
 // 模型框：只列真正可用的（有 key + 支持工具）
 modelPick.addEventListener('click', (e) => {
@@ -603,11 +485,12 @@ modelPick.addEventListener('click', (e) => {
   }
   const cur = currentModelId();
 
-  openListSheet(modelPick, {
+  MP.openListSheet(modelPick, {
     items: usable.map((m) => ({
       value: m.id,
       label: m.label,
       hint: m.hint,
+      tags: m.supportsVision ? ['能看图'] : [],
       active: m.id === cur,
     })),
     onPick: async (id) => {
@@ -626,7 +509,7 @@ modePick.addEventListener('click', (e) => {
   e.stopPropagation();
   const cur = currentMode();
 
-  openListSheet(modePick, {
+  MP.openListSheet(modePick, {
     items: MODES.map((m) => ({
       value: m.id,
       label: m.label,
@@ -645,9 +528,8 @@ modePick.addEventListener('click', (e) => {
 });
 
 // 滚动 / 改窗口大小时面板位置就失效了，直接收起。
-// 注意：滚动监听是在 openListSheet 里按需注册的（要区分「滚面板」和「滚页面」），
-// 这里只留窗口尺寸变化。
-window.addEventListener('resize', closeSheet);
+// 注意：滚动监听是在 MP.openListSheet 里按需注册的
+//（要区分「滚面板」和「滚页面」），studio.js 里也挂了 resize。
 
 /* ---------------------------------------------------------------- 会话列表 */
 
@@ -910,12 +792,19 @@ async function loadMessages() {
 // 早先把它写在函数里，外面读不到直接抛 ReferenceError，点发送毫无反应。
 let activeCancel = null;
 
-async function sendMessage(text) {
+/**
+ * 发一条消息。
+ * @param {string|null} text  文字；null 表示取输入框里的内容
+ * @param {number[]} [extraAttachIds] 额外的附件 id（/new 带过来的图，
+ *        已经在建草稿时传好了，这里直接复用，不再上传一遍）
+ */
+async function sendMessage(text, extraAttachIds) {
   if (sending) return;
   const content = String(text == null ? input.value : text).trim();
   // 只有图没有文字也算合法：「照这个图改」经常懒得打字
   const readyImages = PENDING_IMAGES.filter((img) => img.id);
-  if (!content && !readyImages.length) return;
+  const preset = Array.isArray(extraAttachIds) ? extraAttachIds : [];
+  if (!content && !readyImages.length && !preset.length) return;
   if (!threadId) {
     MP.toast('先建一个会话');
     return;
@@ -932,7 +821,7 @@ async function sendMessage(text) {
   MP.autoGrow(input)();
 
   // 发送前把图片 id 抓下来：发完要清空待发送区
-  const attachIds = readyImages.map((img) => img.id);
+  const attachIds = [...preset, ...readyImages.map((img) => img.id)];
 
   // 跑的过程中发送按钮变成「停止」：同一个按钮两种状态，
   // 用户不用去找另一个停的地方（这也是 ChatGPT / Cursor 的做法）

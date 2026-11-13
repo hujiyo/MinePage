@@ -2365,6 +2365,15 @@ code.token {
   transition: border-color .15s, box-shadow .15s;
 }
 .newBox:focus-within { border-color: #cfd3d8; box-shadow: 0 4px 18px rgba(0, 0, 0, .07); }
+/* 拖文件到输入框：和高亮边框一致 */
+.newBox.dragOver { border-color: var(--pink); box-shadow: 0 0 0 2px var(--pink-soft); }
+/* 图片条在新建页里贴着输入框顶部，去掉自己的工作区边框 */
+.newBox .wsAttachBar {
+  border-bottom: 1px solid var(--border);
+  margin: -14px -16px 6px;
+  padding: 10px 14px 8px;
+  border-radius: 13px 13px 0 0;
+}
 .newBox textarea {
   width: 100%;
   min-height: 76px;
@@ -2932,25 +2941,70 @@ body.dragging .wsFrame { pointer-events: none; }
   font-style: normal;
 }
 
-/* 选项列表弹窗（MP.pick，仍用于别处的单选场景） */
-.pickCard { width: 340px; padding-bottom: 14px; }
-.pickList { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
-.pickItem {
+/* 面板里的选项：名字一行（后面可跟小标签 / 勾），说明一行 */
+.pickRow {
   display: flex;
   flex-direction: column;
+  /* 全局 button 样式带 align-items:center，会把列方向的子元素也横向居中，
+     这里必须显式改回 stretch，否则文字全挤在中间 */
+  align-items: stretch;
   gap: 2px;
-  padding: 9px 12px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--panel2);
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
   text-align: left;
   cursor: pointer;
-  transition: border-color .15s, background .15s;
 }
-.pickItem:hover { border-color: var(--pink); background: var(--panel); }
-.pickItem.on { border-color: var(--pink); background: var(--panel); box-shadow: inset 0 0 0 1px var(--pink); }
-.pickItem b { font-size: 13px; font-weight: 600; color: var(--text); }
-.pickItem span { font-size: 11px; color: var(--muted); }
+.pickRow:hover { background: var(--panel2); }
+.pickRow.on { background: var(--panel2); }
+
+.pickHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  text-align: left;
+}
+.pickHead b {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.pickRow.on .pickHead b { color: var(--pink); }
+
+/* 小标签：浅灰底，压低视觉权重，不跟名字抢眼 */
+.pickTag {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  line-height: 15px;
+}
+
+/* 勾放在名字行最右边 */
+.pickTick {
+  margin-left: auto;
+  flex: none;
+  color: var(--pink);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.pickHint {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.45;
+  text-align: left;
+}
 
 /* ---------------------------------------------------------------- 图片附件 */
 

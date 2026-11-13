@@ -285,58 +285,6 @@
     });
   };
 
-  /**
-   * 选项列表小弹窗（单选）。用来做「选模型」这类有几个固定选项的场景。
-   * @param {{text:string, options:{value:string,label:string,hint?:string,active?:boolean}[]}} opt
-   * @returns {Promise<string|null>} 选中的 value；取消 / Esc / 点遮罩返回 null
-   */
-  MP.pick = function (opt) {
-    const o = opt || {};
-    return new Promise((resolve) => {
-      const mask = document.createElement('div');
-      mask.className = 'askMask';
-      const card = document.createElement('div');
-      card.className = 'askCard pickCard';
-      card.innerHTML = '<div class="askText"></div><div class="pickList"></div><div class="askBtns"></div>';
-      card.querySelector('.askText').textContent = o.text || '';
-
-      let settled = false;
-      const done = (value) => {
-        if (settled) return;
-        settled = true;
-        mask.remove();
-        document.removeEventListener('keydown', onKey);
-        resolve(value);
-      };
-      const onKey = (e) => { if (e.key === 'Escape') done(null); };
-
-      (o.options || []).forEach((item) => {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'pickItem' + (item.active ? ' on' : '');
-        btn.innerHTML = '<b></b><span></span>';
-        btn.querySelector('b').textContent = item.label;
-        const hint = btn.querySelector('span');
-        if (item.hint) hint.textContent = item.hint;
-        else hint.remove();
-        btn.addEventListener('click', () => done(item.value));
-        card.querySelector('.pickList').appendChild(btn);
-      });
-
-      const cancel = document.createElement('button');
-      cancel.type = 'button';
-      cancel.className = 'askBtn ghost';
-      cancel.textContent = '取消';
-      cancel.addEventListener('click', () => done(null));
-      card.querySelector('.askBtns').appendChild(cancel);
-
-      mask.appendChild(card);
-      mask.addEventListener('click', (e) => { if (e.target === mask) done(null); });
-      document.addEventListener('keydown', onKey);
-      document.body.appendChild(mask);
-    });
-  };
-
   /* ----------------------------------------------------------
      3. 发布弹窗
      ---------------------------------------------------------- */
@@ -657,6 +605,174 @@
     grow();
     return grow;
   };
+
+  /* ----------------------------------------------------------
+     4.5 上拉面板（模型 / 模式选择）
+     ----------------------------------------------------------
+     工作区和新建对话页都要用，所以放这里共用一份。
+     自己画而不用 <select>：原生 select 没法显示副标题、没法做主题样式。
+     ---------------------------------------------------------- */
+
+  // 当前打开的面板；同一时间只允许一个
+  let sheetEl = null;
+  // 面板刚滚过之后的短时间内，忽略页面滚动（防滚动链误关）
+  let sheetScrollGuardUntil = 0;
+
+  function sheetOnDocClick(e) {
+    if (!sheetEl) return;
+    if (sheetEl.contains(e.target)) return;
+
+    // 点在「打开它的那个按钮」上时不要在这里关：
+    // 捕获阶段会比按钮自己的 click 先跑，这里关了、按钮处理器又立刻重新打开，
+    // 结果就是「再点一次同一按钮关不掉」。toggle 交给按钮自己处理。
+    const holder = document.getElementById(sheetEl.dataset.for);
+    if (holder && (holder === e.target || holder.contains(e.target))) return;
+
+    MP.closeSheet();
+  }
+
+  function sheetOnDocKey(e) {
+    if (e.key === 'Escape') MP.closeSheet();
+  }
+
+  /**
+   * 页面滚动时收起面板（它用 fixed 定位，页面一滚就贴不住）。
+   * 但**面板自己内部的滚动不算**：拖滑条、滚轮翻选项都会产生 scroll 事件，
+   * 一律关闭的话就会「一滚鼠标菜单就消失」。
+   */
+  function sheetOnDocScroll(e) {
+    if (!sheetEl) return;
+    if (e.target === sheetEl || sheetEl.contains(e.target)) return;
+    if (Date.now() < sheetScrollGuardUntil) return;
+    MP.closeSheet();
+  }
+
+  /** 关掉当前上拉面板。 */
+  MP.closeSheet = function () {
+    if (!sheetEl) return;
+    sheetEl.remove();
+    sheetEl = null;
+    document.removeEventListener('click', sheetOnDocClick, true);
+    document.removeEventListener('keydown', sheetOnDocKey);
+    document.removeEventListener('scroll', sheetOnDocScroll, true);
+  };
+
+  /** 当前有没有面板开着（调试 / 测试用）。 */
+  MP.sheetOpen = function () {
+    return Boolean(sheetEl);
+  };
+
+  /**
+   * 在某个按钮上方弹一个上拉面板。
+   *
+   * @param {HTMLElement} anchor 触发按钮（id 用于 toggle 判断）
+   * @param {object} opt
+   *   items: [{ value, label, hint, active }]
+   *   onPick(value)
+   *   up: 是否强制往上弹（默认自动判断）
+   */
+  MP.openListSheet = function (anchor, { items, onPick, up }) {
+    // 再点同一个按钮就是收起
+    if (sheetEl && sheetEl.dataset.for === anchor.id) {
+      MP.closeSheet();
+      return;
+    }
+    MP.closeSheet();
+
+    const sheet = document.createElement('div');
+    sheet.className = 'wsSheet';
+    sheet.dataset.for = anchor.id;
+    sheet.setAttribute('role', 'listbox');
+
+    items.forEach((item) => {
+      const row = document.createElement('button');
+      row.type = 'button';
+
+      // 换成可换行的容器：名字一行、说明一行、短标签跟在名字后面
+      row.className = 'pickRow' + (item.active ? ' on' : '');
+      row.setAttribute('role', 'option');
+      row.setAttribute('aria-selected', item.active ? 'true' : 'false');
+
+      const head = document.createElement('span');
+      head.className = 'pickHead';
+
+      const title = document.createElement('b');
+      title.textContent = item.label;
+      head.appendChild(title);
+
+      // 标签（如「能看图」）：单独一个浅色小胶囊，不抢名字的视觉权重
+      (item.tags || []).forEach((text) => {
+        const tag = document.createElement('i');
+        tag.className = 'pickTag';
+        tag.textContent = text;
+        head.appendChild(tag);
+      });
+
+      if (item.active) {
+        const tick = document.createElement('em');
+        tick.className = 'pickTick';
+        tick.textContent = '✓';
+        head.appendChild(tick);
+      }
+      row.appendChild(head);
+
+      if (item.hint) {
+        const hint = document.createElement('span');
+        hint.className = 'pickHint';
+        hint.textContent = item.hint;
+        row.appendChild(hint);
+      }
+
+      row.addEventListener('click', () => {
+        MP.closeSheet();
+        onPick(item.value);
+      });
+      sheet.appendChild(row);
+    });
+
+    document.body.appendChild(sheet);
+
+    // 定位：优先往上弹（在底部输入区，往上翻才不会挡输入框）
+    const r = anchor.getBoundingClientRect();
+    const w = sheet.offsetWidth;
+    const h = sheet.offsetHeight;
+    let left = r.left;
+    if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+    if (left < 8) left = 8;
+    let top = r.top - h - 6;
+    const canUp = top >= 8;
+    if (up === false || !canUp) top = r.bottom + 6;   // 上面放不下就翻到下面
+    sheet.style.left = Math.round(left) + 'px';
+    sheet.style.top = Math.round(top) + 'px';
+    if (!canUp && up !== false) sheet.classList.add('below');
+
+    sheetEl = sheet;
+
+    // 面板内部滚动时刷新时间窗，让随后可能发生的「滚动链到页面」不被误判
+    sheet.addEventListener('scroll', () => {
+      sheetScrollGuardUntil = Date.now() + 260;
+    }, { passive: true });
+
+    // 滚轮滚到头时浏览器会把滚动传给页面（滚动链）。
+    // 面板开着的时候拦掉，既不让背景页面滚，也不会把面板关掉。
+    sheet.addEventListener('wheel', (e) => {
+      const atTop = sheet.scrollTop <= 0;
+      const atBottom = sheet.scrollTop + sheet.clientHeight >= sheet.scrollHeight - 1;
+      const scrollingUp = e.deltaY < 0;
+      if ((scrollingUp && atTop) || (!scrollingUp && atBottom)) e.preventDefault();
+      sheetScrollGuardUntil = Date.now() + 260;
+    }, { passive: false });
+
+    // 用捕获阶段：按钮自己的 click 先跑完再判断，避免刚开就被关掉
+    setTimeout(() => {
+      document.addEventListener('click', sheetOnDocClick, true);
+      document.addEventListener('keydown', sheetOnDocKey);
+      document.addEventListener('scroll', sheetOnDocScroll, true);
+    }, 0);
+  };
+
+  // 窗口尺寸变了，面板位置就失效了
+  window.addEventListener('resize', () => MP.closeSheet());
 
   /* ----------------------------------------------------------
      5. 发送一条消息：异步任务 + 轮询进度
