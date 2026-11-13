@@ -456,13 +456,42 @@ function closeSheet() {
   openSheet = null;
   document.removeEventListener('click', onDocClick, true);
   document.removeEventListener('keydown', onDocKey);
+  document.removeEventListener('scroll', onDocScroll, true);
 }
 
 function onDocClick(e) {
-  if (openSheet && !openSheet.contains(e.target)) closeSheet();
+  if (!openSheet) return;
+  if (openSheet.contains(e.target)) return;
+
+  // 点在「打开它的那个按钮」上时不要在这里关：
+  // 捕获阶段会比按钮自己的 click 先跑，这里关了、按钮那个处理器又会立刻重新打开，
+  // 结果就是「再点一次同一按钮关不掉」。toggle 交给按钮自己处理。
+  const holder = document.getElementById(openSheet.dataset.for);
+  if (holder && (holder === e.target || holder.contains(e.target))) return;
+
+  closeSheet();
 }
 function onDocKey(e) {
   if (e.key === 'Escape') closeSheet();
+}
+
+// 面板刚滚过之后的短时间内，忽略页面滚动 —— 见下面 onDocScroll 的说明
+let sheetScrollGuardUntil = 0;
+
+/**
+ * 页面滚动时收起面板（它用 fixed 定位，页面一滚就贴不住了）。
+ *
+ * 但**面板自己内部的滚动不算**：拖滑条、滚轮翻选项都会产生 scroll 事件，
+ * 早先这里一律 closeSheet，结果「一滚鼠标就关掉」——这是必须区分开的。
+ */
+function onDocScroll(e) {
+  if (!openSheet) return;
+  // 滚的是面板本身（拖内部滑条）：不关
+  if (e.target === openSheet || openSheet.contains(e.target)) return;
+  // 滚轮滚到面板边界后会「滚动链」到页面，这时 target 变成 document，
+  // 但用户其实是在操作面板 —— 用一个小时间窗兜住
+  if (Date.now() < sheetScrollGuardUntil) return;
+  closeSheet();
 }
 
 /**
@@ -536,10 +565,29 @@ function openListSheet(anchor, { items, onPick }) {
   sheet.style.top = Math.round(top) + 'px';
 
   openSheet = sheet;
+
+  // 面板内部滚动（拖滑条 / 滚轮翻选项）时，刷新时间窗，
+  // 让随后可能发生的「滚动链到页面」不被当成「用户滚了页面」
+  sheet.addEventListener('scroll', () => {
+    sheetScrollGuardUntil = Date.now() + 260;
+  }, { passive: true });
+
+  // 滚轮在面板里滚动时，如果面板已经到头了，浏览器会把滚动传给页面（滚动链）。
+  // 这里直接拦掉：面板开着的时候，滚轮只在面板内部生效，不带动背景页面。
+  sheet.addEventListener('wheel', (e) => {
+    const atTop = sheet.scrollTop <= 0;
+    const atBottom = sheet.scrollTop + sheet.clientHeight >= sheet.scrollHeight - 1;
+    const scrollingUp = e.deltaY < 0;
+    // 还能滚就让它自己滚；滚到头了也别传给页面，否则面板会被关掉
+    if ((scrollingUp && atTop) || (!scrollingUp && atBottom)) e.preventDefault();
+    sheetScrollGuardUntil = Date.now() + 260;
+  }, { passive: false });
+
   // 用捕获阶段：按钮自己的 click 先跑完再判断，避免刚开就被关掉
   setTimeout(() => {
     document.addEventListener('click', onDocClick, true);
     document.addEventListener('keydown', onDocKey);
+    document.addEventListener('scroll', onDocScroll, true);
   }, 0);
 }
 
@@ -596,8 +644,9 @@ modePick.addEventListener('click', (e) => {
   });
 });
 
-// 滚动 / 改窗口大小时面板位置就失效了，直接收起
-document.addEventListener('scroll', closeSheet, true);
+// 滚动 / 改窗口大小时面板位置就失效了，直接收起。
+// 注意：滚动监听是在 openListSheet 里按需注册的（要区分「滚面板」和「滚页面」），
+// 这里只留窗口尺寸变化。
 window.addEventListener('resize', closeSheet);
 
 /* ---------------------------------------------------------------- 会话列表 */
