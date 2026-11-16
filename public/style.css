@@ -949,6 +949,101 @@ section { margin-top: 32px; }
 .tableSearch input[type="search"]::-webkit-search-cancel-button { display: none; }
 .tableCount { color: var(--muted); font-size: 12px; }
 
+/* ------------------------------------------------------------
+   后台：模型配置
+   ------------------------------------------------------------ */
+
+/* 模型列表：每行一条，左边名字 + 能力标签，右边操作 */
+.modelRows { display: flex; flex-direction: column; gap: 8px; }
+.modelRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+/* 停用的整行压暗，但文字要能看清（否则看不出是什么模型） */
+.modelRow.off { opacity: .62; }
+.modelRowMain { flex: 1; min-width: 220px; }
+.modelRowName {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  font-size: 14px;
+  flex-wrap: wrap;
+}
+.modelRowName code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 400;
+}
+.modelRowMeta {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+.modelOps { display: flex; align-items: center; gap: 6px; flex: none; flex-wrap: wrap; }
+
+/* 能力小标签：能看图 / 会思考 / 不支持工具 */
+.modelTag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  color: var(--muted2);
+  background: var(--panel);
+  white-space: nowrap;
+}
+.modelTag.warn { border-color: #e8b4b4; color: var(--danger); }
+.modelTag.ok { border-color: #b7e0c4; color: #2e7d4f; }
+
+/* 表单：两列自适应，窄屏自动变一列 */
+.modelForm { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 16px; }
+.modelForm .field { margin: 0; }
+.modelForm .field.wide { grid-column: 1 / -1; }
+.modelForm input, .modelForm select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel2);
+  color: var(--text);
+  font-size: 13px;
+}
+.modelForm input:focus, .modelForm select:focus {
+  outline: none;
+  border-color: var(--pink);
+  background: var(--panel);
+}
+.modelForm .field .hint { display: block; margin-top: 4px; font-size: 11px; color: var(--muted); }
+.modelForm .checks { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; font-size: 13px; }
+.modelForm .checks label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.modelForm .checks input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--pink); cursor: pointer; }
+/* 保存按钮所在那一行 */
+.modelFormFoot { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* 密钥状态提示：没配 MODEL_SECRET 时那条警告 */
+.modelWarn {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid #f0d38a;
+  background: #fdf6e3;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #8a6d1f;
+}
+
 /* 后台：轮播位列表 */
 .bannerRows { display: flex; flex-direction: column; gap: 8px; }
 .bannerRow {

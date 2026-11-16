@@ -93,6 +93,85 @@
     <div id="sitesPager" class="pager" hidden></div>
   </section>
 
+  <section class="panel">
+    <h2>模型配置</h2>
+    <p class="muted" style="font-size:13px;margin:0 0 14px">
+      用户在工作区顶部的下拉框里能选到的，就是这里<b>已启用</b>的模型。
+      停用只会把它们从选择器里藏起来，历史会话不会被删。
+    </p>
+
+    <div id="modelWarn" class="modelWarn" hidden></div>
+    <div id="modelRows" class="modelRows"></div>
+
+    <h2 style="margin-top:22px">添加 / 编辑模型</h2>
+    <form id="modelForm" class="modelForm" novalidate>
+      <input type="hidden" id="mfEditing" value="">
+
+      <label class="field">
+        <span class="label">Provider ID</span>
+        <input id="mfId" type="text" maxlength="64" autocomplete="off" spellcheck="false"
+               placeholder="acme-gateway">
+        <span class="hint">小写字母开头，可用字母数字和 - . _；会话会记住它，编辑时不可改。</span>
+      </label>
+
+      <label class="field">
+        <span class="label">显示名称</span>
+        <input id="mfLabel" type="text" maxlength="80" autocomplete="off" placeholder="Acme Gateway">
+      </label>
+
+      <label class="field wide">
+        <span class="label">API 地址</span>
+        <input id="mfBaseURL" type="text" maxlength="500" autocomplete="off" spellcheck="false"
+               placeholder="https://gateway.example/v1">
+        <span class="hint">OpenAI 兼容协议要带上 /v1，末尾有没有斜杠都行。</span>
+      </label>
+
+      <label class="field">
+        <span class="label">API 协议</span>
+        <select id="mfApi"></select>
+      </label>
+
+      <label class="field">
+        <span class="label">实际模型 ID</span>
+        <input id="mfModel" type="text" maxlength="120" autocomplete="off" spellcheck="false"
+               placeholder="留空则与 Provider ID 相同">
+      </label>
+
+      <label class="field wide">
+        <span class="label">API 密钥</span>
+        <input id="mfKey" type="password" maxlength="200" autocomplete="new-password"
+               placeholder="输入 API 密钥">
+        <span class="hint" id="mfKeyHint">加密后入库，之后只能看到掩码。留空表示不修改（新建时则是不配）。</span>
+      </label>
+
+      <label class="field">
+        <span class="label">上下文窗口（token）</span>
+        <input id="mfContext" type="number" min="1000" max="2000000" step="1000" value="128000">
+      </label>
+
+      <label class="field">
+        <span class="label">输出上限（token）</span>
+        <input id="mfOutput" type="number" min="256" max="200000" step="256" value="8192">
+      </label>
+
+      <div class="field wide">
+        <div class="checks">
+          <label><input type="checkbox" id="mfTools" checked> 支持工具调用</label>
+          <label><input type="checkbox" id="mfVision" checked> 支持图片</label>
+          <label><input type="checkbox" id="mfReasoning"> 思考型模型</label>
+          <label><input type="checkbox" id="mfEnabled" checked> 启用</label>
+        </div>
+        <span class="hint">不支持工具调用的模型不能用来改页面（agent 靠工具读写文件）。</span>
+      </div>
+
+      <div class="modelFormFoot">
+        <button type="submit" id="mfSubmit">保存</button>
+        <button type="button" class="ghost" id="mfCancel" hidden>取消编辑</button>
+        <span class="muted" id="mfMsg" style="font-size:12px"></span>
+      </div>
+    </form>
+  </section>
+
   <div id="msg" class="result" hidden></div>
 </main>
 
@@ -104,6 +183,26 @@ const usersBody = document.getElementById('usersBody');
 const usersPager = document.getElementById('usersPager');
 const sitesBody = document.getElementById('sitesBody');
 const sitesPager = document.getElementById('sitesPager');
+const modelRows = document.getElementById('modelRows');
+const modelWarn = document.getElementById('modelWarn');
+const modelForm = document.getElementById('modelForm');
+const mfId = document.getElementById('mfId');
+const mfLabel = document.getElementById('mfLabel');
+const mfBaseURL = document.getElementById('mfBaseURL');
+const mfApi = document.getElementById('mfApi');
+const mfModel = document.getElementById('mfModel');
+const mfKey = document.getElementById('mfKey');
+const mfKeyHint = document.getElementById('mfKeyHint');
+const mfContext = document.getElementById('mfContext');
+const mfOutput = document.getElementById('mfOutput');
+const mfTools = document.getElementById('mfTools');
+const mfVision = document.getElementById('mfVision');
+const mfReasoning = document.getElementById('mfReasoning');
+const mfEnabled = document.getElementById('mfEnabled');
+const mfSubmit = document.getElementById('mfSubmit');
+const mfCancel = document.getElementById('mfCancel');
+const mfMsg = document.getElementById('mfMsg');
+const mfEditing = document.getElementById('mfEditing');
 const usersSearchForm = document.getElementById('usersSearchForm');
 const usersSearch = document.getElementById('usersSearch');
 const usersSearchClear = document.getElementById('usersSearchClear');
@@ -123,6 +222,11 @@ let usersPage = 1;
 let usersQuery = '';   // 用户表的搜索词（空 = 不搜）
 let sitesPage = 1;
 let sitesQuery = '';   // 页面表的搜索词（空 = 不搜）
+
+// 模型配置的状态
+let MODELS = [];              // 后台拿到的完整列表
+let CAN_ENCRYPT = false;      // 服务器有没有配 MODEL_SECRET
+let API_OPTIONS = [{ id: 'openai-completions', label: 'OpenAI Chat Completions' }];
 
 /** 造一个只放文本的单元格 `<td>`（className 可选）；返回的元素还没挂进表格，由调用方 append。 */
 function td(text, className) {
@@ -464,6 +568,258 @@ async function removeSite(site) {
   }
 }
 
+// ---------------------------------------------------------------- 模型配置
+
+/**
+ * 拉模型列表并重画。改完任何一个开关都调它。
+ * 返回值给 loadAll 用来算统计。
+ */
+async function reloadModels() {
+  try {
+    const data = await api('/api/admin/models');
+    MODELS = data.models || [];
+    CAN_ENCRYPT = Boolean(data.canEncrypt);
+    API_OPTIONS = data.apis && data.apis.length ? data.apis : API_OPTIONS;
+    renderApiOptions();
+    renderModels();
+    return data;
+  } catch (err) {
+    showMsg(false, err.message);
+    return null;
+  }
+}
+
+/** 协议下拉框只有一项也照常渲染，将来加协议不用改这里。 */
+function renderApiOptions() {
+  const cur = mfApi.value;
+  mfApi.textContent = '';
+  API_OPTIONS.forEach((a) => {
+    const opt = document.createElement('option');
+    opt.value = a.id;
+    opt.textContent = a.label;
+    mfApi.appendChild(opt);
+  });
+  if (cur && API_OPTIONS.some((a) => a.id === cur)) mfApi.value = cur;
+}
+
+/** 一个能力小标签。 */
+function modelTag(text, kind) {
+  const el = document.createElement('span');
+  el.className = 'modelTag' + (kind ? ' ' + kind : '');
+  el.textContent = text;
+  return el;
+}
+
+/** 画模型列表：一行一个，左边名字 + 元信息，右边一排操作。 */
+function renderModels() {
+  modelRows.textContent = '';
+
+  // 没配 MODEL_SECRET 时给一条醒目提示：不然后台点保存会莫名其妙失败
+  if (!CAN_ENCRYPT) {
+    modelWarn.hidden = false;
+    modelWarn.textContent = '服务器没有配置 MODEL_SECRET，无法加密保存 API Key。'
+      + '现在只能使用环境变量 LLM_API_KEY 兜底；要让后台能存 key，'
+      + '请在服务器环境变量里加一行 MODEL_SECRET=<一串随机字符> 再重启服务。';
+  } else {
+    modelWarn.hidden = true;
+  }
+
+  if (!MODELS.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = '还没有配置任何模型。在下面添加一个，用户才能在工作区里选到它。';
+    modelRows.appendChild(empty);
+    return;
+  }
+
+  MODELS.forEach((m) => {
+    const row = document.createElement('div');
+    row.className = 'modelRow' + (m.enabled ? '' : ' off');
+
+    const main = document.createElement('div');
+    main.className = 'modelRowMain';
+
+    const nameLine = document.createElement('div');
+    nameLine.className = 'modelRowName';
+    const strong = document.createElement('span');
+    strong.textContent = m.label || m.id;
+    nameLine.appendChild(strong);
+    const code = document.createElement('code');
+    code.textContent = m.id;
+    nameLine.appendChild(code);
+    if (m.isDefault) nameLine.appendChild(modelTag('默认', 'ok'));
+    if (m.isCompact) nameLine.appendChild(modelTag('压缩'));
+    if (!m.enabled) nameLine.appendChild(modelTag('已停用'));
+    main.appendChild(nameLine);
+
+    const meta = document.createElement('div');
+    meta.className = 'modelRowMeta';
+    if (m.provider) meta.appendChild(document.createTextNode(m.provider));
+    meta.appendChild(modelTag(m.supportsTools ? '支持工具' : '不支持工具', m.supportsTools ? '' : 'warn'));
+    if (m.supportsVision) meta.appendChild(modelTag('看图'));
+    if (m.reasoning) meta.appendChild(modelTag('思考型'));
+    // key 状态：三种情况分开说，管理员一眼知道该不该去补
+    if (m.keyBroken) meta.appendChild(modelTag('密钥解不开（换过 MODEL_SECRET？）', 'warn'));
+    else if (!m.hasKey) meta.appendChild(modelTag('缺 API Key', 'warn'));
+    else meta.appendChild(modelTag('Key ' + m.keyMask));
+    if (m.threadCount > 0) meta.appendChild(modelTag(m.threadCount + ' 个会话在用'));
+    main.appendChild(meta);
+
+    row.appendChild(main);
+
+    const ops = document.createElement('div');
+    ops.className = 'modelOps';
+
+    ops.appendChild(tinyButton('编辑', 'ghost', () => startEdit(m)));
+    ops.appendChild(tinyButton(m.enabled ? '停用' : '启用', 'ghost', () => toggleModel(m)));
+    if (!m.isDefault) ops.appendChild(tinyButton('设为默认', 'ghost', () => setDefault(m)));
+    if (!m.isCompact) ops.appendChild(tinyButton('设为压缩', 'ghost', () => setCompact(m)));
+    ops.appendChild(tinyButton('删除', 'danger', () => removeModel(m)));
+
+    row.appendChild(ops);
+    modelRows.appendChild(row);
+  });
+}
+
+/** 停用 / 启用。 */
+async function toggleModel(m) {
+  try {
+    await api('/api/admin/models/' + encodeURIComponent(m.id) + '/enabled', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !m.enabled }),
+    });
+    showMsg(true, m.enabled ? '已停用「' + m.label + '」' : '已启用「' + m.label + '」');
+    await reloadModels();
+  } catch (err) {
+    showMsg(false, err.message);
+  }
+}
+
+/** 设为默认模型（全局唯一，服务端会把别的清掉）。 */
+async function setDefault(m) {
+  try {
+    await api('/api/admin/models/' + encodeURIComponent(m.id) + '/default', { method: 'PUT' });
+    showMsg(true, '默认模型已改为「' + m.label + '」');
+    await reloadModels();
+  } catch (err) {
+    showMsg(false, err.message);
+  }
+}
+
+/** 设为压缩专用模型。 */
+async function setCompact(m) {
+  try {
+    await api('/api/admin/models/' + encodeURIComponent(m.id) + '/compact', { method: 'PUT' });
+    showMsg(true, '压缩将使用「' + m.label + '」');
+    await reloadModels();
+  } catch (err) {
+    showMsg(false, err.message);
+  }
+}
+
+/** 删除。按需求不额外弹确认，直接删。 */
+async function removeModel(m) {
+  try {
+    const data = await api('/api/admin/models/' + encodeURIComponent(m.id), { method: 'DELETE' });
+    let text = '已删除「' + m.label + '」';
+    if (data.usedBy > 0) text += '（有 ' + data.usedBy + ' 个会话在用它，那些会话下次发消息会提示换模型）';
+    if (data.newDefault) text += '，默认模型已自动切换到 ' + data.newDefault;
+    showMsg(true, text);
+    if (mfEditing.value === m.id) resetForm();
+    await reloadModels();
+  } catch (err) {
+    showMsg(false, err.message);
+  }
+}
+
+/** 把一条模型填进表单，进入编辑态。 */
+function startEdit(m) {
+  mfEditing.value = m.id;
+  mfId.value = m.id;
+  mfId.disabled = true;              // id 是会话里记着的键，改名会让历史会话失联
+  mfLabel.value = m.label || '';
+  mfBaseURL.value = m.baseURL || '';
+  mfApi.value = m.api || 'openai-completions';
+  mfModel.value = m.model || '';
+  mfKey.value = '';
+  mfKeyHint.textContent = m.hasKey
+    ? '已配置（' + (m.keyMask || '****') + '）。留空表示不修改。'
+    : '当前没有配置 key，填一个才能用。';
+  mfContext.value = String(m.contextWindow || 128000);
+  mfOutput.value = String(m.maxOutput || 8192);
+  mfTools.checked = Boolean(m.supportsTools);
+  mfVision.checked = Boolean(m.supportsVision);
+  mfReasoning.checked = Boolean(m.reasoning);
+  mfEnabled.checked = Boolean(m.enabled);
+  mfSubmit.textContent = '保存修改';
+  mfCancel.hidden = false;
+  mfMsg.textContent = '';
+  mfId.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  mfLabel.focus();
+}
+
+/** 清空表单，回到「新建」态。 */
+function resetForm() {
+  mfEditing.value = '';
+  modelForm.reset();
+  mfId.disabled = false;
+  mfContext.value = '128000';
+  mfOutput.value = '8192';
+  mfApi.value = API_OPTIONS[0].id;
+  mfKeyHint.textContent = '加密后入库，之后只能看到掩码。留空表示不修改（新建时则是不配）。';
+  mfSubmit.textContent = '保存';
+  mfCancel.hidden = true;
+  mfMsg.textContent = '';
+}
+
+modelForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  mfMsg.textContent = '';
+
+  const editing = mfEditing.value;
+  const id = editing || mfId.value.trim().toLowerCase();
+  const payload = {
+    id,
+    label: mfLabel.value.trim(),
+    baseURL: mfBaseURL.value.trim(),
+    api: mfApi.value,
+    model: mfModel.value.trim() || id,
+    contextWindow: Number(mfContext.value) || 128000,
+    maxOutput: Number(mfOutput.value) || 8192,
+    supportsTools: mfTools.checked,
+    supportsVision: mfVision.checked,
+    reasoning: mfReasoning.checked,
+    enabled: mfEnabled.checked,
+  };
+  // key 三态：编辑时空着 = 不改；新建时不传 = 不配
+  const typedKey = mfKey.value.trim();
+  if (typedKey) payload.apiKey = typedKey;
+  else if (!editing) payload.apiKey = '';
+
+  mfSubmit.disabled = true;
+  mfSubmit.textContent = editing ? '保存中…' : '添加中…';
+  try {
+    const url = '/api/admin/models' + (editing ? '?id=' + encodeURIComponent(editing) : '');
+    await api(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    showMsg(true, editing ? '已保存「' + payload.label + '」' : '已添加「' + payload.label + '」');
+    resetForm();
+    await reloadModels();
+  } catch (err) {
+    mfMsg.textContent = err.message;   // 表单错误就地显示，比顶部提示更靠近操作点
+  } finally {
+    mfSubmit.disabled = false;
+    // 用触发时的 editing 判断：resetForm() 已经把 mfEditing 清空了
+    mfSubmit.textContent = editing ? '保存修改' : '保存';
+  }
+});
+
+mfCancel.addEventListener('click', resetForm);
+
 // ---------------------------------------------------------------- 首页轮播位
 
 const bannersBox = document.getElementById('bannersBox');
@@ -654,10 +1010,11 @@ bannerForm.addEventListener('submit', async (e) => {
 // ---------------------------------------------------------------- 用户 / 站点
 
 /**
- * 首次加载 / 手工刷新：先拉 /api/me 校验登录态，再让两张表各刷一次，最后拉轮播位。
- * 页面初始渲染走这里；之后的翻页、搜索、封禁、下线都只调 reloadUsers / reloadSites。
+ * 首次加载 / 手工刷新：先拉 /api/me 校验登录态，再让两张表各刷一次，
+ * 然后拉轮播位和模型列表。
+ * 页面初始渲染走这里；之后的翻页、搜索、封禁、下线、改模型都只调各自的 reload。
  * 陷阱：/api/me 对匿名请求也返回 200 + user:null，真正拦住非管理员的是
- * 两张表各自的接口（401 / 403 让 api() 抛错），结果只剩一条错误提示、表格保持空白。
+ * 各管理接口的 401 / 403（让 api() 抛错），结果只剩一条错误提示、表格保持空白。
  */
 async function loadAll() {
   try {
@@ -669,6 +1026,7 @@ async function loadAll() {
       summary.textContent = users.total + ' 个用户 · ' + sites.total + ' 个页面';
     }
 
+    await reloadModels();
     await loadBanners();
   } catch (err) {
     showMsg(false, err.message);

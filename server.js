@@ -128,19 +128,29 @@ import {
   toolSchemas,
 } from './lib/agent/tools.js';
 import {
-  AGENT_DEFAULT_MODEL,
-} from './lib/config.js';
-import {
   MODES,
+  allModels,
+  adminModelList,
   canonicalMode,
   canonicalModelId,
+  compactModelId,
+  countThreadsUsingModel,
+  defaultModelId,
+  deleteModel,
+  isModelReady,
+  loadModels,
   modelApiKey,
-  pickUsableModel,
+  modelsLoaded,
   probeModel,
   publicModeList,
   publicModelList,
   resolveModel,
+  seedModelsIfEmpty,
+  setCompactModel,
+  setDefaultModel,
+  upsertModel,
 } from './lib/agent/models.js';
+import { canEncrypt, encryptSecret, maskSecret } from './lib/agent/crypto.js';
 import { LlmError } from './lib/agent/llm.js';
 import { runAgent } from './lib/agent/loop.js';
 import {
@@ -1846,39 +1856,37 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
     return;
   }
 
-  // 先看看有没有可用模型，没有就直接告诉用户怎么配，别让他等一轮空跑。
-  // 用 pickUsableModel（带探活）而不是 pickDefaultModel：本机 Ollama 没启动时
-  // 「key 不需要所以算可用」会把用户带进一轮必然失败的请求。
+  // 选哪个模型：会话记的优先，没记过才用后台设的默认模型。
+  //
+  // **不做静默降级**：会话记的模型如果被停用 / 删掉 / key 失效，直接报错让用户
+  // 自己在下拉框里换一个。理由是悄悄换模型会让人以为自己还在用某个模型，
+  // 排查问题时完全看不出真实情况（比如「我明明用的 Claude」）。
   let modelId = thread.model || null;
-  if (modelId && !(await probeModel(modelId))) {
-    // 会话里记的模型现在连不上了：降级到当前可用的，并告诉用户实际用了哪个
-    const fallback = await pickUsableModel(AGENT_DEFAULT_MODEL);
-    if (!fallback) {
-      sendJson(res, 503, {
-        ok: false,
-        message: '这个对话选的模型现在连不上，也没有别的可用模型。请检查服务器上的模型配置。',
-        code: 'NO_MODEL',
-      });
-      return;
-    }
-    modelId = fallback;
-  } else if (!modelId) {
-    modelId = await pickUsableModel(AGENT_DEFAULT_MODEL);
-  }
+  if (!modelId) modelId = defaultModelId();
 
   const cfg = modelId ? resolveModel(modelId) : null;
   if (!cfg) {
     sendJson(res, 503, {
       ok: false,
-      message: '还没有可用的模型。请先在服务器上配置 LLM_API_KEY 环境变量再重启服务。',
+      message: modelId
+        ? `这个对话选的模型「${modelId}」已经不存在了，请在顶部换成别的模型再发。`
+        : '还没有可用的模型。请让管理员在后台「模型配置」里添加一个模型。',
       code: 'NO_MODEL',
     });
     return;
   }
-  if (cfg.apiKeyEnv && !modelApiKey(cfg)) {
+  if (!cfg.enabled) {
     sendJson(res, 503, {
       ok: false,
-      message: `模型「${cfg.label}」缺少 API Key（环境变量 ${cfg.apiKeyEnv}）`,
+      message: `模型「${cfg.label}」已被管理员停用，请在顶部换成别的模型再发。`,
+      code: 'MODEL_DISABLED',
+    });
+    return;
+  }
+  if (!modelApiKey(cfg)) {
+    sendJson(res, 503, {
+      ok: false,
+      message: `模型「${cfg.label}」没有配置 API Key，请让管理员在后台补上。`,
       code: 'NO_KEY',
     });
     return;
@@ -2495,7 +2503,7 @@ async function handleAgentTools(req, res) {
   const user = await requireLogin(req, res);
   if (!user) return;
 
-  const defaultModel = await pickUsableModel(AGENT_DEFAULT_MODEL);
+  const defaultModel = defaultModelId();
   const models = await publicModelList(defaultModel);
 
   sendJson(res, 200, {
@@ -3605,6 +3613,197 @@ async function handleAdminDeleteSite(req, res, [id]) {
   sendJson(res, 200, { ok: true, id: Number(id) });
 }
 
+// ---------------------------------------------------------------- 后台：模型配置
+
+/** 模型 id 规则：小写字母开头，字母数字和 - . _，最长 64。会话表存的就是它。 */
+const MODEL_ID_RE = /^[a-z][a-z0-9._-]{0,63}$/;
+
+/** GET /api/admin/models：全部模型（含停用的）+ 加密能力状态。 */
+async function handleAdminModels(req, res) {
+  if (!(await requireAdmin(req, res))) return;
+
+  const models = await adminModelList();
+  // 顺带把「几个会话在用」带出来：管理员删之前心里有数
+  const withUsage = await Promise.all(
+    models.map(async (m) => ({ ...m, threadCount: await countThreadsUsingModel(m.id) })),
+  );
+
+  sendJson(res, 200, {
+    ok: true,
+    models: withUsage,
+    // 没配 MODEL_SECRET 时后台存不了 key，前端据此禁掉「保存」并给出提示
+    canEncrypt: canEncrypt(),
+    // 只支持这一种协议，前端下拉框就一个选项
+    apis: [{ id: 'openai-completions', label: 'OpenAI Chat Completions' }],
+  });
+}
+
+/**
+ * POST /api/admin/models：新建 / 更新一个模型。
+ *
+ * key 的处理有三态，很容易写错：
+ *   - 字段不传（undefined）→ 保持库里原有的 key 不动
+ *   - 传空字符串          → 清空 key
+ *   - 传非空字符串        → 重新加密后写入
+ * 这样后台编辑别的字段时不会因为没重填 key 就被抹掉。
+ */
+async function handleAdminModelSave(req, res) {
+  if (!(await requireAdmin(req, res))) return;
+
+  const url = new URL(req.url, 'http://internal');
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  // 路径里带 id 就是编辑，否则从请求体取（新建）
+  const id = String(url.searchParams.get('id') ?? body.id ?? '').trim();
+  if (!MODEL_ID_RE.test(id)) {
+    sendJson(res, 400, {
+      ok: false,
+      message: '模型 ID 只能用小写字母开头，包含字母、数字和 - . _，最长 64 位',
+    });
+    return;
+  }
+
+  const label = String(body.label ?? '').trim().slice(0, 80);
+  if (!label) {
+    sendJson(res, 400, { ok: false, message: '显示名称不能为空' });
+    return;
+  }
+
+  const baseURL = String(body.baseURL ?? '').trim().slice(0, 500);
+  if (!baseURL) {
+    sendJson(res, 400, { ok: false, message: 'API 地址不能为空' });
+    return;
+  }
+  if (!/^https?:\/\//i.test(baseURL)) {
+    sendJson(res, 400, { ok: false, message: 'API 地址要以 http:// 或 https:// 开头' });
+    return;
+  }
+
+  const api = String(body.api ?? 'openai-completions').trim();
+  if (api !== 'openai-completions') {
+    sendJson(res, 400, { ok: false, message: '目前只支持 OpenAI Chat Completions 协议' });
+    return;
+  }
+
+  // 模型 id 不给就沿用配置 id（绝大多数情况两者相同）
+  const modelName = String(body.model ?? '').trim().slice(0, 120) || id;
+
+  // 传了非空 key 但服务端没有主密钥 → 提前拦住，别等到写库时才炸
+  const hasNewKey = typeof body.apiKey === 'string' && body.apiKey.trim() !== '';
+  if (hasNewKey && !canEncrypt()) {
+    sendJson(res, 400, {
+      ok: false,
+      message: '服务器没有配置 MODEL_SECRET，无法加密保存 API Key。请联系运维在环境变量里加一行再试。',
+      code: 'NO_SECRET',
+    });
+    return;
+  }
+
+  try {
+    await upsertModel({
+      id,
+      label,
+      hint: String(body.hint ?? '').trim().slice(0, 200),
+      provider: String(body.provider ?? '').trim().slice(0, 60),
+      baseURL,
+      api,
+      model: modelName,
+      // 只有显式传了字符串才动 key（三态见上方注释）
+      apiKey: typeof body.apiKey === 'string' ? body.apiKey.trim() : undefined,
+      supportsTools: body.supportsTools !== false,
+      supportsVision: body.supportsVision !== false,
+      reasoning: Boolean(body.reasoning),
+      contextWindow: Number(body.contextWindow) || 128_000,
+      maxOutput: Number(body.maxOutput) || 8_192,
+      enabled: body.enabled !== false,
+    });
+  } catch (err) {
+    if (err.code === 'NO_SECRET') {
+      sendJson(res, 400, { ok: false, message: err.message, code: 'NO_SECRET' });
+      return;
+    }
+    console.error('[admin-model-save]', err);
+    sendJson(res, 500, { ok: false, message: '保存失败了，稍后再试' });
+    return;
+  }
+
+  sendJson(res, 200, { ok: true, id });
+}
+
+/** PUT /api/admin/models/:id/enabled：启用 / 停用。 */
+async function handleAdminModelToggle(req, res, [id]) {
+  if (!(await requireAdmin(req, res))) return;
+
+  const body = await readBody(req, res);
+  if (!body) return;
+
+  const cfg = resolveModel(decodeURIComponent(id));
+  if (!cfg) {
+    sendJson(res, 404, { ok: false, message: '没有这个模型' });
+    return;
+  }
+
+  await upsertModel({ ...cfg, enabled: Boolean(body.enabled) });
+  sendJson(res, 200, { ok: true, id: cfg.id, enabled: Boolean(body.enabled) });
+}
+
+/** PUT /api/admin/models/:id/default：设为默认模型（全局唯一）。 */
+async function handleAdminModelSetDefault(req, res, [id]) {
+  if (!(await requireAdmin(req, res))) return;
+
+  const clean = decodeURIComponent(id);
+  if (!resolveModel(clean)) {
+    sendJson(res, 404, { ok: false, message: '没有这个模型' });
+    return;
+  }
+
+  await setDefaultModel(clean);
+  sendJson(res, 200, { ok: true, defaultModel: clean });
+}
+
+/** PUT /api/admin/models/:id/compact：设为压缩专用模型（全局唯一，null 表示跟随默认）。 */
+async function handleAdminModelSetCompact(req, res, [id]) {
+  if (!(await requireAdmin(req, res))) return;
+
+  const clean = decodeURIComponent(id);
+  if (clean && !resolveModel(clean)) {
+    sendJson(res, 404, { ok: false, message: '没有这个模型' });
+    return;
+  }
+
+  await setCompactModel(clean || null);
+  sendJson(res, 200, { ok: true, compactModel: compactModelId() });
+}
+
+/** DELETE /api/admin/models/:id：删掉一个模型。正在用它的会话会在下次发消息时报错。 */
+async function handleAdminModelDelete(req, res, [id]) {
+  if (!(await requireAdmin(req, res))) return;
+
+  const clean = decodeURIComponent(id);
+  const wasDefault = defaultModelId() === clean;
+  const usedBy = await countThreadsUsingModel(clean);
+
+  const changes = await deleteModel(clean);
+  if (changes === 0) {
+    sendJson(res, 404, { ok: false, message: '没有这个模型' });
+    return;
+  }
+
+  // 删掉的是默认模型：自动把默认位挪给剩下的第一个可用模型，
+  // 否则新会话会落到「没有默认模型」的状态，用户一进来就报错
+  let newDefault = null;
+  if (wasDefault) {
+    const next = allModels().find((m) => m.enabled && isModelReady(m.id)) ?? allModels().find((m) => m.enabled);
+    if (next) {
+      await setDefaultModel(next.id);
+      newDefault = next.id;
+    }
+  }
+
+  sendJson(res, 200, { ok: true, id: clean, usedBy, newDefault });
+}
+
 // ---------------------------------------------------------------- 首页轮播位
 
 /** 首页轮播数据：公开接口，只回启用中且站点在线的。 */
@@ -4098,6 +4297,14 @@ const ROUTES = [
   ['PUT', /^\/api\/admin\/banners\/(\d+)$/, handleAdminBannerUpdate],
   ['DELETE', /^\/api\/admin\/banners\/(\d+)$/, handleAdminBannerDelete],
 
+  // 后台：模型配置。id 里有 . 和 -，所以路径段用 [a-z0-9._-]+
+  ['GET', /^\/api\/admin\/models$/, handleAdminModels],
+  ['POST', /^\/api\/admin\/models$/, handleAdminModelSave],
+  ['PUT', /^\/api\/admin\/models\/([a-z0-9._-]+)\/enabled$/, handleAdminModelToggle],
+  ['PUT', /^\/api\/admin\/models\/([a-z0-9._-]+)\/default$/, handleAdminModelSetDefault],
+  ['PUT', /^\/api\/admin\/models\/([a-z0-9._-]+)\/compact$/, handleAdminModelSetCompact],
+  ['DELETE', /^\/api\/admin\/models\/([a-z0-9._-]+)$/, handleAdminModelDelete],
+
   // MCP：运行时用密钥，管理用登录态，两条路互不相交
   ['POST', /^\/mcp$/, handleMcpPost],
   ['POST', /^\/mcp\/([A-Za-z0-9_-]+)$/, handleMcpPostWithKey],
@@ -4233,13 +4440,24 @@ server.listen(PORT, HOST, async () => {
       pruneTasks().catch((err) => console.error('[agent] 清理任务失败：', err?.message ?? err));
     }, 6 * 3600_000).unref();
 
-    // 启动时把模型可用情况打出来，部署后一眼就能看出 key 配没配、本机模型起没起
-    const defaultModel = await pickUsableModel(AGENT_DEFAULT_MODEL);
-    if (defaultModel) {
-      const cfg = resolveModel(defaultModel);
-      console.log(`agent 默认模型：${cfg.label}（${cfg.model}）`);
+    // 模型配置在数据库里：先灌种子（只在空表时），再把注册表载进内存。
+    // 必须在这里、处理第一个请求之前完成，否则 resolveModel 会拿到空表。
+    const seeded = await seedModelsIfEmpty();
+    if (seeded > 0) console.log(`已写入 ${seeded} 个内置模型配置（后台可管理）`);
+    const modelCount = await loadModels();
+
+    // 启动时把模型情况打出来，部署后一眼就能看出配没配 key
+    const defaultModel = defaultModelId();
+    const defCfg = defaultModel ? resolveModel(defaultModel) : null;
+    if (defCfg) {
+      const keyNote = modelApiKey(defCfg) ? '' : ' ⚠ 没有 key，用之前要先在后台填';
+      console.log(`agent 默认模型：${defCfg.label}（${defCfg.model}）${keyNote}`);
+      console.log(`agent 模型库：共 ${modelCount} 个，其中 ${allModels().filter((m) => m.enabled).length} 个已启用`);
     } else {
-      console.log('agent 未启用：没找到可用的模型，请配置 LLM_API_KEY 后重启');
+      console.log(`agent 模型库：共 ${modelCount} 个，但没有设置默认模型`);
+    }
+    if (modelCount > 0 && !canEncrypt()) {
+      console.log('提示：没有配置 MODEL_SECRET，后台无法保存 API Key（只能读环境变量 LLM_API_KEY）');
     }
 
     const created = await ensureAdminAccount();
