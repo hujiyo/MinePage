@@ -49,6 +49,7 @@ import {
   authenticate,
   changePassword,
   countUsers,
+  countUsersMatching,
   createSession,
   createUser,
   deleteAccount,
@@ -72,6 +73,7 @@ import { createMcpToken, listMcpTokens, revokeMcpToken } from './lib/mcp/tokens.
 import {
   addSiteMessage,
   assertStorageBudget,
+  countAllSites,
   countDraftsByOwner,
   countSiteFiles,
   countSites,
@@ -3491,19 +3493,34 @@ async function handleMcpTokenRevoke(req, res, [id]) {
 
 // ---------------------------------------------------------------- 管理接口
 
-/** 后台用户表：按页取，默认每页 10 条。顺序沿用 listUsers 的 id 倒序。 */
-const ADMIN_USERS_PAGE_SIZE = 10;
+/** 后台两张表共用的分页尺寸：默认每页 10 条。 */
+const ADMIN_PAGE_SIZE = 10;
+
+/**
+ * 从 ?page / ?size / ?q 里读出分页参数。
+ * q 是搜索词：纯数字按 ID 精确匹配，其它按用户名模糊匹配（口径在 lib 的查询里）。
+ */
+function adminPageParams(url) {
+  const size = Math.min(100, Math.max(1, Number(url.searchParams.get('size')) || ADMIN_PAGE_SIZE));
+  const q = String(url.searchParams.get('q') ?? '').trim().slice(0, 50);
+  return { size, q };
+}
+
+/** 按 total/size 把越界的 page 钳回合法范围，并算出页数。 */
+function clampAdminPage(rawPage, total, size) {
+  const pages = Math.max(1, Math.ceil(total / size));
+  // 越界钳到边界：删掉最后一条后停在末尾那页不会看到空白表
+  const page = Math.min(pages, Math.max(1, Number(rawPage) || 1));
+  return { page, pages };
+}
 
 async function handleAdminUsers(req, res) {
   if (!(await requireAdmin(req, res))) return;
 
   const url = new URL(req.url, 'http://internal');
-  const size = Math.min(100, Math.max(1, Number(url.searchParams.get('size')) || ADMIN_USERS_PAGE_SIZE));
-  const total = await countUsers();
-  const pages = Math.max(1, Math.ceil(total / size));
-
-  // 页码越界时钳到最后一页：删掉用户后停在末尾那页不会看到空白表
-  const page = Math.min(pages, Math.max(1, Number(url.searchParams.get('page')) || 1));
+  const { size, q } = adminPageParams(url);
+  const total = await countUsersMatching(q);
+  const { page, pages } = clampAdminPage(url.searchParams.get('page'), total, size);
 
   sendJson(res, 200, {
     ok: true,
@@ -3511,7 +3528,8 @@ async function handleAdminUsers(req, res) {
     page,
     size,
     pages,
-    users: (await listUsers({ limit: size, offset: (page - 1) * size })).map(publicUser),
+    q,
+    users: (await listUsers({ limit: size, offset: (page - 1) * size, q })).map(publicUser),
   });
 }
 
@@ -3542,10 +3560,19 @@ async function handleAdminUserStatus(req, res, [id]) {
 async function handleAdminSites(req, res) {
   if (!(await requireAdmin(req, res))) return;
 
+  const url = new URL(req.url, 'http://internal');
+  const { size, q } = adminPageParams(url);
+  const total = await countAllSites(q);
+  const { page, pages } = clampAdminPage(url.searchParams.get('page'), total, size);
+
   sendJson(res, 200, {
     ok: true,
-    total: await countSites(),
-    sites: await listAllSites(),
+    total,
+    page,
+    size,
+    pages,
+    q,
+    sites: await listAllSites({ limit: size, offset: (page - 1) * size, q }),
   });
 }
 

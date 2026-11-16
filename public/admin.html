@@ -41,6 +41,15 @@
 
   <section class="panel">
     <h2>用户</h2>
+    <div class="tableTop">
+      <form class="tableSearch" id="usersSearchForm" novalidate>
+        <input id="usersSearch" type="search" autocomplete="off" spellcheck="false"
+               maxlength="50" placeholder="按 ID 或用户名搜索">
+        <button type="submit" class="tiny">搜索</button>
+        <button type="button" class="tiny ghost" id="usersSearchClear" hidden>清空</button>
+      </form>
+      <span class="tableCount" id="usersCount"></span>
+    </div>
     <table>
       <thead>
         <tr>
@@ -59,6 +68,15 @@
 
   <section class="panel">
     <h2>页面</h2>
+    <div class="tableTop">
+      <form class="tableSearch" id="sitesSearchForm" novalidate>
+        <input id="sitesSearch" type="search" autocomplete="off" spellcheck="false"
+               maxlength="50" placeholder="按 ID 或用户名搜索">
+        <button type="submit" class="tiny">搜索</button>
+        <button type="button" class="tiny ghost" id="sitesSearchClear" hidden>清空</button>
+      </form>
+      <span class="tableCount" id="sitesCount"></span>
+    </div>
     <table>
       <thead>
         <tr>
@@ -72,6 +90,7 @@
       </thead>
       <tbody id="sitesBody"></tbody>
     </table>
+    <div id="sitesPager" class="pager" hidden></div>
   </section>
 
   <div id="msg" class="result" hidden></div>
@@ -84,15 +103,26 @@ MP.topbar({ active: 'create' });
 const usersBody = document.getElementById('usersBody');
 const usersPager = document.getElementById('usersPager');
 const sitesBody = document.getElementById('sitesBody');
+const sitesPager = document.getElementById('sitesPager');
+const usersSearchForm = document.getElementById('usersSearchForm');
+const usersSearch = document.getElementById('usersSearch');
+const usersSearchClear = document.getElementById('usersSearchClear');
+const sitesSearchForm = document.getElementById('sitesSearchForm');
+const sitesSearch = document.getElementById('sitesSearch');
+const sitesSearchClear = document.getElementById('sitesSearchClear');
+const usersCount = document.getElementById('usersCount');
+const sitesCount = document.getElementById('sitesCount');
 const summary = document.getElementById('summary');
 const msg = document.getElementById('msg');
 
 let hideTimer = null;
 
-// 用户表分页状态：服务端每页 10 条，顺序沿用 id 倒序（最新注册的在最前）
-const USERS_PAGE_SIZE = 10;
+// 两张表的分页 / 搜索状态。服务端每页 10 条，顺序沿用各自原来的排序。
+const PAGE_SIZE = 10;
 let usersPage = 1;
-let usersPages = 1;
+let usersQuery = '';   // 用户表的搜索词（空 = 不搜）
+let sitesPage = 1;
+let sitesQuery = '';   // 页面表的搜索词（空 = 不搜）
 
 /** 造一个只放文本的单元格 `<td>`（className 可选）；返回的元素还没挂进表格，由调用方 append。 */
 function td(text, className) {
@@ -152,15 +182,16 @@ async function api(url, options) {
 }
 
 /**
- * 用 GET /api/admin/users 返回的用户数组重建用户表（先清空 tbody，空数组时显示一行「还没有用户」）。
+ * 用 GET /api/admin/users 返回的用户数组重建用户表（先清空 tbody，空数组时显示一行提示）。
  * 账号列优先显示 username，没有才退回 email；操作按钮按当前状态在「封禁 / 解封」之间切换。
+ * emptyText 由调用方给：没搜过是「还没有用户」，搜过是「没有匹配的用户」。
  */
-function renderUsers(users) {
+function renderUsers(users, emptyText) {
   usersBody.textContent = '';
 
   if (users.length === 0) {
     const row = document.createElement('tr');
-    const cell = td('还没有用户');
+    const cell = td(emptyText || '还没有用户');
     cell.colSpan = 6;
     cell.className = 'empty';
     row.appendChild(cell);
@@ -200,19 +231,36 @@ function renderUsers(users) {
   });
 }
 
+/** 表格右上角那行统计文案：搜过就显示「找到 N 个 / 共 M 个」。 */
+function paintCount(el, total, query, unit) {
+  if (!el) return;
+  el.textContent = query ? '找到 ' + total + ' 个' + unit : '共 ' + total + ' 个' + unit;
+}
+
+/** 「清空」按钮只在有搜索词时出现。 */
+function paintSearchClear(btn, query) {
+  if (btn) btn.hidden = !query;
+}
+
 /**
- * 渲染用户表底部的翻页器。
+ * 画一个翻页器（两张表共用同一套逻辑，只是挂到不同容器、点回来调不同函数）。
+ *
  * 只有一页时整个藏起来（不显示一堆没用的按钮）。
  * 页码窗口最多 7 格，超出用省略号——158 个用户按 10 条一页有 16 页，
  * 直接铺出来会把面板撑得很长。
+ *
+ * @param {HTMLElement} box      挂载容器（.pager）
+ * @param {object} state         { total, page, pages, size, unit }
+ *   unit 是量词，用户表「个」、页面表「个」，将来要改也好改
+ * @param {(to:number)=>void} onGo  点页码时的回调
  */
-function renderUsersPager(total, page, pages) {
-  usersPager.textContent = '';
-  if (pages <= 1) {
-    usersPager.hidden = true;
+function paintPager(box, state, onGo) {
+  box.textContent = '';
+  if (state.pages <= 1) {
+    box.hidden = true;
     return;
   }
-  usersPager.hidden = false;
+  box.hidden = false;
 
   const slot = (label, to, opt) => {
     const o = opt || {};
@@ -222,19 +270,20 @@ function renderUsersPager(total, page, pages) {
     el.textContent = label;
     if (!o.disabled && !o.active && to != null) {
       el.addEventListener('click', () => {
-        usersPage = to;
-        reloadUsers();
-        usersPager.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        onGo(to);
+        box.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       });
     }
-    usersPager.appendChild(el);
+    box.appendChild(el);
   };
   const dots = () => {
     const s = document.createElement('span');
     s.className = 'pg dots';
     s.textContent = '…';
-    usersPager.appendChild(s);
+    box.appendChild(s);
   };
+
+  const { page, pages } = state;
 
   slot('上一页', page - 1, { disabled: page <= 1 });
 
@@ -252,23 +301,29 @@ function renderUsersPager(total, page, pages) {
 
   slot('下一页', page + 1, { disabled: page >= pages });
 
-  // 当前范围提示：一眼知道「第 11–20 条 / 共 158 个」
+  // 当前范围提示：一眼知道「第 11–20 个 / 共 158 个」
   const info = document.createElement('span');
   info.className = 'pagerInfo';
-  const from = (page - 1) * USERS_PAGE_SIZE + 1;
-  const to = Math.min(total, page * USERS_PAGE_SIZE);
-  info.textContent = '第 ' + from + '–' + to + ' 个，共 ' + total + ' 个';
-  usersPager.appendChild(info);
+  const from = (page - 1) * state.size + 1;
+  const to = Math.min(state.total, page * state.size);
+  info.textContent = '第 ' + from + '–' + to + ' 个，共 ' + state.total + ' 个';
+  box.appendChild(info);
 }
 
-/** 只刷新用户表（封禁 / 解封 / 翻页都走它，不动轮播位和页面表）。 */
+/** 只刷新用户表（封禁 / 解封 / 翻页 / 搜索都走它，不动轮播位和页面表）。 */
 async function reloadUsers() {
   try {
-    const data = await api('/api/admin/users?page=' + usersPage + '&size=' + USERS_PAGE_SIZE);
+    const query = new URLSearchParams({ page: String(usersPage), size: String(PAGE_SIZE) });
+    if (usersQuery) query.set('q', usersQuery);
+    const data = await api('/api/admin/users?' + query.toString());
+
+    // 服务端会把越界页码钳回来，本地跟着它走
     usersPage = data.page;
-    usersPages = data.pages;
-    renderUsers(data.users);
-    renderUsersPager(data.total, data.page, data.pages);
+    renderUsers(data.users, usersQuery ? '没有匹配的用户' : '');
+    paintPager(usersPager, { total: data.total, page: data.page, pages: data.pages, size: data.size },
+      (to) => { usersPage = to; reloadUsers(); });
+    paintCount(usersCount, data.total, usersQuery, '用户');
+    paintSearchClear(usersSearchClear, usersQuery);
     return data;
   } catch (err) {
     showMsg(false, err.message);
@@ -277,16 +332,17 @@ async function reloadUsers() {
 }
 
 /**
- * 用 GET /api/admin/sites 返回的页面数组重建页面表（空数组时显示一行「还没有页面」）。
+ * 用 GET /api/admin/sites 返回的页面数组重建页面表（空数组时显示一行提示）。
  * 归属列取 owner_username / owner_email，都没有时显示「（无归属）」；每行带「下线 / 恢复」和「删除」。
  * 删除按钮把整个 site 对象交给 removeSite —— 那边要用 site.name 拼确认文案，所以不能只传 id。
+ * emptyText 由调用方给：没搜过是「还没有页面」，搜过是「没有匹配的页面」。
  */
-function renderSites(sites) {
+function renderSites(sites, emptyText) {
   sitesBody.textContent = '';
 
   if (sites.length === 0) {
     const row = document.createElement('tr');
-    const cell = td('还没有页面');
+    const cell = td(emptyText || '还没有页面');
     cell.colSpan = 6;
     cell.className = 'empty';
     row.appendChild(cell);
@@ -333,6 +389,26 @@ function renderSites(sites) {
   });
 }
 
+/** 只刷新页面表（下线 / 恢复 / 删除 / 翻页 / 搜索都走它）。 */
+async function reloadSites() {
+  try {
+    const query = new URLSearchParams({ page: String(sitesPage), size: String(PAGE_SIZE) });
+    if (sitesQuery) query.set('q', sitesQuery);
+    const data = await api('/api/admin/sites?' + query.toString());
+
+    sitesPage = data.page;
+    renderSites(data.sites, sitesQuery ? '没有匹配的页面' : '');
+    paintPager(sitesPager, { total: data.total, page: data.page, pages: data.pages, size: data.size },
+      (to) => { sitesPage = to; reloadSites(); });
+    paintCount(sitesCount, data.total, sitesQuery, '页面');
+    paintSearchClear(sitesSearchClear, sitesQuery);
+    return data;
+  } catch (err) {
+    showMsg(false, err.message);
+    return null;
+  }
+}
+
 /**
  * 封禁 / 解封一个用户：POST /api/admin/users/:id/status。
  * 服务端只认 'active' 和 'banned'，其它值一律当 'active'；也会拒绝管理员封自己。
@@ -354,8 +430,9 @@ async function setUserStatus(id, status) {
 
 /**
  * 下线 / 恢复一个页面：POST /api/admin/sites/:id/status。
- * 服务端只认 'active' 和 'offline'，其它值一律当 'active'；成功后整页重拉（loadAll）。
+ * 服务端只认 'active' 和 'offline'，其它值一律当 'active'。
  * 「下线」只是状态标记，页面和文件都还在，随时可以恢复。
+ * 成功后只重拉页面表，理由同 setUserStatus。
  */
 async function setSiteStatus(id, status) {
   try {
@@ -365,7 +442,7 @@ async function setSiteStatus(id, status) {
       body: JSON.stringify({ status: status }),
     });
     showMsg(true, '已更新');
-    await loadAll();
+    await reloadSites();
   } catch (err) {
     showMsg(false, err.message);
   }
@@ -577,37 +654,58 @@ bannerForm.addEventListener('submit', async (e) => {
 // ---------------------------------------------------------------- 用户 / 站点
 
 /**
- * 拉取后台概览并整体刷新：GET /api/me、/api/admin/users、/api/admin/sites 三个并发，
- * 写顶部统计条和两张表。启动时调一次。
- * 用户表现在是分页的，翻页 / 封禁只走 reloadUsers()，不经过这里。
- * 陷阱：/api/me 对匿名请求也返回 200 + user:null，真正拦住非管理员的是后两个接口的
- * 401 / 403，它们让 api() 抛错，结果只剩一条错误提示、两张表保持空白。
+ * 首次加载 / 手工刷新：先拉 /api/me 校验登录态，再让两张表各刷一次，最后拉轮播位。
+ * 页面初始渲染走这里；之后的翻页、搜索、封禁、下线都只调 reloadUsers / reloadSites。
+ * 陷阱：/api/me 对匿名请求也返回 200 + user:null，真正拦住非管理员的是
+ * 两张表各自的接口（401 / 403 让 api() 抛错），结果只剩一条错误提示、表格保持空白。
  */
 async function loadAll() {
   try {
-    const results = await Promise.all([
-      api('/api/me'),
-      api('/api/admin/users?page=' + usersPage + '&size=' + USERS_PAGE_SIZE),
-      api('/api/admin/sites'),
-    ]);
+    await api('/api/me');
 
-    // results[0] 是 /api/me，用于校验登录态
-    const users = results[1];
-    const sites = results[2];
+    const users = await reloadUsers();
+    const sites = await reloadSites();
+    if (users && sites) {
+      summary.textContent = users.total + ' 个用户 · ' + sites.total + ' 个页面';
+    }
 
-    summary.textContent = users.total + ' 个用户 · ' + sites.total + ' 个页面';
-
-    // 服务端会把越界的页码钳回最后一页，这里跟着它的结果走
-    usersPage = users.page;
-    usersPages = users.pages;
-    renderUsers(users.users);
-    renderUsersPager(users.total, users.page, users.pages);
-    renderSites(sites.sites);
     await loadBanners();
   } catch (err) {
     showMsg(false, err.message);
   }
 }
+
+// ---------------------------------------------------------------- 搜索
+
+/**
+ * 给一张表挂上搜索框：提交 / 清空时把页码重置回第 1 页再重新取数。
+ * 搜索后必须回第 1 页——否则第 12 页搜出 3 条结果会看到空白。
+ */
+function bindSearch(form, input, clearBtn, onSearch) {
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    onSearch(input.value.trim());
+  });
+  clearBtn.addEventListener('click', () => {
+    input.value = '';
+    onSearch('');
+  });
+  // 边打边搜没必要（每敲一个字都打一次数据库），输入框清空时顺手回全量
+  input.addEventListener('input', () => {
+    if (input.value === '') onSearch('');
+  });
+}
+
+bindSearch(usersSearchForm, usersSearch, usersSearchClear, (kw) => {
+  usersQuery = kw;
+  usersPage = 1;
+  reloadUsers();
+});
+bindSearch(sitesSearchForm, sitesSearch, sitesSearchClear, (kw) => {
+  sitesQuery = kw;
+  sitesPage = 1;
+  reloadSites();
+});
 
 loadAll();
 </script>

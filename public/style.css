@@ -912,6 +912,43 @@ section { margin-top: 32px; }
    翻页器是 flex + wrap，这里用 margin-left:auto 把它推到最右边。 */
 .pager .pagerInfo { margin-left: auto; color: var(--muted); font-size: 12px; }
 
+/* ------------------------------------------------------------
+   后台表格：标题栏右侧的搜索框 + 统计
+   ------------------------------------------------------------ */
+
+/* 一行两端对齐：左边搜索框，右边统计文案。宽度不够时换行，不会把表格挤歪 */
+.tableTop {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: -6px 0 12px;
+}
+.tableSearch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;   /* 顶到右上角 */
+}
+.tableSearch input[type="search"] {
+  width: 220px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel2);
+  color: var(--text);
+  font-size: 13px;
+}
+.tableSearch input[type="search"]:focus {
+  outline: none;
+  border-color: var(--pink);
+  background: var(--panel);
+}
+/* 去掉 Chrome 给 search 输入框自带的小叉（我们自己有「清空」按钮） */
+.tableSearch input[type="search"]::-webkit-search-cancel-button { display: none; }
+.tableCount { color: var(--muted); font-size: 12px; }
+
 /* 后台：轮播位列表 */
 .bannerRows { display: flex; flex-direction: column; gap: 8px; }
 .bannerRow {
