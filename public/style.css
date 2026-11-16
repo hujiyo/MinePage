@@ -908,6 +908,9 @@ section { margin-top: 32px; }
 .pager .pg.disabled { color: var(--muted); cursor: default; opacity: .6; }
 .pager .pg.disabled:hover { border-color: var(--border); color: var(--muted); }
 .pager .pg.dots { border-color: transparent; background: transparent; cursor: default; }
+/* 后台翻页器右侧的范围提示（「第 11–20 个，共 158 个」）。
+   翻页器是 flex + wrap，这里用 margin-left:auto 把它推到最右边。 */
+.pager .pagerInfo { margin-left: auto; color: var(--muted); font-size: 12px; }
 
 /* 后台：轮播位列表 */
 .bannerRows { display: flex; flex-direction: column; gap: 8px; }

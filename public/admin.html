@@ -54,6 +54,7 @@
       </thead>
       <tbody id="usersBody"></tbody>
     </table>
+    <div id="usersPager" class="pager" hidden></div>
   </section>
 
   <section class="panel">
@@ -81,11 +82,17 @@
 MP.topbar({ active: 'create' });
 
 const usersBody = document.getElementById('usersBody');
+const usersPager = document.getElementById('usersPager');
 const sitesBody = document.getElementById('sitesBody');
 const summary = document.getElementById('summary');
 const msg = document.getElementById('msg');
 
 let hideTimer = null;
+
+// 用户表分页状态：服务端每页 10 条，顺序沿用 id 倒序（最新注册的在最前）
+const USERS_PAGE_SIZE = 10;
+let usersPage = 1;
+let usersPages = 1;
 
 /** 造一个只放文本的单元格 `<td>`（className 可选）；返回的元素还没挂进表格，由调用方 append。 */
 function td(text, className) {
@@ -194,6 +201,82 @@ function renderUsers(users) {
 }
 
 /**
+ * 渲染用户表底部的翻页器。
+ * 只有一页时整个藏起来（不显示一堆没用的按钮）。
+ * 页码窗口最多 7 格，超出用省略号——158 个用户按 10 条一页有 16 页，
+ * 直接铺出来会把面板撑得很长。
+ */
+function renderUsersPager(total, page, pages) {
+  usersPager.textContent = '';
+  if (pages <= 1) {
+    usersPager.hidden = true;
+    return;
+  }
+  usersPager.hidden = false;
+
+  const slot = (label, to, opt) => {
+    const o = opt || {};
+    const el = document.createElement(o.disabled || o.active ? 'span' : 'button');
+    if (el.tagName === 'BUTTON') el.type = 'button';
+    el.className = 'pg' + (o.active ? ' active' : '') + (o.disabled ? ' disabled' : '');
+    el.textContent = label;
+    if (!o.disabled && !o.active && to != null) {
+      el.addEventListener('click', () => {
+        usersPage = to;
+        reloadUsers();
+        usersPager.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      });
+    }
+    usersPager.appendChild(el);
+  };
+  const dots = () => {
+    const s = document.createElement('span');
+    s.className = 'pg dots';
+    s.textContent = '…';
+    usersPager.appendChild(s);
+  };
+
+  slot('上一页', page - 1, { disabled: page <= 1 });
+
+  if (pages <= 7) {
+    for (let i = 1; i <= pages; i += 1) slot(String(i), i, { active: i === page });
+  } else {
+    const start = Math.max(2, page - 2);
+    const end = Math.min(pages - 1, page + 2);
+    slot('1', 1, { active: page === 1 });
+    if (start > 2) dots();
+    for (let i = start; i <= end; i += 1) slot(String(i), i, { active: i === page });
+    if (end < pages - 1) dots();
+    slot(String(pages), pages, { active: page === pages });
+  }
+
+  slot('下一页', page + 1, { disabled: page >= pages });
+
+  // 当前范围提示：一眼知道「第 11–20 条 / 共 158 个」
+  const info = document.createElement('span');
+  info.className = 'pagerInfo';
+  const from = (page - 1) * USERS_PAGE_SIZE + 1;
+  const to = Math.min(total, page * USERS_PAGE_SIZE);
+  info.textContent = '第 ' + from + '–' + to + ' 个，共 ' + total + ' 个';
+  usersPager.appendChild(info);
+}
+
+/** 只刷新用户表（封禁 / 解封 / 翻页都走它，不动轮播位和页面表）。 */
+async function reloadUsers() {
+  try {
+    const data = await api('/api/admin/users?page=' + usersPage + '&size=' + USERS_PAGE_SIZE);
+    usersPage = data.page;
+    usersPages = data.pages;
+    renderUsers(data.users);
+    renderUsersPager(data.total, data.page, data.pages);
+    return data;
+  } catch (err) {
+    showMsg(false, err.message);
+    return null;
+  }
+}
+
+/**
  * 用 GET /api/admin/sites 返回的页面数组重建页面表（空数组时显示一行「还没有页面」）。
  * 归属列取 owner_username / owner_email，都没有时显示「（无归属）」；每行带「下线 / 恢复」和「删除」。
  * 删除按钮把整个 site 对象交给 removeSite —— 那边要用 site.name 拼确认文案，所以不能只传 id。
@@ -253,7 +336,7 @@ function renderSites(sites) {
 /**
  * 封禁 / 解封一个用户：POST /api/admin/users/:id/status。
  * 服务端只认 'active' 和 'banned'，其它值一律当 'active'；也会拒绝管理员封自己。
- * 成功后整页重拉（loadAll），失败把后端消息交给 showMsg。
+ * 成功后只重拉用户表（不整页重拉）：这样翻到第 8 页封一个人，仍停在第 8 页。
  */
 async function setUserStatus(id, status) {
   try {
@@ -263,7 +346,7 @@ async function setUserStatus(id, status) {
       body: JSON.stringify({ status: status }),
     });
     showMsg(true, '已更新');
-    await loadAll();
+    await reloadUsers();
   } catch (err) {
     showMsg(false, err.message);
   }
@@ -495,7 +578,8 @@ bannerForm.addEventListener('submit', async (e) => {
 
 /**
  * 拉取后台概览并整体刷新：GET /api/me、/api/admin/users、/api/admin/sites 三个并发，
- * 写顶部统计条和两张表。启动时调一次，之后每次改动成功都会再调一次。
+ * 写顶部统计条和两张表。启动时调一次。
+ * 用户表现在是分页的，翻页 / 封禁只走 reloadUsers()，不经过这里。
  * 陷阱：/api/me 对匿名请求也返回 200 + user:null，真正拦住非管理员的是后两个接口的
  * 401 / 403，它们让 api() 抛错，结果只剩一条错误提示、两张表保持空白。
  */
@@ -503,7 +587,7 @@ async function loadAll() {
   try {
     const results = await Promise.all([
       api('/api/me'),
-      api('/api/admin/users'),
+      api('/api/admin/users?page=' + usersPage + '&size=' + USERS_PAGE_SIZE),
       api('/api/admin/sites'),
     ]);
 
@@ -513,7 +597,11 @@ async function loadAll() {
 
     summary.textContent = users.total + ' 个用户 · ' + sites.total + ' 个页面';
 
+    // 服务端会把越界的页码钳回最后一页，这里跟着它的结果走
+    usersPage = users.page;
+    usersPages = users.pages;
     renderUsers(users.users);
+    renderUsersPager(users.total, users.page, users.pages);
     renderSites(sites.sites);
     await loadBanners();
   } catch (err) {

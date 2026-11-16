@@ -3491,13 +3491,27 @@ async function handleMcpTokenRevoke(req, res, [id]) {
 
 // ---------------------------------------------------------------- 管理接口
 
+/** 后台用户表：按页取，默认每页 10 条。顺序沿用 listUsers 的 id 倒序。 */
+const ADMIN_USERS_PAGE_SIZE = 10;
+
 async function handleAdminUsers(req, res) {
   if (!(await requireAdmin(req, res))) return;
 
+  const url = new URL(req.url, 'http://internal');
+  const size = Math.min(100, Math.max(1, Number(url.searchParams.get('size')) || ADMIN_USERS_PAGE_SIZE));
+  const total = await countUsers();
+  const pages = Math.max(1, Math.ceil(total / size));
+
+  // 页码越界时钳到最后一页：删掉用户后停在末尾那页不会看到空白表
+  const page = Math.min(pages, Math.max(1, Number(url.searchParams.get('page')) || 1));
+
   sendJson(res, 200, {
     ok: true,
-    total: await countUsers(),
-    users: (await listUsers()).map(publicUser),
+    total,
+    page,
+    size,
+    pages,
+    users: (await listUsers({ limit: size, offset: (page - 1) * size })).map(publicUser),
   });
 }
 
