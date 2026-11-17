@@ -1959,6 +1959,10 @@ async function runAgentTask({
   taskId, cfg, site, userId, threadId, mode = 'code', userText, attachments = [],
 }) {
   const progress = [];
+  /** 细粒度事件流（前端渲染「执行过程」用）：text / reasoning / llm_start / tool_end / retry / step_end */
+  const events = [];
+  /** 思考内容缓冲：整轮攒成一条 reasoning 事件，避免前端刷几十条碎片 */
+  let reasoningBuf = '';
   // 登记取消句柄：用户点「停止」时由 /cancel 接口触发这个 signal
   const signal = registerRunningTask(taskId);
 
@@ -1974,6 +1978,19 @@ async function runAgentTask({
     if (!force && now - lastFlush < FLUSH_MS) return;
     lastFlush = now;
     updatePartial(taskId, streamed).catch(() => {});
+  };
+
+  /**
+   * 把事件流写库（节流：一次工具跑完才刷，不需要每个 token 都刷）。
+   *
+   * 事件里带一个「进行中」的 reasoning 占位，前端看到就知道
+   * 「当前正在思考」，而不是空转。
+   */
+  const pushEvents = (id, list) => {
+    const snapshot = reasoningBuf
+      ? [...list, { type: 'reasoning', text: reasoningBuf, at: Date.now(), live: true }]
+      : list;
+    updateProgress(id, events.length, progress, snapshot).catch(() => {});
   };
 
   try {
@@ -2016,12 +2033,19 @@ async function runAgentTask({
       attachments,
       summary,
       signal,
-      // 流式：每段文字追加到缓冲并节流落库，前端轮询就能看到「正在生成」
-      onDelta: (text) => {
+      // 流式：正文和思考分开落库。
+      // 思考内容不混进正文（否则最终回复里会掺进模型的内心戏），
+      // 而是单独攒一份，结束时长成一个 reasoning 事件给前端折叠显示。
+      onDelta: (text, kind) => {
+        if (kind === 'reasoning') {
+          reasoningBuf += text;
+          return;
+        }
         streamed += text;
         flushPartial();
       },
       onStep: (step) => {
+        // 保留老的 summary 数组（兼容老前端 + 用于版本标签里的「改了 N 处」）
         progress.push({
           name: step.name,
           ok: step.ok,
@@ -2032,7 +2056,13 @@ async function runAgentTask({
         // 开始调工具了，说明这一轮的「说话」部分告一段落：立刻落一次
         flushPartial(true);
         // 进度写库失败不能影响主流程，吞掉
-        updateProgress(taskId, step.step, progress).catch(() => {});
+        updateProgress(taskId, step.step, progress, events).catch(() => {});
+      },
+      // 细粒度事件流：前端渲染成可折叠的「执行过程」
+      onEvent: (event) => {
+        events.push(event);
+        // 工具跑完/模型开始思考/重试，都是值得立刻刷新的节点
+        pushEvents(taskId, events);
       },
     });
 

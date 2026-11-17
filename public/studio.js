@@ -916,22 +916,6 @@
      5. 发送一条消息：异步任务 + 轮询进度
      ---------------------------------------------------------- */
 
-  // 工具名 → 给用户看的动作短语。技术词对用户没意义，翻译成人话。
-  const STEP_LABELS = {
-    list_files: '看看有哪些文件',
-    read_file: '读文件',
-    write_file: '改文件',
-    delete_file: '删文件',
-    update_meta: '改页面信息',
-  };
-
-  /** 把一步工具调用渲染成一行进度文案。 */
-  function stepText(step) {
-    const label = STEP_LABELS[step.name] ?? step.name;
-    const tail = step.path ? ` ${step.path}` : '';
-    return step.ok === false ? `${label}${tail} 失败` : `${label}${tail}`;
-  }
-
   /**
    * 轮询一个任务直到结束。返回任务对象；失败抛错。
    *
@@ -995,6 +979,243 @@
    *   onStarted(data)  拿到 taskId 后回调（返回 { cancel } 让调用方接停止按钮）
    *   onReply(task)    完成回调
    */
+/* ----------------------------------------------------------
+   5.1 执行过程渲染器（trace）
+   ----------------------------------------------------------
+   参考 Cursor / DSH 的做法：默认折叠，**只显示当前那一步**。
+   用户想看细节就点开，能看到完整的时间线（思考 / 调用工具 / 重试 / 说话）。
+
+   之前是「一个会被覆盖的字符串」：跑完就只剩最终回复，过程全丢。
+   现在步骤全部留在 DOM 里，折叠起来不占地方。
+   ---------------------------------------------------------- */
+
+  const TOOL_VERB = {
+    list_files: '看了看文件列表',
+    read_file: '读了',
+    write_file: '改了',
+    delete_file: '删了',
+    update_meta: '改了页面信息',
+  };
+
+  /** 一步工具的中文描述。 */
+  function toolLabel(ev) {
+    const verb = TOOL_VERB[ev.name] ?? ev.name;
+    const tail = ev.path ? ` ${ev.path}` : '';
+    return `${verb}${tail}${ev.ok === false ? '（失败）' : ''}`;
+  }
+
+  function fmtMs(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return '';
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+    const m = Math.floor(ms / 60_000);
+    const s = Math.round((ms % 60_000) / 1000);
+    return `${m}分${s}秒`;
+  }
+
+  /**
+   * 创建一个 trace 容器。
+   *
+   * @returns {{el: HTMLElement, update: Function, finish: Function}}
+   *   update(task)  每次轮询调一次
+   *   finish(task)  任务结束时收尾
+   */
+  MP.createTrace = function () {
+    const el = document.createElement('div');
+    el.className = 'wsTrace';
+
+    // 头部：一行摘要 + 折叠箭头。默认折叠（只显示当前动作）
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'wsTraceHead';
+    head.setAttribute('aria-expanded', 'false');
+    head.innerHTML = '<span class="wsTraceCaret">›</span><span class="wsTraceNow"></span><span class="wsTraceTime"></span>';
+    const nowEl = head.querySelector('.wsTraceNow');
+    const timeEl = head.querySelector('.wsTraceTime');
+
+    // 展开后的完整时间线
+    const body = document.createElement('div');
+    body.className = 'wsTraceBody';
+    body.hidden = true;
+
+    el.appendChild(head);
+    el.appendChild(body);
+
+    let expanded = false;
+    head.addEventListener('click', () => {
+      expanded = !expanded;
+      body.hidden = !expanded;
+      el.classList.toggle('open', expanded);
+      head.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    });
+
+    const startedAt = Date.now();
+    let lastEvents = [];
+    /** 上一次渲染时的时间线长度，避免每 300ms 重画整个 DOM */
+    let renderedCount = -1;
+    let lastStatus = 'running';
+    let timer = null;
+
+    // 计时器：跑的时候「正在思考… 3.2s」要一直跳
+    const tick = () => {
+      if (lastStatus !== 'running' && lastStatus !== 'queued') return;
+      timeEl.textContent = fmtMs(Date.now() - startedAt);
+    };
+    timer = setInterval(tick, 500);
+
+    /** 当前正在做什么 —— 这是折叠状态下唯一显示的那行。 */
+    function currentAction(events, task) {
+      if (task.status === 'queued') return '排队中…';
+      // 从后往前找第一个「有意义」的事件
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const ev = events[i];
+        if (ev.type === 'tool_end') return toolLabel(ev);
+        if (ev.type === 'retry') return `重试中（${ev.attempt}/${ev.maxRetries}）`;
+        if (ev.type === 'reasoning') return '正在思考…';
+        if (ev.type === 'llm_start') return '正在思考…';
+      }
+      return '正在思考…';
+    }
+
+    /** 把事件流渲染成时间线。 */
+    function renderBody(events) {
+      body.textContent = '';
+      let stepGroup = null;
+      let stepNo = 0;
+
+      for (const ev of events) {
+        if (ev.type === 'llm_start') {
+          // 每次模型往返开一个新的分组
+          stepNo += 1;
+          stepGroup = document.createElement('div');
+          stepGroup.className = 'wsTraceStep';
+          const label = document.createElement('div');
+          label.className = 'wsTraceStepLabel';
+          label.textContent = `第 ${stepNo} 轮`;
+          stepGroup.appendChild(label);
+          body.appendChild(stepGroup);
+          continue;
+        }
+
+        const row = document.createElement('div');
+        row.className = 'wsTraceItem';
+
+        if (ev.type === 'reasoning') {
+          row.classList.add('is-reason');
+          const icon = document.createElement('span');
+          icon.className = 'wsTraceIcon';
+          icon.textContent = '💭';
+          const text = document.createElement('div');
+          text.className = 'wsTraceThink';
+          // 思考内容很长，折叠成几行，点开看全部
+          text.textContent = ev.text || '';
+          text.title = '点击展开/收起完整思考';
+          text.addEventListener('click', () => text.classList.toggle('full'));
+          row.appendChild(icon);
+          row.appendChild(text);
+        } else if (ev.type === 'tool_end') {
+          row.classList.add(ev.ok === false ? 'is-fail' : 'is-tool');
+          const icon = document.createElement('span');
+          icon.className = 'wsTraceIcon';
+          icon.textContent = ev.ok === false ? '✕' : '⚙';
+          const text = document.createElement('span');
+          text.className = 'wsTraceText';
+          text.textContent = toolLabel(ev);
+          row.appendChild(icon);
+          row.appendChild(text);
+          if (ev.ms) {
+            const t = document.createElement('span');
+            t.className = 'wsTraceMs';
+            t.textContent = fmtMs(ev.ms);
+            row.appendChild(t);
+          }
+          if (ev.ok === false && ev.error) {
+            const err = document.createElement('div');
+            err.className = 'wsTraceErr';
+            err.textContent = ev.error;
+            row.appendChild(err);
+          }
+        } else if (ev.type === 'retry') {
+          row.classList.add('is-retry');
+          const icon = document.createElement('span');
+          icon.className = 'wsTraceIcon';
+          icon.textContent = '↻';
+          const text = document.createElement('span');
+          text.className = 'wsTraceText';
+          text.textContent = `重试模型请求（${ev.attempt}/${ev.maxRetries}）`;
+          row.appendChild(icon);
+          row.appendChild(text);
+          const t = document.createElement('span');
+          t.className = 'wsTraceMs';
+          t.textContent = `${ev.waitMs}ms 后重试`;
+          row.appendChild(t);
+        } else if (ev.type === 'step_end') {
+          // 一轮结束的收尾，不单独显示（耗时已经在 head 上）
+          continue;
+        } else {
+          continue;
+        }
+
+        (stepGroup || body).appendChild(row);
+      }
+    }
+
+    /**
+     * 每次轮询更新。
+     * @param {object} task 服务端返回的 task（含 events）
+     */
+    function update(task) {
+      lastStatus = task.status;
+      const events = Array.isArray(task.events) ? task.events : [];
+      lastEvents = events;
+
+      // 折叠状态下那行：只显示「现在在干什么」
+      nowEl.textContent = currentAction(events, task);
+
+      // 时间线只在事件数变化时重画（避免每 300ms 抖一次 DOM）
+      if (events.length !== renderedCount) {
+        renderedCount = events.length;
+        renderBody(events);
+      }
+
+      // 流式正文：还没调工具、纯说话时，把文字也放进「当前动作」里
+      if ((task.status === 'running' || task.status === 'queued')
+          && task.text && task.text.trim() && events.length === 0) {
+        nowEl.textContent = task.text.length > 60
+          ? `${task.text.slice(0, 60)}…`
+          : task.text;
+      }
+    }
+
+    /** 任务结束：定格成「已完成 · 用时 X」。 */
+    function finish(task) {
+      lastStatus = task.status;
+      if (timer) { clearInterval(timer); timer = null; }
+      const total = fmtMs(Date.now() - startedAt);
+
+      const events = Array.isArray(task.events) ? task.events : lastEvents;
+      if (events.length !== renderedCount) {
+        renderedCount = events.length;
+        renderBody(events);
+      }
+
+      el.classList.add('done');
+      if (task.status === 'cancelled') el.classList.add('cancelled');
+      if (task.status === 'failed') el.classList.add('failed');
+
+      const toolCount = events.filter((e) => e.type === 'tool_end').length;
+      const parts = [];
+      if (task.status === 'cancelled') parts.push('已停止');
+      else if (task.status === 'failed') parts.push('失败了');
+      else parts.push('已完成');
+      if (toolCount) parts.push(`${toolCount} 步操作`);
+      nowEl.textContent = parts.join(' · ');
+      timeEl.textContent = total;
+    }
+
+    return { el, update, finish };
+  };
+
   MP.pushMessage = async function (opt) {
     const { list, username, name, content, threadId } = opt;
     const attachIds = Array.isArray(opt.attachIds) ? opt.attachIds : [];
@@ -1012,12 +1233,21 @@
       list.scrollTop = list.scrollHeight;
     }
 
-    // 进度气泡：先显示「正在想…」，随后被工具进度替换
-    const progressRow = MP.bubble('agent', '正在想…', true);
-    const progressBubble = progressRow.querySelector('.chatBubble');
-    progressBubble.classList.add('stepping');
+    // 消息行：上面是「执行过程」（折叠），下面是最终回复气泡。
+    // 以前只有一个气泡、过程被覆盖；现在两者都在，过程默认收起。
+    const row = document.createElement('div');
+    row.className = 'chatRow agent';
+
+    const trace = MP.createTrace();
+    row.appendChild(trace.el);
+
+    const progressBubble = document.createElement('div');
+    progressBubble.className = 'chatBubble stepping';
+    progressBubble.textContent = '正在思考…';
+    row.appendChild(progressBubble);
+
     if (list) {
-      list.appendChild(progressRow);
+      list.appendChild(row);
       list.scrollTop = list.scrollHeight;
     }
 
@@ -1049,22 +1279,18 @@
 
       const task = await waitTask(taskId, {
         onProgress: (t) => {
-          if (stopped) return;   // 正在停，别让进度把「正在停止…」覆盖掉
+          // 执行过程面板：一直更新（即使正在停止，过程也要保留下来）
+          trace.update(t);
+          if (stopped) return;
 
-          // 流式：task.text 是服务端边生成边写的半成品。
-          // 有文字就优先显示文字（比「正在想…」有信息量），
-          // 没文字时才退回工具进度 —— 工具执行期间本来就没有文字可显示。
+          // 正文气泡：流式文字一直在长；没有文字时显示「正在思考…」
           const hasText = Boolean(t.text && t.text.trim());
           if (hasText && (t.status === 'running' || t.status === 'queued')) {
             progressBubble.textContent = t.text;
             progressBubble.classList.add('streaming');
-          } else {
-            const steps = Array.isArray(t.steps) ? t.steps : [];
-            if (steps.length) {
-              const last = steps[steps.length - 1];
-              progressBubble.textContent = stepText(last);
-              progressBubble.classList.remove('streaming');
-            }
+          } else if (!hasText) {
+            progressBubble.textContent = '正在思考…';
+            progressBubble.classList.remove('streaming');
           }
 
           if (list) list.scrollTop = list.scrollHeight;
@@ -1072,8 +1298,8 @@
         },
       });
 
-      // 任务完成：把进度气泡换成真正的回复
-      progressRow.classList.remove('pending');
+      // 任务完成：收尾过程面板，气泡换成最终回复
+      trace.finish(task);
       progressBubble.classList.remove('stepping');
       progressBubble.classList.remove('streaming');
       progressBubble.textContent = task.text || '（没有输出）';
@@ -1088,18 +1314,19 @@
       return task;
     } catch (err) {
       mine.classList.remove('pending');
-      progressRow.classList.remove('pending');
       progressBubble.classList.remove('stepping');
-      progressRow.classList.add('failed');
       // 用户主动停止也被 waitTask 当成异常抛出（status=cancelled），
-      // 但这不是错误，别标红吓人 —— 服务端已经在 project.text 里给了人话。
+      // 但这不是错误，别标红吓人 —— 服务端已经在 text 里给了人话。
       if (err.task && err.task.status === 'cancelled') {
+        trace.finish(err.task);
         progressBubble.classList.add('stopped');
         progressBubble.textContent = err.task.text || '已停止';
         if (list) list.scrollTop = list.scrollHeight;
         if (opt.onReply) opt.onReply(err.task);
         return err.task;
       }
+      // 真失败：过程面板定格成失败态，气泡标红
+      trace.finish({ status: 'failed', events: [] });
       progressBubble.classList.add('errtip');
       progressBubble.textContent = err.message || '发送失败';
       throw err;
