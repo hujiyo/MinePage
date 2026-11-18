@@ -80,7 +80,6 @@ import {
   createSite,
   createThread,
   deleteSite,
-  deleteThread,
   ensureDefaultThread,
   findSiteByUsername,
   findSiteHeaderById,
@@ -151,8 +150,9 @@ import {
   upsertModel,
 } from './lib/agent/models.js';
 import { canEncrypt, encryptSecret, maskSecret } from './lib/agent/crypto.js';
-import { LlmError } from './lib/agent/llm.js';
+import { LlmError } from './lib/agent/errors.js';
 import { runAgent } from './lib/agent/loop.js';
+import { deleteThreadWithCheckpoints, deleteSiteCheckpoints } from './lib/agent/thread-lifecycle.js';
 import {
   clearThreadSummary,
   compactThread,
@@ -1530,7 +1530,12 @@ async function handleSiteDelete(req, res, [username, name]) {
   const site = await ownSiteOrRespond(req, res, user, username, name);
   if (!site) return;
 
+  // 删站是级联的（site → agent_threads 有外键），但 checkpoint 表没有外键，
+  // 所以先把会话列表查出来，删站后一个个清检查点。
+  const threads = await listThreads(site.id).catch(() => []);
   await deleteSite(site.id);
+  await deleteSiteCheckpoints(site.id, threads).catch(() => {});
+
   sendJson(res, 200, { ok: true });
 }
 
@@ -2033,6 +2038,9 @@ async function runAgentTask({
       attachments,
       summary,
       signal,
+      // 传给 LangGraph 当 checkpoint 的 thread_id：同一会话共一条检查点链，
+      // 崩溃后能用同一个 threadId 续跑
+      threadId,
       // 流式：正文和思考分开落库。
       // 思考内容不混进正文（否则最终回复里会掺进模型的内心戏），
       // 而是单独攒一份，结束时长成一个 reasoning 事件给前端折叠显示。
@@ -2296,7 +2304,8 @@ async function handleThreadDelete(req, res, [username, name, id]) {
   const thread = await threadOrRespond(res, site, id);
   if (!thread) return;
 
-  await deleteThread(thread.id);
+  // 删会话要连 LangGraph 的检查点一起清 —— 检查点表没有外键，不显式清会留孤儿行
+  await deleteThreadWithCheckpoints(site.id, thread.id);
   sendJson(res, 200, { ok: true });
 }
 

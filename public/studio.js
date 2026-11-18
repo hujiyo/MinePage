@@ -1241,9 +1241,13 @@
     const trace = MP.createTrace();
     row.appendChild(trace.el);
 
+    // 正文气泡先藏起来。
+    // 模型还没吐出任何字时，过程面板的标题已经在显示「正在思考… 24.5s」，
+    // 下面再挂一个「正在思考…」是重复的两行，看着像卡住了。
+    // 等第一段正文到达（或任务结束/出错）再显示。
     const progressBubble = document.createElement('div');
     progressBubble.className = 'chatBubble stepping';
-    progressBubble.textContent = '正在思考…';
+    progressBubble.hidden = true;
     row.appendChild(progressBubble);
 
     if (list) {
@@ -1254,6 +1258,13 @@
     let taskId = null;
     /** 用户点过停止以后，把最终气泡的样式换成「已停止」而不是普通回复 */
     let stopped = false;
+    /** 正文气泡出现过没有 —— 用来避免每 300ms 反复改 hidden 触发重排 */
+    let bubbleShown = false;
+    const showBubble = () => {
+      if (bubbleShown) return;
+      bubbleShown = true;
+      progressBubble.hidden = false;
+    };
 
     try {
       const data = await MP.sendSiteMessage(username, name, content, threadId, attachIds);
@@ -1266,6 +1277,8 @@
           cancel: async () => {
             if (!taskId || stopped) return;
             stopped = true;
+            // 点停止时要立刻给反馈：哪怕正文气泡还没出现过，也得让它显形
+            showBubble();
             progressBubble.textContent = '正在停止…';
             try {
               await MP.cancelTask(taskId);
@@ -1283,14 +1296,13 @@
           trace.update(t);
           if (stopped) return;
 
-          // 正文气泡：流式文字一直在长；没有文字时显示「正在思考…」
+          // 正文气泡：只在真有文字可显示时才出现。
+          // 没文字时什么都不做 —— 过程面板顶上那行「正在思考… 24.5s」已经够了。
           const hasText = Boolean(t.text && t.text.trim());
           if (hasText && (t.status === 'running' || t.status === 'queued')) {
+            showBubble();
             progressBubble.textContent = t.text;
             progressBubble.classList.add('streaming');
-          } else if (!hasText) {
-            progressBubble.textContent = '正在思考…';
-            progressBubble.classList.remove('streaming');
           }
 
           if (list) list.scrollTop = list.scrollHeight;
@@ -1300,6 +1312,7 @@
 
       // 任务完成：收尾过程面板，气泡换成最终回复
       trace.finish(task);
+      showBubble();
       progressBubble.classList.remove('stepping');
       progressBubble.classList.remove('streaming');
       progressBubble.textContent = task.text || '（没有输出）';
@@ -1319,6 +1332,7 @@
       // 但这不是错误，别标红吓人 —— 服务端已经在 text 里给了人话。
       if (err.task && err.task.status === 'cancelled') {
         trace.finish(err.task);
+        showBubble();
         progressBubble.classList.add('stopped');
         progressBubble.textContent = err.task.text || '已停止';
         if (list) list.scrollTop = list.scrollHeight;
@@ -1327,6 +1341,7 @@
       }
       // 真失败：过程面板定格成失败态，气泡标红
       trace.finish({ status: 'failed', events: [] });
+      showBubble();
       progressBubble.classList.add('errtip');
       progressBubble.textContent = err.message || '发送失败';
       throw err;

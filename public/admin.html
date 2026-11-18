@@ -108,15 +108,17 @@
       <input type="hidden" id="mfEditing" value="">
 
       <label class="field">
-        <span class="label">Provider ID</span>
+        <span class="label">Provider ID<span class="req">*</span></span>
         <input id="mfId" type="text" maxlength="64" autocomplete="off" spellcheck="false"
-               placeholder="acme-gateway">
-        <span class="hint">小写字母开头，可用字母数字和 - . _；会话会记住它，编辑时不可改。</span>
+               placeholder="acme-gateway" required>
+        <span class="hint">小写字母开头，只能用字母、数字和 <code>-</code> <code>.</code> <code>_</code>。
+          输入空格会自动转成连字符。会话会记住它，编辑时不可改。</span>
       </label>
 
       <label class="field">
-        <span class="label">显示名称</span>
-        <input id="mfLabel" type="text" maxlength="80" autocomplete="off" placeholder="Acme Gateway">
+        <span class="label">显示名称<span class="req">*</span></span>
+        <input id="mfLabel" type="text" maxlength="80" autocomplete="off" placeholder="Acme Gateway"
+               required>
       </label>
 
       <label class="field wide">
@@ -139,8 +141,24 @@
 
       <label class="field wide">
         <span class="label">API 密钥</span>
-        <input id="mfKey" type="password" maxlength="200" autocomplete="new-password"
-               placeholder="输入 API 密钥">
+        <!-- 眼睛按钮在输入框里，点一下明文/密文切换。
+             autocomplete="new-password" 是必须的：不加会被浏览器的密码管理器
+             自动填进旧密码，保存时把正确的 key 静默覆盖掉。 -->
+        <span class="keyWrap">
+          <input id="mfKey" type="password" maxlength="200" autocomplete="new-password"
+                 placeholder="输入 API 密钥">
+          <button type="button" class="keyEye" id="mfKeyEye" title="显示 / 隐藏"
+                  aria-label="显示或隐藏密钥" aria-pressed="false">
+            <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+              <path class="eyeOpen" d="M1.5 12S5 5.5 12 5.5 22.5 12 22.5 12 19 18.5 12 18.5 1.5 12 1.5 12Z"
+                    fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+              <circle class="eyeOpen" cx="12" cy="12" r="3.2"
+                      fill="none" stroke="currentColor" stroke-width="1.8"/>
+              <path class="eyeOff" d="M3 3l18 18" fill="none" stroke="currentColor"
+                    stroke-width="1.8" stroke-linecap="round" style="display:none"/>
+            </svg>
+          </button>
+        </span>
         <span class="hint" id="mfKeyHint">加密后入库，之后只能看到掩码。留空表示不修改（新建时则是不配）。</span>
       </label>
 
@@ -166,9 +184,13 @@
 
       <div class="modelFormFoot">
         <button type="submit" id="mfSubmit">保存</button>
+        <button type="button" class="ghost" id="mfProbe">测试连接</button>
         <button type="button" class="ghost" id="mfCancel" hidden>取消编辑</button>
         <span class="muted" id="mfMsg" style="font-size:12px"></span>
       </div>
+
+      <!-- 测试结果：分两步展示，哪一步失败一目了然 -->
+      <div class="probeBox" id="probeBox" hidden></div>
     </form>
   </section>
 
@@ -192,6 +214,7 @@ const mfBaseURL = document.getElementById('mfBaseURL');
 const mfApi = document.getElementById('mfApi');
 const mfModel = document.getElementById('mfModel');
 const mfKey = document.getElementById('mfKey');
+const mfKeyEye = document.getElementById('mfKeyEye');
 const mfKeyHint = document.getElementById('mfKeyHint');
 const mfContext = document.getElementById('mfContext');
 const mfOutput = document.getElementById('mfOutput');
@@ -200,6 +223,8 @@ const mfVision = document.getElementById('mfVision');
 const mfReasoning = document.getElementById('mfReasoning');
 const mfEnabled = document.getElementById('mfEnabled');
 const mfSubmit = document.getElementById('mfSubmit');
+const mfProbe = document.getElementById('mfProbe');
+const probeBox = document.getElementById('probeBox');
 const mfCancel = document.getElementById('mfCancel');
 const mfMsg = document.getElementById('mfMsg');
 const mfEditing = document.getElementById('mfEditing');
@@ -743,6 +768,7 @@ function startEdit(m) {
   mfApi.value = m.api || 'openai-completions';
   mfModel.value = m.model || '';
   mfKey.value = '';
+  setKeyVisible(false);              // 编辑态默认密文
   mfKeyHint.textContent = m.hasKey
     ? '已配置（' + (m.keyMask || '****') + '）。留空表示不修改。'
     : '当前没有配置 key，填一个才能用。';
@@ -771,6 +797,9 @@ function resetForm() {
   mfSubmit.textContent = '保存';
   mfCancel.hidden = true;
   mfMsg.textContent = '';
+  setKeyVisible(false);   // 回到密文态，别把上次的明文状态带过来
+  probeBox.hidden = true; // 上次的测试结果不该留着误导
+  probeBox.textContent = '';
 }
 
 modelForm.addEventListener('submit', async (e) => {
@@ -778,11 +807,34 @@ modelForm.addEventListener('submit', async (e) => {
   mfMsg.textContent = '';
 
   const editing = mfEditing.value;
-  const id = editing || mfId.value.trim().toLowerCase();
+  // 新建时再洗一遍：万一用户没触发 input 事件（比如自动填充）
+  const id = editing || cleanModelId(mfId.value);
+  const label = mfLabel.value.trim();
+  const baseURL = mfBaseURL.value.trim();
+
+  // 前端先拦一遍。后端也会校验，但让用户等一次网络往返才知道「名字没填」
+  // 体验很差 —— 而且错误信息出现在表单底部，容易看不见。
+  const focusField = (el, message) => {
+    mfMsg.textContent = message;
+    el.focus();
+    el.classList.add('invalid');
+    setTimeout(() => el.classList.remove('invalid'), 1600);
+  };
+
+  if (!id) return focusField(mfId, 'Provider ID 不能为空');
+  if (!MODEL_ID_RE_FE.test(id)) {
+    return focusField(mfId, 'ID 要以小写字母开头，只能用字母、数字和 - . _');
+  }
+  if (!label) return focusField(mfLabel, '显示名称不能为空');
+  if (!baseURL) return focusField(mfBaseURL, 'API 地址不能为空');
+  if (!/^https?:\/\//i.test(baseURL)) {
+    return focusField(mfBaseURL, 'API 地址要以 http:// 或 https:// 开头');
+  }
+
   const payload = {
     id,
-    label: mfLabel.value.trim(),
-    baseURL: mfBaseURL.value.trim(),
+    label,
+    baseURL,
     api: mfApi.value,
     model: mfModel.value.trim() || id,
     contextWindow: Number(mfContext.value) || 128000,
@@ -796,6 +848,12 @@ modelForm.addEventListener('submit', async (e) => {
   const typedKey = mfKey.value.trim();
   if (typedKey) payload.apiKey = typedKey;
   else if (!editing) payload.apiKey = '';
+
+  // 地址不以 /v1 结尾只警告不拦：少数网关确实不带 /v1，
+  // 但绝大多数 OpenAI 兼容服务都要，写错了会 404 且很难查。
+  if (!/\/v1\/?$/.test(baseURL)) {
+    mfMsg.textContent = '提示：OpenAI 兼容地址通常以 /v1 结尾，确认一下再保存（仍然可以保存）';
+  }
 
   mfSubmit.disabled = true;
   mfSubmit.textContent = editing ? '保存中…' : '添加中…';
@@ -819,6 +877,160 @@ modelForm.addEventListener('submit', async (e) => {
 });
 
 mfCancel.addEventListener('click', resetForm);
+
+/* ----------------------------------------------------------------
+   测试连接
+   ----------------------------------------------------------------
+   保存前先试一次，把两类最容易犯、又最难自查的错误当场暴露：
+     1. API 地址填成官网页面 → /models 返回 404
+     2. 模型 ID 打错         → /chat/completions 返回 model_not_found
+
+   不写库，所以填错了也没关系，改完再点一次就行。
+   ---------------------------------------------------------------- */
+
+function renderProbe(data) {
+  probeBox.hidden = false;
+  probeBox.textContent = '';
+  probeBox.className = 'probeBox ' + (data.ok ? 'ok' : 'bad');
+
+  const line = (step) => {
+    const row = document.createElement('div');
+    row.className = 'probeRow ' + (step.ok ? 'ok' : 'bad');
+    const icon = document.createElement('span');
+    icon.className = 'probeIcon';
+    icon.textContent = step.ok ? '✓' : '✕';
+    const text = document.createElement('span');
+    text.className = 'probeText';
+    text.textContent = (step.name ? step.name + '：' : '') + step.detail;
+    row.appendChild(icon);
+    row.appendChild(text);
+    return row;
+  };
+
+  if (data.step1) probeBox.appendChild(line(data.step1));
+  if (data.step2) probeBox.appendChild(line(data.step2));
+
+  // 地址和密钥都通了，但模型 id 不在网关清单里 —— 单独提醒一句
+  if (data.ok && data.modelInGateway === false) {
+    const warn = document.createElement('div');
+    warn.className = 'probeNote';
+    warn.textContent = `注意：「${mfModel.value.trim() || mfId.value.trim()}」不在网关返回的模型清单里，`
+      + '但调用是成功的。如果之后报 model_not_found，改这个字段。';
+    probeBox.appendChild(warn);
+  }
+
+  // 成功时把网关的模型清单列出来，方便照着填「实际模型 ID」
+  if (data.gatewayModels && data.gatewayModels.length) {
+    const list = document.createElement('div');
+    list.className = 'probeNote';
+    list.textContent = `网关共提供 ${data.gatewayCount} 个模型：`
+      + data.gatewayModels.join('、');
+    probeBox.appendChild(list);
+  }
+}
+
+mfProbe.addEventListener('click', async () => {
+  const baseURL = mfBaseURL.value.trim();
+  const typedKey = mfKey.value.trim();
+
+  // 编辑已有模型时不填 key 也能测 —— 服务端会用库里那个
+  if (!baseURL) {
+    probeBox.hidden = false;
+    probeBox.className = 'probeBox bad';
+    probeBox.textContent = '先填 API 地址';
+    return;
+  }
+
+  mfProbe.disabled = true;
+  const old = mfProbe.textContent;
+  mfProbe.textContent = '测试中…';
+
+  try {
+    // 不用 api()：它在 ok:false 时直接抛错，而这里需要读分步结果来渲染
+    const res = await fetch('/api/admin/models/probe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: mfEditing.value || mfId.value.trim(),
+        baseURL,
+        model: mfModel.value.trim(),
+        apiKey: typedKey,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || '请求失败');
+    renderProbe(data);
+  } catch (err) {
+    probeBox.hidden = false;
+    probeBox.className = 'probeBox bad';
+    probeBox.textContent = err.message || '测试失败';
+  } finally {
+    mfProbe.disabled = false;
+    mfProbe.textContent = old;
+  }
+});
+
+/* ----------------------------------------------------------------
+   密钥显隐
+   ----------------------------------------------------------------
+   默认密文（password）。点眼睛切成明文看自己填了什么。
+   为什么需要：粘贴的 key 常常多一个空格或少了几个字符，
+   密文状态下根本看不出来，只能反复重填。
+   ---------------------------------------------------------------- */
+
+function setKeyVisible(show) {
+  mfKey.type = show ? 'text' : 'password';
+  mfKeyEye.setAttribute('aria-pressed', show ? 'true' : 'false');
+  mfKeyEye.title = show ? '隐藏' : '显示';
+  // 睁眼 / 闭眼两个图形切换
+  mfKeyEye.querySelectorAll('.eyeOpen').forEach((el) => { el.style.display = show ? 'none' : ''; });
+  mfKeyEye.querySelectorAll('.eyeOff').forEach((el) => { el.style.display = show ? '' : 'none'; });
+  mfKeyEye.classList.toggle('on', show);
+}
+
+mfKeyEye.addEventListener('click', () => {
+  setKeyVisible(mfKey.type === 'password');
+  // 切回密文时不保留焦点处的光标位置，直接选中便于整段替换
+  if (mfKey.type === 'password') mfKey.focus();
+});
+
+/* ----------------------------------------------------------------
+   Provider ID 实时清洗
+   ----------------------------------------------------------------
+   后端只认 [a-z][a-z0-9._-]*，但输入框不管这些。
+   用户在「open design」里敲个空格，要等点保存才被后端拒，
+   还看不懂为什么。这里输入时就转好：
+     空格 → 连字符（「open design」比「opendesign」更符合直觉）
+     大写 → 小写
+     其它非法字符 → 直接删掉
+   ---------------------------------------------------------------- */
+
+const MODEL_ID_RE_FE = /^[a-z][a-z0-9._-]{0,63}$/;
+
+function cleanModelId(raw) {
+  let v = String(raw ?? '')
+    .toLowerCase()
+    .replace(/\s+/g, '-')                 // 空格转连字符
+    .replace(/[^a-z0-9._-]/g, '');        // 其余非法字符删掉
+  // 首字符必须是小写字母：如果开头是数字 / 符号，先补一个 a
+  if (v && !/^[a-z]/.test(v)) v = 'a' + v.replace(/^[^a-z0-9._-]+/, '');
+  return v.slice(0, 64);
+}
+
+mfId.addEventListener('input', () => {
+  const before = mfId.value;
+  const after = cleanModelId(before);
+  if (after !== before) {
+    // 记住光标位置，避免中途输入时跳到末尾
+    const pos = Math.max(0, mfId.selectionStart - (before.length - after.length));
+    mfId.value = after;
+    try { mfId.setSelectionRange(pos, pos); } catch { /* 某些浏览器在 type=number 上不支持 */ }
+  }
+  // 编辑态不改 id，也不做校验
+  if (mfEditing.value) return;
+  if (!after) { mfMsg.textContent = ''; return; }
+  mfMsg.textContent = MODEL_ID_RE_FE.test(after) ? '' : 'ID 要以小写字母开头';
+});
 
 // ---------------------------------------------------------------- 首页轮播位
 

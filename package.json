@@ -14,6 +14,9 @@
     "smoke:coin": "node scripts/coin-page-smoke.mjs"
   },
   "dependencies": {
+    "@langchain/core": "^1.4.1",
+    "@langchain/langgraph": "^1.7.5",
+    "@langchain/openai": "^1.8.4",
     "mysql2": "^3.24.5",
     "nodemailer": "^10.0.13"
   }
