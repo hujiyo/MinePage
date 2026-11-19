@@ -922,12 +922,22 @@
    * interval 默认 300ms：服务端每 250ms 落一次流式文本，
    * 轮询太慢会让「逐字出现」变成「一段一段跳」，看起来反而更卡。
    * 300ms 一个轻量 GET，对本地/内网完全不是负担。
+   *
+   * 关于 timeoutMs：**默认不再设总时长上限**。
+   * 以前写死 150 秒，结果用户给的任务越详细、agent 跑得越久，前端就越先放弃，
+   * 显示「等太久了，刷新页面看看进度」—— 但后端其实还在正常跑。
+   * 现在改成「只要任务状态还在变（queued/running）就一直等」，
+   * 真正的死亡判定交给后端（空闲超时）和任务表 TTL。
+   * 传 timeoutMs > 0 才启用上限（保留给测试用）。
    */
-  async function waitTask(taskId, { onProgress, interval = 300, timeoutMs = 150000 } = {}) {
+  async function waitTask(taskId, { onProgress, interval = 300, timeoutMs = 0 } = {}) {
     const startedAt = Date.now();
+    let lastStatus = '';
+    let lastChangeAt = Date.now();
+
     for (;;) {
-      if (Date.now() - startedAt > timeoutMs) {
-        throw new Error('等太久了，刷新页面看看进度');
+      if (timeoutMs > 0 && Date.now() - startedAt > timeoutMs) {
+        throw new Error(`等了超过 ${Math.round(timeoutMs / 1000)} 秒还没结束，可以去任务列表看看进度`);
       }
       await new Promise((r) => setTimeout(r, interval));
 
@@ -939,6 +949,15 @@
         // 任务过期（24 小时后清掉）就别再轮询了
         if (err.status === 404) throw new Error('这个任务已经过期了，刷新页面看看结果');
         throw err;
+      }
+
+      // 状态没变超过 3 分钟就提示一次（不是中断，只是让用户知道还在跑）
+      if (task.status !== lastStatus) {
+        lastStatus = task.status;
+        lastChangeAt = Date.now();
+      } else if (Date.now() - lastChangeAt > 180_000 && onProgress) {
+        onProgress({ ...task, staleHint: true });
+        lastChangeAt = Date.now();   // 每 3 分钟提醒一次，不要刷屏
       }
 
       if (onProgress) onProgress(task);
