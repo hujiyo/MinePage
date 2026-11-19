@@ -31,7 +31,6 @@ import {
   SITE_TITLE_MAX,
   SITE_DESC_MAX,
   SITE_MESSAGE_MAX,
-  SITE_MESSAGES_KEEP,
   BIO_MAX,
   COMMENT_MAX,
   MAX_COINS_PER_SITE,
@@ -71,7 +70,6 @@ import { issueCode, consumeCode } from './lib/verification.js';
 import { handleMcp } from './lib/mcp/server.js';
 import { createMcpToken, listMcpTokens, revokeMcpToken } from './lib/mcp/tokens.js';
 import {
-  addSiteMessage,
   assertStorageBudget,
   countAllSites,
   countDraftsByOwner,
@@ -91,9 +89,7 @@ import {
   listAllSites,
   listDraftSitesByOwner,
   listSiteFiles,
-  listSiteMessages,
   listSitesByOwner,
-  listThreadMessages,
   listThreads,
   openSiteDraft,
   publishDraft,
@@ -153,6 +149,7 @@ import { canEncrypt, encryptSecret, maskSecret } from './lib/agent/crypto.js';
 import { LlmError } from './lib/agent/errors.js';
 import { runAgent } from './lib/agent/loop.js';
 import { deleteThreadWithCheckpoints, deleteSiteCheckpoints } from './lib/agent/thread-lifecycle.js';
+import { readThreadHistory, readSiteHistory } from './lib/agent/history.js';
 import {
   clearThreadSummary,
   compactThread,
@@ -1787,14 +1784,17 @@ async function handleSiteMessagesList(req, res, [username, name]) {
     sendJson(res, 200, {
       ok: true,
       thread,
-      messages: await listThreadMessages(threadId, SITE_MESSAGES_KEEP),
+      // 历史现在从 LangGraph 检查点读（site_messages 已停用）
+      messages: await readThreadHistory(site.id, threadId),
     });
     return;
   }
 
+  // 不带 threadId 的老接口：把这个会话的历史都拼出来
+  const threads = await listThreads(site.id).catch(() => []);
   sendJson(res, 200, {
     ok: true,
-    messages: await listSiteMessages(site.id, SITE_MESSAGES_KEEP),
+    messages: await readSiteHistory(site.id, threads.map((t) => t.id)),
   });
 }
 
@@ -1912,8 +1912,16 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
     return;
   }
 
-  // 用户消息先落库：即便任务失败，用户说的这句话也不能丢
-  const mine = await addSiteMessage(site.id, 'user', content, thread.id, attachIds);
+  // 用户消息不再写 site_messages（那张表已停用）。
+  // 它会作为本轮的新增消息进 LangGraph，被检查点自动持久化。
+  // 但接口返回体里还要带这条消息给前端做乐观更新，所以这里造一个等价的。
+  const mine = {
+    id: `local-${Date.now()}`,
+    role: 'user',
+    content,
+    attach_ids: attachIds.join(','),
+    created_at: new Date().toISOString(),
+  };
 
   // 图片本体在后台任务里再读（这里少一次大 BLOB 查询）
   const attachments = attachIds.length
@@ -2001,16 +2009,16 @@ async function runAgentTask({
   try {
     await markRunning(taskId);
 
-    // 这个会话的历史（不含刚写进去的这条用户消息，它由 userText 单独传）。
-    // 注意**不在这里 slice(-40)**：旧代码硬砍 40 条，把 480k 的窗口用成了 1.2 万 token。
-    // 真正该在哪一层裁，交给 buildHistory 按 token 预算算。
-    const rows = await listThreadMessages(threadId, SITE_MESSAGES_KEEP);
-    const history = rows.filter((m) => m.content !== userText || m.role !== 'user');
+    // 历史不再从 site_messages 读 —— 检查点是唯一来源，
+    // runAgent 只传本轮新增消息，历史靠 checkpointer 自动追加。
+    //
+    // 压缩（compact）仍然保留：它把很久以前的对话压成摘要，
+    // 由 agent 节点在需要时注入 system prompt。这里只负责「要不要压」和取摘要。
 
     // 会话太长就先压一次（超出阈值才真的调模型，否则这行几乎零开销）
     let summary = '';
     try {
-      const compactResult = await compactThread({ threadId, rows: history });
+      const compactResult = await compactThread({ threadId, rows: await readThreadHistory(site.id, threadId) });
       if (compactResult.compacted) {
         summary = compactResult.summary;
         console.log(
@@ -2019,7 +2027,7 @@ async function runAgentTask({
         );
       }
     } catch (err) {
-      // 压缩失败不影响这一轮：buildHistory 还会按预算裁
+      // 压缩失败不影响这一轮
       console.error('[compact]', err?.message ?? err);
     }
     // 压缩后重新取一次摘要（compactThread 成功时已经写库了）
@@ -2032,7 +2040,6 @@ async function runAgentTask({
       cfg,
       site,
       userId,
-      history,
       userText,
       mode,
       attachments,
@@ -2090,7 +2097,9 @@ async function runAgentTask({
 
     const replyText = result.text;
 
-    const reply = await addSiteMessage(site.id, 'agent', replyText, threadId);
+    // 回复不再写 site_messages —— agent 的 AIMessage 已经由检查点持久化。
+    // 任务表和检查点各管一摊：任务表给前端轮询进度，检查点给历史和恢复。
+    const reply = { id: `task-${taskId}`, role: 'agent', content: replyText };
 
     if (result.abortedByUser) {
       await cancelTask(taskId, { text: replyText, steps: progress });
@@ -2102,12 +2111,8 @@ async function runAgentTask({
     // 同时把当前状态标成「已修改」，界面上不会假装它还等于某个版本。
     if (saved && saved.skipped) {
       await markDirty(site.id).catch(() => {});
-      await addSiteMessage(
-        site.id,
-        'agent',
-        `提醒：这次改动${saved.reason}，所以没能存成一个版本，这次改动回退不了。`,
-        threadId,
-      );
+      // 这条提醒只走任务表（前端从 task.text 能看到），不进检查点
+      console.warn('[agent] 版本未保存:', saved.reason);
     }
 
     return { reply, saved };
@@ -2118,13 +2123,7 @@ async function runAgentTask({
 
     console.error('[agent-task]', taskId, err?.code ?? '', message);
 
-    // 失败也要给用户一句人话，否则前端只能显示「失败」
-    await addSiteMessage(
-      site.id,
-      'agent',
-      `这边出了点问题：${message}。可以再试一次，或者换个说法。`,
-      threadId,
-    ).catch(() => {});
+    // 失败给用户一句人话：进任务表，前端从 task.error 显示
     await failTask(taskId, message, progress).catch(() => {});
   } finally {
     // 不管什么结局都要摘掉取消句柄，否则 Map 会一直涨
@@ -2284,7 +2283,7 @@ async function handleThreadCompact(req, res, [username, name, id]) {
   if (body.reset === true) await clearThreadSummary(thread.id);
 
   try {
-    const rows = await listThreadMessages(thread.id, SITE_MESSAGES_KEEP);
+    const rows = await readThreadHistory(site.id, thread.id);
     const result = await compactThread({ threadId: thread.id, rows });
     sendJson(res, 200, { ok: true, ...result });
   } catch (err) {
@@ -2320,7 +2319,12 @@ async function handleThreadMessages(req, res, [username, name, id]) {
   const thread = await threadOrRespond(res, site, id);
   if (!thread) return;
 
-  const messages = await listThreadMessages(thread.id, SITE_MESSAGES_KEEP);
+  // 历史从检查点读。检查点不存附件 id（图片只在当轮发给模型，不进长期历史），
+  // 所以 attach_ids 统一给空串，下面的附件补全逻辑自然跳过。
+  const messages = (await readThreadHistory(site.id, thread.id)).map((m) => ({
+    ...m,
+    attach_ids: '',
+  }));
 
   // 把 attach_ids 拆成数组并补上图片元信息（不含字节，前端按 id 单独取图）。
   // 一次批量查，避免每条消息一个查询。
