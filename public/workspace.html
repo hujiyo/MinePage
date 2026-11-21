@@ -783,7 +783,9 @@ async function loadMessages() {
   }
   try {
     const data = await MP.api(api('/threads/' + threadId + '/messages'));
-    MP.renderMessages(msgs, data.messages || [], '有什么想改的，直接说。');
+    // 第四个参数是这一会话的历史任务：用来重建「执行过程」面板。
+    // 不传的话刷新后只剩气泡，思考和工具调用过程全丢（用户报的问题）。
+    MP.renderMessages(msgs, data.messages || [], '有什么想改的，直接说。', data.tasks || []);
   } catch {
     MP.renderMessages(msgs, [], '对话记录加载失败，可以继续发消息。');
   }

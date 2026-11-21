@@ -574,7 +574,17 @@
   };
 
   /** 用一串服务端消息重绘对话流。 */
-  MP.renderMessages = function (list, messages, emptyText) {
+  /**
+   * 渲染一整个对话。
+   *
+   * @param {HTMLElement} list 容器
+   * @param {Array} messages 消息数组（user/agent 交替）
+   * @param {string} [emptyText] 空态文案
+   * @param {Array} [tasks] 这个会话的历史任务（含 events）。
+   *        传了就按「任务 → 消息」的顺序把执行过程面板也重建出来，
+   *        刷新页面后不会只剩气泡（用户报过：过程一刷新就没了）。
+   */
+  MP.renderMessages = function (list, messages, emptyText, tasks) {
     list.textContent = '';
     if (!messages || !messages.length) {
       if (emptyText) {
@@ -585,14 +595,191 @@
       }
       return;
     }
+
+    // 任务按 created_at 正序，与消息顺序一一对应（一轮 = 一条 user + 一条 agent）。
+    // 用游标把任务依次配到 agent 气泡上，配不上就不加面板，绝不硬凑。
+    const pendingTasks = Array.isArray(tasks) ? tasks.slice().sort((a, b) => {
+      const ta = String(a.createdAt ?? a.created_at ?? '');
+      const tb = String(b.createdAt ?? b.created_at ?? '');
+      return ta < tb ? -1 : ta > tb ? 1 : 0;
+    }) : [];
+    let taskCursor = 0;
+
     messages.forEach((m) => {
       // 服务端只给元信息（id/mime/size），真正取图走 GET /attachments/:id
       const imgs = Array.isArray(m.attachments) && m.attachments.length && MP.attachmentUrl
         ? m.attachments.map((a) => ({ url: MP.attachmentUrl(a.id) }))
         : null;
+
+      // agent 气泡之前先把对应的执行过程面板插进去
+      if (m.role === 'agent' && pendingTasks.length) {
+        const task = pendingTasks[taskCursor];
+        if (task) {
+          taskCursor += 1;
+          const trace = MP.buildTraceFromTask(task);
+          if (trace) list.appendChild(trace);
+        }
+      }
+
       list.appendChild(MP.bubble(m.role, m.content, false, imgs));
     });
+
     list.scrollTop = list.scrollHeight;
+  };
+
+  /**
+   * 从一个已完成的任务对象重建「执行过程」面板。
+   *
+   * 复用实时渲染那套 DOM 类名（wsTrace / wsTraceStep / wsTraceItem …），
+   * 保证刷新前后的观感完全一致。默认折叠，点开才看细节。
+   *
+   * @returns {HTMLElement|null} 没有事件/步骤就返回 null（不占地方）
+   */
+  MP.buildTraceFromTask = function (task) {
+    const events = Array.isArray(task?.events) ? task.events : [];
+    const steps = Array.isArray(task?.steps) ? task.steps : [];
+    if (!events.length && !steps.length) return null;
+
+    const status = task.status ?? 'done';
+
+    const box = document.createElement('div');
+    box.className = 'wsTrace done';
+    if (status === 'failed') box.classList.add('failed');
+    if (status === 'cancelled') box.classList.add('cancelled');
+
+    // ---- 头部：已完成 · N 步操作 · 总耗时 ----
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'wsTraceHead';
+
+    const caret = document.createElement('span');
+    caret.className = 'wsTraceCaret';
+    caret.textContent = '▸';
+    head.appendChild(caret);
+
+    const now = document.createElement('span');
+    now.className = 'wsTraceNow';
+
+    const title = status === 'failed' ? '失败了'
+      : status === 'cancelled' ? '已停止'
+        : '已完成';
+    // 步数优先用 step_end 事件数（更准），退回 steps 长度
+    const stepCount = events.filter((e) => e.type === 'step_end').length || steps.length;
+    now.textContent = stepCount ? `${title} · ${stepCount} 步操作` : title;
+    head.appendChild(now);
+
+    const times = events.map((e) => Number(e.at)).filter((n) => Number.isFinite(n) && n > 0);
+    if (times.length >= 2) {
+      const ms = Math.max(...times) - Math.min(...times);
+      const dur = document.createElement('span');
+      dur.className = 'wsTraceTime';
+      dur.textContent = ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+      head.appendChild(dur);
+    }
+    box.appendChild(head);
+
+    // ---- 主体：按轮分组 ----
+    const body = document.createElement('div');
+    body.className = 'wsTraceBody';
+    body.hidden = true;   // 默认折叠，和实时渲染一致
+
+    const rounds = new Map();
+    const bump = (step) => {
+      const k = Number(step) || 1;
+      if (!rounds.has(k)) rounds.set(k, { tools: [], reasoning: '' });
+      return rounds.get(k);
+    };
+
+    let maxStep = 1;
+    for (const e of events) {
+      if (!e) continue;
+      if (e.type === 'tool_end') {
+        const k = Number(e.step) || 1;
+        maxStep = Math.max(maxStep, k);
+        bump(k).tools.push(e);
+      } else if (e.type === 'reasoning' && e.text) {
+        bump(Number(e.step) || maxStep).reasoning += e.text;
+      }
+    }
+
+    // 老数据没有 events，退化用 steps
+    if (!rounds.size && steps.length) {
+      const r = bump(1);
+      for (const s of steps) {
+        r.tools.push({ name: s.name, ok: s.ok, path: s.path, error: s.error, ms: null });
+      }
+    }
+
+    for (const [step, round] of [...rounds.entries()].sort((a, b) => a[0] - b[0])) {
+      if (!round.tools.length && !round.reasoning) continue;
+
+      const stepEl = document.createElement('div');
+      stepEl.className = 'wsTraceStep';
+
+      const label = document.createElement('div');
+      label.className = 'wsTraceStepLabel';
+      label.textContent = `第 ${step} 轮`;
+      stepEl.appendChild(label);
+
+      if (round.reasoning) {
+        const think = document.createElement('div');
+        think.className = 'wsTraceItem is-reason';
+        const icon = document.createElement('span');
+        icon.className = 'wsTraceIcon';
+        icon.textContent = '✳';
+        think.appendChild(icon);
+        const tx = document.createElement('div');
+        tx.className = 'wsTraceThink';
+        tx.textContent = round.reasoning;
+        // 点一下展开/收起完整思考
+        tx.addEventListener('click', () => tx.classList.toggle('full'));
+        think.appendChild(tx);
+        stepEl.appendChild(think);
+      }
+
+      for (const t of round.tools) {
+        const item = document.createElement('div');
+        item.className = 'wsTraceItem' + (t.ok === false ? ' is-fail' : '');
+
+        const icon = document.createElement('span');
+        icon.className = 'wsTraceIcon';
+        icon.textContent = t.ok === false ? '✕' : '◈';
+        item.appendChild(icon);
+
+        const text = document.createElement('span');
+        text.className = 'wsTraceText';
+        const verb = t.ok === false ? '改' : '改了';
+        text.textContent = `${verb} ${t.path || t.name || '文件'}`;
+        item.appendChild(text);
+
+        if (Number.isFinite(Number(t.ms)) && Number(t.ms) > 0) {
+          const ms = document.createElement('span');
+          ms.className = 'wsTraceMs';
+          const n = Number(t.ms);
+          ms.textContent = n >= 1000 ? `${(n / 1000).toFixed(1)}s` : `${n}ms`;
+          item.appendChild(ms);
+        }
+
+        if (t.ok === false && t.error) {
+          const err = document.createElement('span');
+          err.className = 'wsTraceErr';
+          err.textContent = String(t.error);
+          item.appendChild(err);
+        }
+        stepEl.appendChild(item);
+      }
+      body.appendChild(stepEl);
+    }
+
+    // 点头部展开/折叠
+    head.addEventListener('click', () => {
+      const open = !body.hidden;
+      body.hidden = open;
+      box.classList.toggle('open', !open);
+    });
+
+    if (body.childNodes.length) box.appendChild(body);
+    return box;
   };
 
   /** textarea 跟着内容长高（上限由 CSS max-height 兜住）。 */

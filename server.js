@@ -174,6 +174,7 @@ import {
   findLiveTaskByThread,
   findTask,
   finishTask,
+  listTasksByThread,
   markRunning,
   pruneTasks,
   publicTask,
@@ -2345,6 +2346,10 @@ async function handleThreadMessages(req, res, [username, name, id]) {
         attachments: ids.map((id) => metaById.get(id)).filter(Boolean),
       };
     }),
+    // 把这一轮轮的执行过程（思考 / 工具调用 / 耗时）一起带回去。
+    // 前端靠它重建「已完成 · N 步操作」那个折叠面板 —— 以前只有轮询时才有，
+    // 刷新一次就全丢了（用户报的问题）。
+    tasks: (await listTasksByThread(thread.id)).map(publicTask),
   });
 }
 
