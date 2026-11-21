@@ -4482,10 +4482,12 @@ server.listen(PORT, HOST, async () => {
     // 否则前端轮询会一直转圈等一个永远不会结束的任务
     const reaped = await reapStaleTasks();
     if (reaped > 0) console.log(`回收了 ${reaped} 个中断的 agent 任务`);
+    // 任务记录不再按时间清理：它存着「执行过程」面板的数据（思考/工具/耗时），
+    // 要让过程随对话一起长期可见。这里只兜底清「会话已经不存在」的孤儿行。
     const prunedTasks = await pruneTasks();
-    if (prunedTasks > 0) console.log(`清理了 ${prunedTasks} 条过期 agent 任务`);
+    if (prunedTasks > 0) console.log(`清理了 ${prunedTasks} 条找不到会话的孤儿任务`);
     setInterval(() => {
-      pruneTasks().catch((err) => console.error('[agent] 清理任务失败：', err?.message ?? err));
+      pruneTasks().catch((err) => console.error('[agent] 清理孤儿任务失败：', err?.message ?? err));
     }, 6 * 3600_000).unref();
 
     // 模型配置在数据库里：先灌种子（只在空表时），再把注册表载进内存。
