@@ -66,7 +66,6 @@
             <span class="wsPickLabel" id="modePickLabel">编码</span>
             <span class="wsPickCaret" aria-hidden="true">⌃</span>
           </button>
-          <button type="button" class="miniChip" id="skill">技能</button>
           <span class="spacer"></span>
           <button type="button" class="sendBtn" id="send" title="发送（Enter）">↑</button>
         </div>
@@ -948,7 +947,9 @@ function renderAttachBar() {
   PENDING_IMAGES.forEach((img, i) => {
     const box = document.createElement('div');
     box.className = 'wsAttach';
-    // 悬停提示压缩前后的对比，用户能知道「我传的 18MB 变成 300KB 了」
+    // 悬停提示压缩前后的对比，用户能知道「我传的 18MB 变成 300KB 了」。
+    // 压缩这件事只在 tooltip 里说，**不在图上贴角标** ——
+    // 那个「压」字会挡住缩略图内容，而用户此刻关心的是「我选对图了吗」。
     box.title = img.compressed
       ? `${MP.formatBytes(img.originalBytes)} → ${MP.formatBytes(img.size)}（已自动压缩）`
       : `${img.mime} · ${MP.formatBytes(img.size)}`;
@@ -956,22 +957,20 @@ function renderAttachBar() {
     const el = document.createElement('img');
     el.src = img.url;
     el.alt = '待发送图片';
+    // 点缩略图看大图：和在对话栏里点已发出的图是同一个浮层（MP.viewImage）
+    el.addEventListener('click', () => MP.viewImage(img.url));
     box.appendChild(el);
-
-    // 压缩过的角标，让用户知道发生了什么（但不打扰）
-    if (img.compressed) {
-      const flag = document.createElement('span');
-      flag.className = 'wsAttachFlag';
-      flag.textContent = '压';
-      box.appendChild(flag);
-    }
 
     const del = document.createElement('button');
     del.type = 'button';
     del.className = 'wsAttachDel';
     del.textContent = '×';
     del.title = '移除这张图';
-    del.addEventListener('click', () => removeImage(i));
+    del.addEventListener('click', (e) => {
+      // 别让删除按钮的点击冒泡到缩略图，否则点「×」还会弹一次大图
+      e.stopPropagation();
+      removeImage(i);
+    });
     box.appendChild(del);
 
     attachList.appendChild(box);
@@ -1126,10 +1125,6 @@ composer.addEventListener('drop', (e) => {
   if (!e.dataTransfer?.files?.length) return;
   e.preventDefault();
   addImageFiles(e.dataTransfer.files);
-});
-
-document.getElementById('skill').addEventListener('click', () => {
-  MP.alert('技能还没接上，先把要改的说清楚就行');
 });
 
 /* ---------------------------------------------------------------- tab 切换 */

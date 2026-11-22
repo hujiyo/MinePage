@@ -23,7 +23,6 @@ import {
   MAX_COVER_BYTES,
   MAX_EXPORT_BYTES,
   MAX_USER_TOTAL_BYTES,
-  DRAFT_TTL_HOURS,
   SESSION_COOKIE,
   SESSION_TTL_DAYS,
   COOKIE_SECURE,
@@ -94,7 +93,6 @@ import {
   openSiteDraft,
   publishDraft,
   publishDraftSite,
-  pruneDraftSites,
   publishSiteZip,
   removeSiteFile,
   setSiteStatus,
@@ -167,6 +165,7 @@ import {
 } from './lib/agent/attachments.js';
 import { cancel as cancelRunningTask, register as registerRunningTask, unregister as unregisterRunningTask } from './lib/agent/running.js';
 import {
+  appendEvents,
   assertDailyQuota,
   cancelTask,
   createTask,
@@ -175,6 +174,8 @@ import {
   findTask,
   finishTask,
   listTasksByThread,
+  loadEventsForTasks,
+  loadTaskEvents,
   markRunning,
   pruneTasks,
   publicTask,
@@ -1934,6 +1935,10 @@ async function handleSiteMessageAdd(req, res, [username, name]) {
     threadId: thread.id,
     userId: user.id,
     model: modelId,
+    // 用户输入和附件都记在任务行上 —— 刷新后靠它画用户气泡，
+    // 不再去检查点里捞（那条路要靠内容匹配，中断轮必然对不上）。
+    userText: content,
+    attachIds,
   });
 
   // 后台跑，不阻塞响应
@@ -1973,10 +1978,31 @@ async function runAgentTask({
   taskId, cfg, site, userId, threadId, mode = 'code', userText, attachments = [],
 }) {
   const progress = [];
-  /** 细粒度事件流（前端渲染「执行过程」用）：text / reasoning / llm_start / tool_end / retry / step_end */
+  /**
+   * 细粒度事件流（前端渲染「执行过程」用）：
+   *   turn_start / llm_start / reasoning_delta / tool_start / tool_end / retry / step_end / turn_end
+   */
   const events = [];
-  /** 思考内容缓冲：整轮攒成一条 reasoning 事件，避免前端刷几十条碎片 */
+  /** 思考内容缓冲：模型的 reasoning 增量先拼在这里，再按「未落库的部分」切成事件 */
   let reasoningBuf = '';
+  /** reasoningBuf 里已经落过库的字符数 —— 只追加它之后的新内容，避免重复 */
+  let reasoningFlushed = 0;
+  let lastReasonFlush = 0;
+  /**
+   * 正文（模型对用户说的话）缓冲 + 游标。
+   *
+   * 为什么要单独记一份：正文以前只累加进 `streamed`（最后写 agent_tasks.result），
+   * 于是「模型每一步说的那句过渡话」在事件流里完全不存在 —— 面板只能显示
+   * 「思考 + 工具」，看不到「我先看一下…」「现在改成亮色…」这些话。
+   * 把它们也做成事件，前端才能按时间顺序把 思考 / 说话 / 工具 穿插起来。
+   */
+  let textBuf = '';
+  let textFlushed = 0;
+  let lastTextFlush = 0;
+  /** 已经写进 agent_task_events 的事件条数（数组下标游标） */
+  let appendedCount = 0;
+  /** 下一次 appendEvents 用的起始 seq（因为 INSERT IGNORE，撞号不会报错但会丢行，必须自己维护） */
+  let eventSeq = 1;
   // 登记取消句柄：用户点「停止」时由 /cancel 接口触发这个 signal
   const signal = registerRunningTask(taskId);
 
@@ -1995,16 +2021,83 @@ async function runAgentTask({
   };
 
   /**
-   * 把事件流写库（节流：一次工具跑完才刷，不需要每个 token 都刷）。
+   * 把事件流写库。
    *
-   * 事件里带一个「进行中」的 reasoning 占位，前端看到就知道
-   * 「当前正在思考」，而不是空转。
+   * 双写：
+   *   1. updateProgress → agent_tasks.events（整包快照，v1 回退用）
+   *   2. appendEvents   → agent_task_events（只追加，v2 主路径）
+   *
+   * 第 2 条是这次改造的重点：老路径每次都要重写整包 JSON，越跑越慢、
+   * 还要截断（截断会切坏结构）。新路径只写「这轮新增的几条」。
    */
   const pushEvents = (id, list) => {
-    const snapshot = reasoningBuf
-      ? [...list, { type: 'reasoning', text: reasoningBuf, at: Date.now(), live: true }]
-      : list;
-    updateProgress(id, events.length, progress, snapshot).catch(() => {});
+    updateProgress(id, events.length, progress, list).catch(() => {});
+
+    // 只追加还没写过的部分：eventSeq 是「下一条该用的 seq」
+    if (list.length > appendedCount) {
+      const fresh = list.slice(appendedCount);
+      appendedCount = list.length;
+
+      // **seq 必须在这里同步预留，不能在 then 回调里才加。**
+      //
+      // 踩过的坑：原来写的是
+      //     appendEvents(id, fresh, eventSeq).then(next => { eventSeq = next })
+      // 看起来没问题，但 pushEvents 是**同步连续调用**的（一个工具跑完会接连
+      // 触发 tool_end、step_end、turn_end，中间没有 await）。第二次调用时
+      // 第一次的 Promise 还没 resolve，eventSeq 仍是旧值 —— 于是两批事件
+      // 用了重叠的 seq，INSERT IGNORE 把后写的那批**整行静默丢弃**。
+      // 症状就是：库里 tool_start 有 5 条、tool_end 只剩 2 条，
+      // 界面上工具行有「开始」没有「结果」，看着像「思维链丢了」。
+      const startSeq = eventSeq;
+      eventSeq = startSeq + fresh.length;   // 先占位，且是同步的
+      appendEvents(id, fresh, startSeq)
+        .catch(() => { /* 事件写失败不能影响生成 */ });
+    }
+  };
+
+  /**
+   * 把「还没落库的思考增量」追加成事件。
+   *
+   * @param {boolean} force 强制刷（工具开始/结束时用，保证顺序边界清晰）
+   */
+  const flushReasoning = (force = false) => {
+    if (reasoningBuf.length <= reasoningFlushed) return;
+    const now = Date.now();
+    if (!force && now - lastReasonFlush < FLUSH_MS) return;
+
+    const delta = reasoningBuf.slice(reasoningFlushed);
+    reasoningFlushed = reasoningBuf.length;
+    lastReasonFlush = now;
+
+    // 单条别太大：8KB 切一段，避免一条事件撑爆行
+    const CHUNK = 8000;
+    for (let i = 0; i < delta.length; i += CHUNK) {
+      events.push({ type: 'reasoning_delta', text: delta.slice(i, i + CHUNK), at: now });
+    }
+  };
+
+  /**
+   * 把「还没落库的正文增量」追加成 text 事件。
+   *
+   * 和 flushReasoning 的区别：正文是**给用户看的话**，不是内心戏。
+   * 前端据此在时间线里插一段正常颜色的段落，读起来就是
+   * 「想了 → 说了 → 做了 → 又想了 → 又说了」。
+   *
+   * @param {boolean} force 强制刷（工具开始/轮次结束时用，保证顺序边界清晰）
+   */
+  const flushText = (force = false) => {
+    if (textBuf.length <= textFlushed) return;
+    const now = Date.now();
+    if (!force && now - lastTextFlush < FLUSH_MS) return;
+
+    const delta = textBuf.slice(textFlushed);
+    textFlushed = textBuf.length;
+    lastTextFlush = now;
+
+    const CHUNK = 8000;
+    for (let i = 0; i < delta.length; i += CHUNK) {
+      events.push({ type: 'text', text: delta.slice(i, i + CHUNK), at: now });
+    }
   };
 
   try {
@@ -2051,13 +2144,29 @@ async function runAgentTask({
       threadId,
       // 流式：正文和思考分开落库。
       // 思考内容不混进正文（否则最终回复里会掺进模型的内心戏），
-      // 而是单独攒一份，结束时长成一个 reasoning 事件给前端折叠显示。
+      // 而是单独攒一份，按增量切成 reasoning_delta 事件给前端折叠显示。
+      //
+      // 正文（text）也做成事件 —— 模型每一步都会对用户说一句过渡话
+      //（"我先看一下…" / "现在改成亮色…"），这些话串起整个执行过程。
+      // 以前它们只进 agent_tasks.result，面板里看不到，时间线是断的。
       onDelta: (text, kind) => {
         if (kind === 'reasoning') {
           reasoningBuf += text;
+          // 节流落库：思考往往持续几秒到几十秒，不刷的话前端只能看到「正在思考…」。
+          // 失败要静默（pushEvents 内部已 catch），不能让写库抖动打断生成。
+          if (reasoningBuf.length > reasoningFlushed) {
+            flushReasoning(false);
+            pushEvents(taskId, events);
+          }
           return;
         }
         streamed += text;
+        textBuf += text;
+        // 正文也节流落库（和思考同一个节奏），前端才能边流边看到这段话在长
+        if (textBuf.length > textFlushed) {
+          flushText(false);
+          pushEvents(taskId, events);
+        }
         flushPartial();
       },
       onStep: (step) => {
@@ -2071,16 +2180,36 @@ async function runAgentTask({
         });
         // 开始调工具了，说明这一轮的「说话」部分告一段落：立刻落一次
         flushPartial(true);
+        // 思考和正文都要在工具之前落完，保证「先想、再说、再做」的顺序不乱
+        flushReasoning(true);
+        flushText(true);
         // 进度写库失败不能影响主流程，吞掉
         updateProgress(taskId, step.step, progress, events).catch(() => {});
       },
       // 细粒度事件流：前端渲染成可折叠的「执行过程」
       onEvent: (event) => {
+        // 工具事件是天然的「顺序边界」：落它之前先把攒着的思考和正文刷出去，
+        // 否则会出现「工具结果排在思考前面」这种顺序错乱。
+        //
+        // turn_end 必须算边界：它一旦进数组，deriveTrace 就认为这一轮结束了。
+        // 要是之后还追加 reasoning_delta，那截思考会被算成「下一轮」——
+        // 界面上会凭空多出一个只有思考内容、没有任何工具的空轮。
+        if (event.type === 'tool_start' || event.type === 'tool_end'
+          || event.type === 'retry' || event.type === 'llm_start'
+          || event.type === 'turn_end') {
+          flushReasoning(true);
+          flushText(true);
+        }
         events.push(event);
         // 工具跑完/模型开始思考/重试，都是值得立刻刷新的节点
         pushEvents(taskId, events);
       },
     });
+
+    // 收尾：最后一段思考和正文（可能还没节流出去）必须落库，否则刷新后少一截
+    flushReasoning(true);
+    flushText(true);
+    pushEvents(taskId, events);
 
     // 记一个版本（状态点）。语义是「改完之后的样子」，所以必须在循环结束后记。
     // 被用户中断时也要记 —— 中断前已经改的文件必须能回滚/能再看到。
@@ -2335,6 +2464,35 @@ async function handleThreadMessages(req, res, [username, name, id]) {
   const metas = allIds.length ? await listAttachmentMeta(site.id, allIds) : [];
   const metaById = new Map(metas.map((m) => [Number(m.id), m]));
 
+  // 把这一轮轮的执行过程（思考 / 工具调用 / 耗时）一起带回去。
+  // 前端靠它重建「已完成 · N 步操作」那个折叠面板 —— 以前只有轮询时才有，
+  // 刷新一次就全丢了（用户报的问题）。
+  //
+  // 事件不再从 agent_tasks.events 里读（那一列是整包快照，可能被截坏），
+  // 改成批量查 agent_task_events，查不到再回退 v1。一次查询，避免 N+1。
+  const taskRows = await listTasksByThread(thread.id);
+  const eventsByTask = await loadEventsForTasks(taskRows);
+
+  // 任务上的图片也要补元信息：任务行自带「用户气泡」所需的一切，
+  // 所以附件 id 得在这里一起解析，不能再靠 messages 那条路。
+  const taskAttachIds = [...new Set(
+    taskRows.flatMap((r) => String(r.attach_ids || '').split(',').filter(Boolean).map(Number)),
+  )];
+  const taskMetas = taskAttachIds.length ? await listAttachmentMeta(site.id, taskAttachIds) : [];
+  const taskMetaById = new Map(taskMetas.map((m) => [Number(m.id), m]));
+
+  // 诊断：老任务没有 user_text，刷新后只能画「面板 + 回复气泡」（没有用户气泡）。
+  // 这是**预期行为**（存量数据不迁移），但量大的话值得留一条日志。
+  if (taskRows.length) {
+    const legacy = taskRows.filter((r) => r.user_text == null).length;
+    if (legacy > 0) {
+      console.warn(
+        `[agent] thread=${thread.id} 有 ${legacy}/${taskRows.length} 条老任务没有 user_text，`
+        + '刷新后这些轮次不显示用户气泡（新任务不受影响）',
+      );
+    }
+  }
+
   sendJson(res, 200, {
     ok: true,
     thread,
@@ -2346,10 +2504,16 @@ async function handleThreadMessages(req, res, [username, name, id]) {
         attachments: ids.map((id) => metaById.get(id)).filter(Boolean),
       };
     }),
-    // 把这一轮轮的执行过程（思考 / 工具调用 / 耗时）一起带回去。
-    // 前端靠它重建「已完成 · N 步操作」那个折叠面板 —— 以前只有轮询时才有，
-    // 刷新一次就全丢了（用户报的问题）。
-    tasks: (await listTasksByThread(thread.id)).map(publicTask),
+    // 任务侧现在是**自足**的：每条任务自带 userText / attachIds / text / view，
+    // 前端按任务顺序渲染即可，不需要再和 messages 做内容配对。
+    tasks: taskRows.map((row) => {
+      const task = publicTask(row, eventsByTask.get(row.id) ?? null);
+      // 真正取图走 GET /attachments/:id，这里只给元信息（不含字节）
+      task.attachments = (task.attachIds ?? [])
+        .map((id) => taskMetaById.get(id))
+        .filter(Boolean);
+      return task;
+    }),
   });
 }
 
@@ -2586,7 +2750,10 @@ async function handleAgentTask(req, res, [taskId]) {
     return;
   }
 
-  sendJson(res, 200, { ok: true, task: publicTask(row) });
+  // 事件优先从 agent_task_events（v2，只追加、不会被截坏）读，
+  // 读不到再回退 agent_tasks.events（v1，老任务）。见 loadTaskEvents 的注释。
+  const events = await loadTaskEvents(row);
+  sendJson(res, 200, { ok: true, task: publicTask(row, events) });
 }
 
 /**
@@ -4464,19 +4631,57 @@ function shutdown(signal) {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+/**
+ * 兜底：别让一个漏网的异步异常把整个服务杀掉。
+ *
+ * 为什么必须有这道网：Node 15+ 的默认行为是 unhandledRejection **直接终止进程**。
+ * 而这个进程同时承载着所有用户、所有正在跑的 agent 任务，一次「某个 SDK 内部
+ * 把 promise 丢了」就足以让所有人的任务一起中断（真实发生过：agent 思考中
+ * 点「停止」，reasoning-fetch 的流里漏出一个 AbortError，服务端整个退出，
+ * 用户看到的就是「Server stopped」）。
+ *
+ * 策略：
+ *   - 只记录，不退出。漏掉的 rejection 绝大多数是「已经没人关心的收尾动作」，
+ *     让它自生自灭对在线服务更安全。
+ *   - 保留完整堆栈，方便定位到底是谁漏的（上面这条就是靠它找到的）。
+ */
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  console.error('[unhandledRejection] 已忽略，服务继续运行:', err.name, '-', err.message);
+  console.error(String(err.stack ?? '').split('\n').slice(1, 6).join('\n'));
+});
+
+/**
+ * uncaughtException 的处理要更保守：同步抛出的异常可能已经把状态搞坏，
+ * 继续跑有写坏数据的风险。这里**不直接退出**，但也只记录 ——
+ * 因为这些几乎都来自第三方库的回调，不是我们的主流程。
+ */
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException] 已忽略，服务继续运行:', err?.name, '-', err?.message);
+  console.error(String(err?.stack ?? '').split('\n').slice(1, 6).join('\n'));
+});
+
 server.listen(PORT, HOST, async () => {
   try {
     const removed = await deleteExpiredSessions();
     if (removed > 0) console.log(`清理了 ${removed} 条过期会话`);
 
-    // 没传完就放弃的上传草稿：开机清一次，之后每天一次，
-    // 免得它们一直占着站点配额和账号存储额度
-    const prunedDrafts = await pruneDraftSites(DRAFT_TTL_HOURS);
-    if (prunedDrafts > 0) console.log(`清理了 ${prunedDrafts} 个过期上传草稿`);
-    setInterval(() => {
-      pruneDraftSites(DRAFT_TTL_HOURS)
-        .catch((err) => console.error('[draft] 清理上传草稿失败：', err?.message ?? err));
-    }, 24 * 3600_000).unref();
+    // 【2026-11 移除】这里原来有个 pruneDraftSites(24h)：按 updated_at 把
+    // status='draft' 的站点整行 DELETE，一天一次。
+    //
+    // 为什么删掉：它删的**不是**它以为的东西。
+    //   注释说「清理没传完就放弃的上传草稿」，但上传建站走 createSite() 不传 status，
+    //   默认是 'active'；唯一会建 'draft' 的是工作台的 POST /api/studio/drafts，
+    //   也就是用户在「新建对话」里真正在做的项目。
+    //   于是这条清理的实际效果是：**用户 24 小时没碰的草稿项目，连同它的
+    //   全部对话、agent_tasks、思维链记录一起被静默删除**。用户没设置过这个行为，
+    //   也找不到任何开关 —— 表现就是「之前聊过的思维链凭空消失」。
+    //
+    // 为什么不改成「只删空站点」：仍然会误删「建了但还没写内容」的真实草稿，
+    // 而且引入「什么算空」的判断本身就是新的误删风险。宁可让用户手动删。
+    //
+    // 配额这边是安全的：MAX_DRAFTS_PER_USER（默认 20，见 config.js）在
+    // createSite() 里卡着，草稿建到上限会明确报错让人先删，不会无限堆积。
 
     // agent 任务：上次进程被杀时残留的「跑着」任务要标成失败，
     // 否则前端轮询会一直转圈等一个永远不会结束的任务

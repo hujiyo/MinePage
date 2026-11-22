@@ -35,7 +35,6 @@
         </button>
 
         <span class="spacer"></span>
-        <span class="newAt">或 @ 使用技能</span>
         <button type="button" class="sendBtn" id="send" title="发送">↑</button>
       </div>
     </div>
@@ -223,21 +222,20 @@ function renderAttachBar() {
     const el = document.createElement('img');
     el.src = img.url;
     el.alt = '待发送图片';
+    // 点缩略图看大图（和在对话栏里点已发出的图是同一个浮层）。
+    // 压缩信息只放在 title 里，不在图上贴「压」字 —— 那个角标会挡住缩略图。
+    el.addEventListener('click', () => MP.viewImage(img.url));
     box.appendChild(el);
-
-    if (img.compressed) {
-      const flag = document.createElement('span');
-      flag.className = 'wsAttachFlag';
-      flag.textContent = '压';
-      box.appendChild(flag);
-    }
 
     const del = document.createElement('button');
     del.type = 'button';
     del.className = 'wsAttachDel';
     del.textContent = '×';
     del.title = '移除这张图';
-    del.addEventListener('click', () => removeImage(i));
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();     // 别让删除的点击冒泡去弹大图
+      removeImage(i);
+    });
     box.appendChild(del);
 
     attachList.appendChild(box);

@@ -2603,7 +2603,6 @@ code.token {
 .newBox textarea:focus { background: transparent; }
 .newBar { display: flex; align-items: center; gap: 10px; padding: 4px 0 2px; }
 .newModel, .wsModel { font-size: 12px; color: var(--muted); }
-.newAt { font-size: 12px; color: var(--muted); }
 .newFoot {
   display: flex;
   align-items: center;
@@ -2704,6 +2703,9 @@ code.token {
 .wsTrace {
   width: 100%;
   max-width: 88%;
+  /* 不被父级 flex 压扁（见 .wsMsgs > * 的注释）。
+     自己带 overflow: hidden，一旦被压扁，溢出部分会被直接裁掉。 */
+  flex: none;
   margin-bottom: 6px;
   border: 1px solid var(--border);
   border-radius: 9px;
@@ -2768,6 +2770,13 @@ code.token {
   border-top: 1px solid var(--border);
   background: var(--panel);
 }
+/* 有思考内容正在展开时，放开 320px 的高度上限 —— 见 buildReasonRow() 里的
+   syncReasonOpen()。不然「展开全文」只是把上千像素的正文塞进一个 320px 的
+   滚动框里，看上去还是只有几行，用户会以为没展开。
+   仍然留一个较高的上限（视口 70%），避免超长思考把整栏撑爆。 */
+.wsTrace.hasThinkOpen .wsTraceBody {
+  max-height: min(70vh, 1200px);
+}
 .wsTraceStep { margin-top: 6px; }
 .wsTraceStepLabel {
   margin: 6px 0 3px;
@@ -2809,7 +2818,13 @@ code.token {
 }
 .wsTraceItem.is-retry { color: #c98a3a; }
 
-/* 思考内容：默认只露 3 行，点开看全部 */
+/* 思考内容。
+   折叠 / 展开只由 buildReasonRow() 的 [hidden] 控制：
+   折叠时元素整个不渲染（只留「思考过程（N 字）」那一行），展开时显示全文。
+   所以这里**不要再写 -webkit-line-clamp** —— 以前留着 `line-clamp: 3`，
+   结果「点开看全文」之后还是只有 3 行，看起来像思考内容被吞了。
+   也不给它自己的 max-height：外层 .wsTraceBody 已经是滚动容器了，
+   两层滚动条叠在一起，手机上根本划不动。 */
 .wsTraceThink {
   flex: 1;
   min-width: 0;
@@ -2819,17 +2834,106 @@ code.token {
   font-style: italic;
   white-space: pre-wrap;
   word-break: break-word;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
+  cursor: pointer;
+  /* 展开后正文动辄几千字：左边加一条细线，和工具行形成视觉分层，
+     一眼能看出「这段是它脑子里想的」，而不是它做出来的动作。 */
+  padding-left: 7px;
+  border-left: 2px solid var(--border);
+  margin: 2px 0 4px;
+}
+/* 折叠态：干脆不渲染。有些浏览器对 flex 子项的 [hidden] 处理不一致，
+   这里显式钉死。 */
+.wsTraceThink[hidden] { display: none !important; }
+.wsTraceItem.is-reason { align-items: flex-start; }
+
+/* 「说话」行：模型在这一步对用户说的过渡话。
+   和思考行的视觉差异要明显 —— 思考是斜体淡色（内心戏），
+   这句是正体正常色（它真的说出口了），否则两者混在一起分不清。 */
+.wsTraceItem.is-say { color: var(--text); }
+.wsTraceSay {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding-left: 7px;
+  border-left: 2px solid var(--pink-soft);
+  margin: 2px 0 4px;
+}
+
+/* ------------------------------------------------------------
+   执行过程 v2 新增部件
+   ------------------------------------------------------------
+   全部沿用站点既有变量，不引入新配色 —— 这也是为什么不 iframe
+   一个 Tailwind 页面进来（见 docs/DECISION-agent-vis.md）。
+   ------------------------------------------------------------ */
+
+/* 步骤卡片头：第 N 轮 + 该轮耗时 */
+.wsTraceStepHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 2px;
+  padding-bottom: 3px;
+  border-bottom: 1px dashed var(--border);
+  font-size: 10.5px;
+  color: var(--muted);
+  letter-spacing: .02em;
+}
+.wsTraceStepHead > span:first-child { flex: 1; }
+
+/* 列表容器 */
+.wsTraceList { min-height: 0; }
+
+/* 还在执行中的工具：图标转起来，而不是显示成已完成 */
+.wsTraceItem.is-pending { color: var(--muted); }
+.wsTraceItem.is-pending .wsTraceIcon {
+  animation: stepSpin 1.1s linear infinite;
+  opacity: 1;
+}
+
+/* 「已读取 / 已修改」聚合行 */
+.wsTraceItem.is-files { color: var(--muted); }
+.wsTraceFiles {
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 命令卡片：等宽字体，和普通工具行区分开。
+   当前没有 shell 工具，这条路暂时不会渲染到。 */
+.wsTraceItem.is-cmd { color: var(--text); }
+.wsTraceCmd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--panel2);
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/* 思考过程内层折叠的按钮（原来只有 .wsTraceThink 的 3 行截断，
+   现在多了一个显式的「思考过程（N 字）」开关） */
+.wsTraceReasonWrap { flex: 1; min-width: 0; }
+.wsTraceReasonToggle {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 11.5px;
+  color: var(--muted);
+  text-align: left;
   cursor: pointer;
 }
-.wsTraceThink.full {
-  display: block;
-  -webkit-line-clamp: unset;
+.wsTraceReasonToggle:hover { color: var(--text); }
+.wsTraceReasonToggle::before {
+  content: '▸ ';
+  display: inline-block;
+  transition: transform .15s;
 }
-.wsTraceItem.is-reason { align-items: flex-start; }
+.wsTraceReasonToggle.open::before { content: '▾ '; }
 
 /* 正在流式输出：去掉虚线和旋转点，让它看起来像正常回复在长出来 */
 .chatBubble.stepping.streaming {
@@ -2850,17 +2954,6 @@ code.token {
   0%, 50% { opacity: 1; }
   51%, 100% { opacity: 0; }
 }
-
-.miniChip {
-  flex: none;
-  padding: 3px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--panel2);
-  color: var(--muted2);
-  font-size: 12px;
-}
-.miniChip:hover { color: var(--pink); border-color: var(--pink); background: var(--panel2); }
 
 /* ------------------------------------------------------------
    工作区：左对话栏 + 右预览/代码
@@ -3170,6 +3263,13 @@ body.dragging .wsFrame { pointer-events: none; }
   flex-direction: column;
   gap: 12px;
 }
+/* 对话流是滚动容器，**每条消息都不许被压缩**。
+   漏了这条会出大问题：`.wsMsgs` 是 flex column，子项默认 `flex: 0 1 auto`，
+   容器高度不够时浏览器会先把每条消息压扁（而不是让它们溢出滚动）。
+   而 `.wsTrace` 有 `overflow: hidden`，一被压扁就把里面的步骤全裁掉 ——
+   症状正是「刷新后展开，只剩筛选胶囊和『第 1 轮』那一行」。
+   手机窄屏（对话栏只有 46vh）必现，桌面上内容一多也会偶发。 */
+.wsMsgs > * { flex: 0 0 auto; }
 .chatRow { display: flex; flex-wrap: wrap; align-items: flex-end; }
 .chatRow.me { justify-content: flex-end; }
 /* 正文气泡还没内容时藏起来（过程面板顶行已经在显示「正在思考…」了）。
@@ -3397,25 +3497,8 @@ body.dragging .wsFrame { pointer-events: none; }
   height: 100%;
   object-fit: cover;
   display: block;
-}
-
-/* 压缩角标：左上角一个小方块，告诉用户这张被压过 */
-.wsAttachFlag {
-  position: absolute;
-  bottom: 2px;
-  left: 2px;
-  min-width: 15px;
-  height: 15px;
-  padding: 0 3px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-  background: rgba(24, 26, 31, .62);
-  color: #fff;
-  font-size: 10px;
-  line-height: 1;
-  pointer-events: none;
+  /* 缩略图可点开大图（MP.viewImage），给出可点击的指针反馈 */
+  cursor: zoom-in;
 }
 
 /* 右上角删除：默认半透明，悬停才完全显现，不挡图 */
