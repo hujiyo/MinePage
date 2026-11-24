@@ -2770,6 +2770,101 @@ code.token {
   border-top: 1px solid var(--border);
   background: var(--panel);
 }
+
+/* ------------------------------------------------------------
+   执行过程：单容器按顺序平铺（2026-11 改版）
+
+   结构：.wsTraceFlow（一个容器）
+           ├─ .wsFlowPara   正文段落（永远可见）
+           ├─ .wsFlowNote   思考/工具注记（折叠态隐藏）
+           ├─ .wsFlowPara
+           └─ …
+
+   为什么是**单容器**而不是「正文一栏 + 注记一栏」：
+   分两栏时渲染要把 blocks 按 kind 拆开，顺序信息就丢了 ——
+   界面上会变成「所有正文挤在上面、所有工具挤在下面」，
+   而模型实际的输出是「说一句 → 做一件事 → 再说一句」交替的。
+
+   折叠只靠这一条把注记藏起来，正文和注记的相对位置保持不变。
+   ------------------------------------------------------------ */
+.wsTraceFlow {
+  max-height: none;          /* 正文是主体，不限制高度 */
+  overflow-y: visible;
+  padding: 8px 12px 10px;
+}
+
+/* 折叠态：只藏注记，正文照常显示 */
+.wsTrace:not(.open) .wsFlowNote { display: none; }
+
+/* 正文段落 */
+.wsFlowPara {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0 0 6px;
+}
+.wsFlowPara:last-child { margin-bottom: 0; }
+
+/* 一条注记 */
+.wsFlowNote {
+  border-radius: 5px;
+  /* 左侧留一点缩进，视觉上「依附于上一段正文」 */
+  margin: 2px 0 2px 4px;
+}
+.wsFlowNoteHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  text-align: left;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--muted);
+  cursor: pointer;
+}
+.wsFlowNoteHead:hover { background: var(--panel2); color: var(--text); }
+/* 没有可展开内容（纯工具行）时不做成可点击的样子 */
+.wsFlowNoteHead.static { cursor: default; }
+.wsFlowNoteHead.static:hover { background: transparent; color: var(--muted); }
+
+.wsFlowNoteIcon { flex: none; width: 14px; text-align: center; font-size: 11px; opacity: .85; }
+.wsFlowNoteText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 有内容的注记：前面加三角，展开后转向下 */
+.wsFlowNoteHead:not(.static) .wsFlowNoteText::before {
+  content: '▸ ';
+  color: var(--muted);
+}
+.wsFlowNote.open .wsFlowNoteHead:not(.static) .wsFlowNoteText::before { content: '▾ '; }
+
+/* 注记内容：默认收起，展开后铺开 */
+.wsFlowNoteBody {
+  display: none;
+  padding: 4px 6px 6px 24px;
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--muted);
+  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.wsFlowNote.open .wsFlowNoteBody { display: block; }
+
+/* 三种注记的细微区分 */
+.wsFlowNote.is-tool .wsFlowNoteHead { color: var(--muted2); }
+.wsFlowNote.is-retry .wsFlowNoteHead { color: #c98a3a; }
+
 /* 有思考内容正在展开时，放开 320px 的高度上限 —— 见 buildReasonRow() 里的
    syncReasonOpen()。不然「展开全文」只是把上千像素的正文塞进一个 320px 的
    滚动框里，看上去还是只有几行，用户会以为没展开。
@@ -2892,14 +2987,6 @@ code.token {
 .wsTraceItem.is-pending .wsTraceIcon {
   animation: stepSpin 1.1s linear infinite;
   opacity: 1;
-}
-
-/* 「已读取 / 已修改」聚合行 */
-.wsTraceItem.is-files { color: var(--muted); }
-.wsTraceFiles {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* 命令卡片：等宽字体，和普通工具行区分开。

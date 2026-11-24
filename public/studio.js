@@ -616,39 +616,36 @@
           list.appendChild(mine);
         }
 
-        // ② + ③ 面板和回复气泡**放在同一个 .chatRow agent 里**。
+        // ② + ③ 面板和回复气泡放进同一个 .chatRow agent。
         //
-        // 必须和实时渲染（pushMessage）的结构完全一致：
-        //   实时：row.appendChild(trace.el) → row.appendChild(progressBubble)
-        // 两条路各写一套结构的话，同一个任务刷新前后 DOM 行数就不一样了
-        //（实测 live 16 行、刷新 17 行），表现为「刷新后间距/顺序变了」。
-        //
-        // 注意这里挂的是**裸 .chatBubble**，不是 MP.bubble() 的返回值 ——
-        // MP.bubble 返回的就是一个 .chatRow，塞进 row 里会变成 row 套 row，
-        // flex-wrap 下被拆成两行，看着像回复重复渲染（踩过）。
+        // **正文不重复渲染**（2026-11 修）：面板里的 wsFlowPara 已经是正文了
+        //（按模型输出顺序铺开，且已把被切碎的句子归并过），
+        // 下面再挂一个完整气泡就是同一段话读两遍。
+        // 所以只有「没有面板」时才单独渲染气泡。
         const text = String(task.text ?? '').trim();
         const errText = task.status === 'failed' ? String(task.error ?? '').trim() : '';
         const bodyText = text || errText;
 
         const trace = MP.buildTraceFromTask(task);
-        if (trace || bodyText) {
-          const row = document.createElement('div');
-          row.className = 'chatRow agent';
+        if (!trace && !bodyText) continue;
 
-          if (trace) row.appendChild(trace);
+        const row = document.createElement('div');
+        row.className = 'chatRow agent';
 
-          if (bodyText) {
-            const bubble = document.createElement('div');
-            bubble.className = 'chatBubble';
-            bubble.textContent = bodyText;
-            // 被停止 / 失败的任务标一下，刷新后也能一眼看出这轮没跑完
-            if (task.status === 'cancelled') bubble.classList.add('stopped');
-            else if (task.status === 'failed') bubble.classList.add('errtip');
-            row.appendChild(bubble);
-          }
-
-          list.appendChild(row);
+        if (trace) {
+          row.appendChild(trace);
         }
+
+        if (bodyText && !trace) {
+          const bubble = document.createElement('div');
+          bubble.className = 'chatBubble';
+          bubble.textContent = bodyText;
+          if (task.status === 'cancelled') bubble.classList.add('stopped');
+          else if (task.status === 'failed') bubble.classList.add('errtip');
+          row.appendChild(bubble);
+        }
+
+        list.appendChild(row);
       }
 
       list.scrollTop = list.scrollHeight;
@@ -678,6 +675,29 @@
    *
    * @returns {HTMLElement|null} 没有过程记录就返回 null（不占地方）
    */
+  /**
+   * 从任务重建「执行过程」（刷新页面后用）。
+   *
+   * **结构是「单容器按顺序平铺」**（2026-11 改）：
+   *
+   *   已完成 · 3 步操作 · 改了 1 处      29.3s   ▸   ← 摘要行（点它折叠/展开注记）
+   *   ─────────────────────────────────────────────
+   *   读完了，是个空白草稿。我把它换成…              ← 正文（永远可见）
+   *     💭 思考过程（1200 字）                        ← 注记（折叠态隐藏）
+   *     ⚙ 改了 index.html  289ms                     ← 注记
+   *   改好了，整站现在是一个…                        ← 正文
+   *
+   * 为什么是**单容器**而不是「正文一栏 + 注记一栏」：
+   *   分两栏的话，渲染时把 blocks 按 kind 拆开，**顺序信息就丢了** ——
+   *   界面上会变成「所有正文挤在上面、所有工具挤在下面」，
+   *   而模型实际的输出是「说一句 → 做一件事 → 再说一句」交替的。
+   *   现在按 blocks 原样平铺，折叠只靠 CSS 把 `.wsFlowNote` 藏起来，
+   *   正文顺序和注记位置都和模型输出一一对应。
+   *
+   * 折叠/展开**只影响注记**，正文永远可见。
+   *
+   * @returns {HTMLElement|null} 没有过程记录就返回 null（不占地方）
+   */
   MP.buildTraceFromTask = function (task) {
     const view = task?.view;
     const turns = Array.isArray(view?.turns) ? view.turns : [];
@@ -687,13 +707,8 @@
 
     // 完全没有过程可看：**不画面板**。
     //
-    // 以前这里会画一个「这条记录来自旧版本，只保留了步骤摘要」的面板，
-    // 那句话只在「老数据没有 view」时才成立。但另一种情况也会走到这里：
-    // 任务在模型吐出任何东西之前就被停止了（0 步、0 思考）——
-    // 那是个**新任务**，却被告知「记录来自旧版本」，文案纯粹是误导。
-    //
-    // 反正没有过程可看，面板本身就没有信息量。直接不渲染，
-    // 回复气泡（「好的，停在这儿了…」）已经把状态说清楚了。
+    // 另一种情况也会走到这里：任务在模型吐出任何东西之前就被停止了（0 步、0 思考）。
+    // 那是个**新任务**，面板本身没有信息量，回复气泡已经把状态说清楚了。
     if (!hasContent) return null;
 
     const status = task?.status ?? 'done';
@@ -703,19 +718,18 @@
     if (status === 'failed') box.classList.add('failed');
     if (status === 'cancelled') box.classList.add('cancelled');
 
-    // ---- 头部：状态 + 步数 + 改了 N 处 + 总耗时 ----
+    // ---- 摘要行：一行淡色小字，不占主体（A 方案的总开关）----
     const head = document.createElement('button');
     head.type = 'button';
     head.className = 'wsTraceHead';
+    head.setAttribute('aria-expanded', 'false');
 
     const caret = document.createElement('span');
     caret.className = 'wsTraceCaret';
     caret.textContent = '▸';
     head.appendChild(caret);
 
-    // 摘要统一交给 traceHeadText() —— **实时和历史必须用同一个函数**。
-    // 以前这里自己拼「已完成」，实时的 traceHeadText() 拼「已完成 · N 步操作 · 改了 N 处」，
-    // 结果同一个任务刷新前后头部文案就不一样（用户报的「刷新后对不上」）。
+    // 摘要统一交给 traceHeadText() —— 实时和历史必须用同一个函数
     const now = document.createElement('span');
     now.className = 'wsTraceNow';
     now.textContent = traceHeadText(view) || '已完成';
@@ -729,26 +743,107 @@
     }
     box.appendChild(head);
 
-    // ---- 主体 ----
+    // ---- 主体：一个容器，按 blocks 顺序平铺 ----
     const body = document.createElement('div');
-    body.className = 'wsTraceBody';
-    body.hidden = true;
+    body.className = 'wsTraceBody wsTraceFlow';
+    box.appendChild(body);
 
-    // 走到这里 hasContent 一定为真（上面没内容就直接 return null 了）
-    const list = document.createElement('div');
-    list.className = 'wsTraceList';
-    renderTraceView(list, view, { live: false });
-    body.appendChild(list);
+    let hasAnyNote = false;
 
+    for (const turn of turns) {
+      const blocks = Array.isArray(turn.blocks) ? turn.blocks : [];
+
+      for (const b of blocks) {
+        if (b.kind === 'text') {
+          // 正文：直接铺开
+          const p = document.createElement('div');
+          p.className = 'wsFlowPara';
+          p.textContent = String(b.text ?? '');
+          body.appendChild(p);
+        } else if (b.kind === 'reasoning') {
+          body.appendChild(buildFlowNote('reason', `思考过程（${String(b.text ?? '').length} 字）`, String(b.text ?? '')));
+          hasAnyNote = true;
+        } else if (b.kind === 'tool') {
+          body.appendChild(buildFlowNote('tool', toolLabel(b.tool), '', b.tool));
+          hasAnyNote = true;
+        } else if (b.kind === 'retry') {
+          body.appendChild(buildFlowNote('retry', '重试模型请求', ''));
+          hasAnyNote = true;
+        }
+      }
+
+      // 这里原本会追加两行「⌗ 已读取 N 个文件 / 已修改 N 个文件」的汇总。
+      // 已删除（2026-11，用户选定方案 A）：
+      //   它们是 collectRoundFiles() 从工具调用里**统计出来的派生数据**，
+      //   模型的输出里根本没有这两行。留在末尾会破坏「正文最后一行 = 模型原话」
+      //   这个规则，看起来像模型在结尾又调用了工具。
+      //   「改了哪个文件」在 ⚙ 工具行里已经能看到，汇总纯属冗余。
+    }
+
+    // 总开关：折叠/展开注记（正文不受影响）
     head.addEventListener('click', () => {
-      const open = !body.hidden;
-      body.hidden = open;
-      box.classList.toggle('open', !open);
+      const open = !box.classList.contains('open');
+      box.classList.toggle('open', open);
+      head.setAttribute('aria-expanded', open ? 'true' : 'false');
     });
 
-    if (body.childNodes.length) box.appendChild(body);
+    // 没有正文也没有注记：整个不渲染
+    if (!body.childNodes.length) return null;
+    // 只有正文、没有任何注记时不显示折叠开关（点了也没变化）
+    if (!hasAnyNote) head.classList.add('no-notes');
     return box;
   };
+
+  /**
+   * 一条「注记」：默认收起成一行，点开看内容。
+   *
+   * 三种 kind 共用一套结构，只换图标和配色：
+   *   reason —— 思考正文（淡色斜体）
+   *   tool   —— 工具调用（等宽小字）
+   *   retry  —— 重试记录
+   */
+  function buildFlowNote(kind, summary, detail, tool) {
+    const wrap = document.createElement('div');
+    wrap.className = 'wsFlowNote is-' + kind;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'wsFlowNoteHead';
+
+    const icon = document.createElement('span');
+    icon.className = 'wsFlowNoteIcon';
+    icon.textContent = kind === 'reason' ? '💭' : kind === 'retry' ? '↻' : '⚙';
+    btn.appendChild(icon);
+
+    const text = document.createElement('span');
+    text.className = 'wsFlowNoteText';
+    text.textContent = summary;
+    btn.appendChild(text);
+
+    if (tool && Number.isFinite(tool.ms) && tool.ms > 0) {
+      const ms = document.createElement('span');
+      ms.className = 'wsTraceMs';
+      ms.textContent = fmtMs(tool.ms);
+      btn.appendChild(ms);
+    }
+    wrap.appendChild(btn);
+
+    // 有细节才给可展开的 body（工具行通常只有摘要，不需要展开）
+    if (detail) {
+      const bodyEl = document.createElement('div');
+      bodyEl.className = 'wsFlowNoteBody';
+      bodyEl.textContent = detail;
+      wrap.appendChild(bodyEl);
+
+      btn.addEventListener('click', () => {
+        wrap.classList.toggle('open');
+      });
+    } else {
+      btn.classList.add('static');
+    }
+
+    return wrap;
+  }
 
 
   /** textarea 跟着内容长高（上限由 CSS max-height 兜住）。 */
@@ -1208,125 +1303,6 @@
   }
 
   /**
-   * 渲染执行过程的时间线（唯一实现）。
-   *
-   * 只按**时间顺序**平铺，不再支持「只看工具 / 只看思考」这类筛选胶囊
-   *（那个筛选条占一整行、还带数字角标，视觉噪音比它带来的便利大得多；
-   * 一轮里的步骤本来就不多，直接顺序读反而更快）。
-   *
-   * @param {HTMLElement} body 容器（会先清空）
-   * @param {object} view deriveTrace 的产物
-   * @param {object} [opt]
-   *   live  是否还在跑（流式思考直接展开）
-   */
-  function renderTraceView(body, view, opt = {}) {
-    body.textContent = '';
-    const turns = Array.isArray(view?.turns) ? view.turns : [];
-
-    if (!turns.length) {
-      const empty = document.createElement('div');
-      empty.className = 'wsTraceItem';
-      empty.textContent = view?.running ? '等模型开始输出…' : '这一轮没有可显示的过程记录。';
-      body.appendChild(empty);
-      return 0;
-    }
-
-    for (const turn of turns) {
-      // ---- 步骤卡片：第 N 轮 ----
-      const card = document.createElement('div');
-      card.className = 'wsTraceStep';
-
-      const head = document.createElement('div');
-      head.className = 'wsTraceStepHead';
-      const title = document.createElement('span');
-      title.textContent = `第 ${turn.turn} 轮`;
-      head.appendChild(title);
-      if (Number.isFinite(turn.ms) && turn.ms > 0) {
-        const ms = document.createElement('span');
-        ms.className = 'wsTraceMs';
-        ms.textContent = fmtMs(turn.ms);
-        head.appendChild(ms);
-      }
-      // 失败的轮给个标记，展开后一眼能扫到
-      if (turn.reason?.kind === 'error') {
-        const bad = document.createElement('span');
-        bad.className = 'wsTraceMs';
-        bad.style.color = 'var(--danger)';
-        bad.textContent = '出错';
-        head.appendChild(bad);
-      }
-      card.appendChild(head);
-
-      // ---- 这一轮里的各步，按发生顺序平铺 ----
-      for (const step of turn.steps) {
-        // 优先按后端算好的 segments 顺序渲染：
-        //   思考 → 说话 → 工具 → 重试 …… 完全照着模型当时的输出节奏。
-        //
-        // 为什么要用 segments 而不是「先画思考、再画工具」：
-        // 模型一步里的输出往往是「先想、再说一句过渡话、再动手」，
-        // 拆成两个数组渲染的话，中间那句过渡话就没地方放，时间线又断了。
-        const segs = Array.isArray(step.segments) ? step.segments : null;
-
-        if (segs && segs.length) {
-          for (const seg of segs) {
-            if (seg.kind === 'reasoning') {
-              card.appendChild(buildReasonRow(seg.text, opt.live));
-            } else if (seg.kind === 'text') {
-              card.appendChild(buildSayRow(seg.text));
-            } else if (seg.kind === 'tool') {
-              card.appendChild(buildToolRow(seg.tool));
-            } else if (seg.kind === 'retry') {
-              card.appendChild(buildRetryRow(seg.retry));
-            }
-          }
-        } else {
-          // 老数据没有 segments：退回「思考 → 重试 → 工具」的固定顺序
-          if (step.reasoning) card.appendChild(buildReasonRow(step.reasoning, opt.live));
-          for (const r of step.retries ?? []) card.appendChild(buildRetryRow(r));
-          for (const t of step.tools ?? []) card.appendChild(buildToolRow(t));
-        }
-      }
-
-      // ---- 本轮的文件聚合（派生视图，不是单独事件） ----
-      const files = collectRoundFiles(turn);
-      if (files.read.length) card.appendChild(buildFilesRow('已读取', files.read));
-      if (files.changed.length) card.appendChild(buildFilesRow('已修改', files.changed));
-
-      // ---- 执行命令：当前工具表里没有 shell，有数据才渲染 ----
-      if (Array.isArray(view.commands) && view.commands.length) {
-        for (const c of view.commands) card.appendChild(buildCommandRow(c));
-      }
-
-      body.appendChild(card);
-    }
-
-    return turns.length;
-  }
-
-  /** 汇总一轮里读了哪些、改了哪些文件。 */
-  function collectRoundFiles(turn) {
-    const read = [];
-    const changed = [];
-    const seenR = new Set();
-    const seenC = new Set();
-
-    for (const step of turn.steps ?? []) {
-      for (const t of step.tools ?? []) {
-        if (!t.path || t.done === false) continue;
-        if (t.ok && t.name === 'read_file' && !seenR.has(t.path)) {
-          seenR.add(t.path);
-          read.push(t.path);
-        }
-        if ((t.name === 'write_file' || t.name === 'delete_file') && !seenC.has(t.path)) {
-          seenC.add(t.path);
-          changed.push(t.path);
-        }
-      }
-    }
-    return { read, changed };
-  }
-
-  /**
    * 思考过程行：默认折叠成一行「思考过程（N 字）」，点开铺开正文。
    *
    * 为什么默认不展开（2026-11 定的）：
@@ -1477,27 +1453,6 @@
     return row;
   }
 
-  /** 「已读取 / 已修改」聚合行。 */
-  function buildFilesRow(label, paths) {
-    const row = document.createElement('div');
-    row.className = 'wsTraceItem is-files';
-
-    const icon = document.createElement('span');
-    icon.className = 'wsTraceIcon';
-    icon.textContent = '⌗';
-
-    const text = document.createElement('span');
-    text.className = 'wsTraceText wsTraceFiles';
-    // 文件多的时候别撑爆一行，只列前几个
-    const shown = paths.slice(0, 4).join(' · ');
-    const more = paths.length > 4 ? ` 等 ${paths.length} 个` : '';
-    text.textContent = `${label} ${paths.length} 个文件：${shown}${more}`;
-
-    row.appendChild(icon);
-    row.appendChild(text);
-    return row;
-  }
-
   /** 执行命令行（等宽字体）。当前没有 shell 工具，这条路暂时不会走到。 */
   function buildCommandRow(c) {
     const row = document.createElement('div');
@@ -1547,8 +1502,9 @@
   MP.createTrace = function () {
     const el = document.createElement('div');
     el.className = 'wsTrace';
+    el.classList.add('live');
 
-    // 头部：一行摘要 + 折叠箭头。默认折叠（只显示当前动作）
+    // 头部：一行摘要 + 折叠箭头。默认折叠
     const head = document.createElement('button');
     head.type = 'button';
     head.className = 'wsTraceHead';
@@ -1559,15 +1515,9 @@
     const nowEl = head.querySelector('.wsTraceNow');
     const timeEl = head.querySelector('.wsTraceTime');
 
-    // 展开后的完整时间线
+    // 主体：和 buildTraceFromTask 一样，**一个容器按 blocks 顺序平铺**
     const body = document.createElement('div');
-    body.className = 'wsTraceBody';
-    body.hidden = true;
-
-    // 列表容器：只建一次，之后只改内容
-    const list = document.createElement('div');
-    list.className = 'wsTraceList';
-    body.appendChild(list);
+    body.className = 'wsTraceBody wsTraceFlow';
 
     el.appendChild(head);
     el.appendChild(body);
@@ -1578,10 +1528,8 @@
 
     head.addEventListener('click', () => {
       expanded = !expanded;
-      body.hidden = !expanded;
       el.classList.toggle('open', expanded);
       head.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-      // 首次展开才画：折叠状态下不浪费 DOM（长对话能省几十个节点）
       if (expanded && lastView) paint(lastView);
     });
 
@@ -1597,25 +1545,54 @@
     timer = setInterval(tick, 500);
 
     /**
-     * 用 view 重画列表。
+     * 用 view 重画。
      *
-     * 只在这一步做 DOM 写入，实时和历史走的是同一个 renderTraceView。
+     * **和 buildTraceFromTask 共用同一套结构**（单容器顺序平铺），
+     * 差别只是这里要处理「数据一直在长」：每次重画都会重建 DOM，
+     * 所以要把之前展开过的条目记下来，重画后恢复，否则每 300ms
+     * 轮询一次就把用户刚点开的思考又收回去。
      */
     function paint(view) {
-      renderTraceView(list, view, { live: view.running });
+      // 记住已展开条目的 key（用「kind + 首 32 字」当指纹，足够稳定）
+      const opened = new Set();
+      for (const node of body.querySelectorAll('.wsFlowNote.open')) {
+        opened.add(node.dataset.key ?? '');
+      }
+
+      body.textContent = '';
+
+      const turns = Array.isArray(view?.turns) ? view.turns : [];
+      for (const turn of turns) {
+        for (const b of turn.blocks ?? []) {
+          if (b.kind === 'text') {
+            const p = document.createElement('div');
+            p.className = 'wsFlowPara';
+            p.textContent = String(b.text ?? '');
+            body.appendChild(p);
+          } else {
+            const note = buildFlowNoteFromBlock(b);
+            if (!note) continue;
+            if (opened.has(note.dataset.key)) note.classList.add('open');
+            body.appendChild(note);
+          }
+        }
+        // 同上：不再追加「已读取/已修改 N 个文件」汇总行（派生数据，模型没输出）
+      }
+
+      // 有内容时才显示主体，否则只剩一行摘要
+      body.hidden = !expanded || !body.childNodes.length;
     }
 
     /** 后端没给 view 时的兜底提示：只出一次，别每 300ms 刷一遍。 */
     function warnNoView() {
       if (warnedNoView) return;
       warnedNoView = true;
-      list.innerHTML = '';
+      body.textContent = '';
       const tip = document.createElement('div');
       tip.className = 'wsTraceItem';
-      // 这句话要能让人**自己解决**问题。空白面板最麻烦的地方就是
-      // 用户完全不知道是版本不对、还是功能坏了。
       tip.textContent = '服务端还没重启，过程数据不可用：重启 node（npm start）后再刷新页面。';
-      list.appendChild(tip);
+      body.appendChild(tip);
+      body.hidden = false;
     }
 
     /**
@@ -1630,12 +1607,9 @@
       // 折叠状态下那行：优先用后端算好的「当前动作」
       nowEl.textContent = traceHeadText(view) || '正在思考…';
 
-      // 展开时才画时间线；折叠时顶上那行已经够了
       if (expanded && view) {
         paint(view);
       } else if (expanded && !view) {
-        // 后端没给 view：几乎一定是「服务端还是旧代码，没重启」。
-        // 以前这里会静默留白，用户只看到「展开后什么都没有」，猜不到原因。
         warnNoView();
       }
 
@@ -1664,8 +1638,7 @@
       nowEl.textContent = traceHeadText(view) || '已完成';
       // 右边那个总耗时也走 view，别用本地钟。
       // 本地钟量的是「从点发送到收到 done」，比后端记录的步耗时之和大
-      // （多出排队、收尾、轮询间隔），刷新前后会差个一两秒 ——
-      // 用户对这种「同一个任务两个时长」很敏感。
+      //（多出排队、收尾、轮询间隔），刷新前后会差个一两秒。
       timeEl.textContent = view?.totals?.ms > 0
         ? fmtMs(view.totals.ms)
         : fmtMs(Date.now() - startedAt);
@@ -1681,6 +1654,30 @@
 
     return { el, update, finish };
   };
+
+  /**
+   * 从一个 block 造出「注记」条目（实时和历史共用）。
+   * 返回的元素带 data-key，用于重画时恢复展开状态。
+   */
+  function buildFlowNoteFromBlock(b) {
+    if (b.kind === 'reasoning') {
+      const text = String(b.text ?? '');
+      const note = buildFlowNote('reason', `思考过程（${text.length} 字）`, text);
+      note.dataset.key = 'r:' + text.slice(0, 32);
+      return note;
+    }
+    if (b.kind === 'tool') {
+      const note = buildFlowNote('tool', toolLabel(b.tool), '', b.tool);
+      note.dataset.key = 't:' + (b.tool?.name ?? '') + (b.tool?.path ?? '');
+      return note;
+    }
+    if (b.kind === 'retry') {
+      const note = buildFlowNote('retry', '重试模型请求', '');
+      note.dataset.key = 'x:' + (b.step ?? '');
+      return note;
+    }
+    return null;
+  }
 
 
   MP.pushMessage = async function (opt) {
@@ -1765,8 +1762,11 @@
 
           // 正文气泡：只在真有文字可显示时才出现。
           // 没文字时什么都不做 —— 过程面板顶上那行「正在思考… 24.5s」已经够了。
+          // 正文已经在过程面板里流式显示了（wsFlowPara），
+          // 这里只在面板还没有正文时用气泡兜底，避免同一段话出现两遍。
           const hasText = Boolean(t.text && t.text.trim());
-          if (hasText && (t.status === 'running' || t.status === 'queued')) {
+          if (hasText && (t.status === 'running' || t.status === 'queued')
+            && !trace.el.querySelector('.wsFlowPara')) {
             showBubble();
             progressBubble.textContent = t.text;
             progressBubble.classList.add('streaming');
@@ -1777,16 +1777,23 @@
         },
       });
 
-      // 任务完成：收尾过程面板，气泡换成最终回复
+      // 任务完成：收尾过程面板。
+      //
+      // **正文不再重复显示在气泡里**（2026-11）：面板的 wsFlowPara 已经是正文，
+      // 再挂一个完整气泡就是同一段话读两遍。
+      // 只有「完全没有面板」（0 步、无思考无工具）时才用气泡兜底。
       trace.finish(task);
-      showBubble();
       progressBubble.classList.remove('stepping');
       progressBubble.classList.remove('streaming');
-      progressBubble.textContent = task.text || '（没有输出）';
-      // 被停止的任务单独标一下，用户一眼能看出「这轮是我停的」
-      if (task.status === 'cancelled') {
-        progressBubble.classList.add('stopped');
-        stopped = true;
+      if (trace.el.querySelector('.wsFlowPara')) {
+        progressBubble.hidden = true;
+      } else {
+        showBubble();
+        progressBubble.textContent = task.text || '（没有输出）';
+        if (task.status === 'cancelled') {
+          progressBubble.classList.add('stopped');
+          stopped = true;
+        }
       }
       if (list) list.scrollTop = list.scrollHeight;
 
