@@ -2058,6 +2058,24 @@ async function runAgentTask({
   /**
    * 把「还没落库的思考增量」追加成事件。
    *
+   * **每次调用都 push 一条新事件，绝不原地修改已有事件。**
+   *
+   * 这里踩过一个非常隐蔽的坑（2026-11）：
+   *   为了少写几行，曾经把新增量 `+=` 到数组末尾已有的事件对象上。
+   *   但 pushEvents 的增量游标是按**数组长度**算的：
+   *       const fresh = list.slice(appendedCount);
+   *       appendedCount = list.length;
+   *   原地修改后长度不变 → pushEvents 认为「没有新事件」→ **一个字节都不写**。
+   *   症状：库里只剩第一次 push 的那 2–3 个字，而内存和日志里是全的，
+   *   用户看到的就是「思考内容怎么缺了」。
+   *
+   *   想用 pop+push 或退游标来救都⾏不通：appendEvents 是 INSERT IGNORE
+   *   按 (task_id, seq) 写的，重写会换 seq 造成重复行。
+   *
+   * 写入频率用**节流**控制，而不是靠合并：
+   *   250ms 一次 ≈ 每秒 4 条，一段 20 秒的思考约 80 条事件，
+   *   完全可接受，也不再需要合并那套容易出错的逻辑。
+   *
    * @param {boolean} force 强制刷（工具开始/结束时用，保证顺序边界清晰）
    */
   const flushReasoning = (force = false) => {
@@ -2098,6 +2116,27 @@ async function runAgentTask({
     for (let i = 0; i < delta.length; i += CHUNK) {
       events.push({ type: 'text', text: delta.slice(i, i + CHUNK), at: now });
     }
+  };
+
+  /**
+   * **统一的落库调度**：永远按「思考 → 正文」的固定顺序刷。
+   *
+   * 为什么必须统一（这是本地代码引入错序的第二个根源）：
+   *   flushReasoning 和 flushText 各有一个 250ms 的节流计时器，
+   *   两者**独立触发**。思考往往比正文早开始几百毫秒，
+   *   于是可能出现「思考的剩余部分」比「正文」晚一个周期才落：
+   *       t=0   R1 落
+   *       t=120 T1 落
+   *       t=250 R2 落     ← 顺序变成 R1 T1 R2，界面就是「想/说/想」
+   *
+   *   上游网关本身是「整段思考推完才推正文」（实测确认），
+   *   所以只要我们**每次都先把思考刷完再刷正文**，落库顺序就和上游一致。
+   *
+   * @param {boolean} force 是否忽略节流立即刷（工具/轮次边界用）
+   */
+  const flushBoth = (force = false) => {
+    flushReasoning(force);
+    flushText(force);
   };
 
   try {
@@ -2152,19 +2191,31 @@ async function runAgentTask({
       onDelta: (text, kind) => {
         if (kind === 'reasoning') {
           reasoningBuf += text;
-          // 节流落库：思考往往持续几秒到几十秒，不刷的话前端只能看到「正在思考…」。
-          // 失败要静默（pushEvents 内部已 catch），不能让写库抖动打断生成。
-          if (reasoningBuf.length > reasoningFlushed) {
-            flushReasoning(false);
-            pushEvents(taskId, events);
-          }
+          // 思考**立即落库，不节流**。
+          //
+          // 为什么要去掉节流（2026-11 实测后改）：
+          //   以前思考也用 250ms 节流，结果 reasoning 被切成「前半段 / ... 后半段」
+          //   两次落库。而正文往往在这两次之间开始到达，最终顺序变成
+          //       R(前半) → T → R(后半)
+          //   这正是界面上「半句话 / 一段思考 / 另外半句」的成因。
+          //
+          //   上游网关本身是「整段思考推完才推正文」（实测 401 次 onDelta
+          //   的原始顺序是纯 R → T，没有交错），所以只要思考一到就落，
+          //   正文自然不会插到它中间。
+          //
+          //   写入频率：思考是 token 级推送，这里每个 chunk 都会落一次。
+          //   pushEvents 本身有 appendEvents 的批量 INSERT，且失败静默，
+          //   实测开销可接受（一轮通常几百次，每次一行）。
+          flushBoth(true);
+          pushEvents(taskId, events);
           return;
         }
         streamed += text;
         textBuf += text;
-        // 正文也节流落库（和思考同一个节奏），前端才能边流边看到这段话在长
+        // 正文保持节流（250ms）：它比思考长得多，逐 token 落库没必要。
+        // 走 flushBoth 是为了顺带把任何漏网的思考先刷出去（顺序保险）。
         if (textBuf.length > textFlushed) {
-          flushText(false);
+          flushBoth(false);
           pushEvents(taskId, events);
         }
         flushPartial();
@@ -2181,8 +2232,7 @@ async function runAgentTask({
         // 开始调工具了，说明这一轮的「说话」部分告一段落：立刻落一次
         flushPartial(true);
         // 思考和正文都要在工具之前落完，保证「先想、再说、再做」的顺序不乱
-        flushReasoning(true);
-        flushText(true);
+        flushBoth(true);
         // 进度写库失败不能影响主流程，吞掉
         updateProgress(taskId, step.step, progress, events).catch(() => {});
       },
@@ -2197,8 +2247,7 @@ async function runAgentTask({
         if (event.type === 'tool_start' || event.type === 'tool_end'
           || event.type === 'retry' || event.type === 'llm_start'
           || event.type === 'turn_end') {
-          flushReasoning(true);
-          flushText(true);
+          flushBoth(true);
         }
         events.push(event);
         // 工具跑完/模型开始思考/重试，都是值得立刻刷新的节点
@@ -2207,8 +2256,7 @@ async function runAgentTask({
     });
 
     // 收尾：最后一段思考和正文（可能还没节流出去）必须落库，否则刷新后少一截
-    flushReasoning(true);
-    flushText(true);
+    flushBoth(true);
     pushEvents(taskId, events);
 
     // 记一个版本（状态点）。语义是「改完之后的样子」，所以必须在循环结束后记。
